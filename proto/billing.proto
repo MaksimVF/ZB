@@ -1,0 +1,46 @@
+syntax = "proto3";
+option go_package = "./gen";
+package billing;
+
+message BillRequest {
+  string user_id = 1;
+  string request_id = 2;
+  string model = 3;
+  int32 tokens_used = 4;
+  double cost = 5;
+}
+message BillResponse {
+  bool success = 1;
+  double new_balance = 2;
+  string error = 3;
+}
+
+message ReserveRequest {
+  string user_id = 1;
+  string request_id = 2;
+  int32 tokens_estimate = 3;
+  double cost_estimate = 4;
+}
+message ReserveResponse {
+  bool success = 1;
+  string reservation_id = 2;
+  double remaining_balance = 3;
+  string error = 4;
+}
+
+message CommitRequest {
+  string reservation_id = 1;
+  int32 tokens_actual = 2;
+  double cost_actual = 3;
+}
+message CommitResponse {
+  bool success = 1;
+  double remaining_balance = 2;
+  string error = 3;
+}
+
+service BillingService {
+  rpc Charge (BillRequest) returns (BillResponse);
+  rpc Reserve (ReserveRequest) returns (ReserveResponse);
+  rpc Commit  (CommitRequest) returns (CommitResponse);
+}

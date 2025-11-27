@@ -1,0 +1,38 @@
+syntax = "proto3";
+option go_package = "./gen";
+package chat;
+
+message ChatMessage {
+  string role = 1;
+  string content = 2;
+}
+
+message ChatRequest {
+  string request_id = 1;
+  string model = 2;
+  repeated ChatMessage messages = 3;
+  float temperature = 4;
+  int32 max_tokens = 5;
+  bool stream = 6;
+}
+
+message ChatResponse {
+  string request_id = 1;
+  string full_text = 2;
+  string model = 3;
+  string provider = 4;
+  int32 tokens_used = 5;
+}
+
+message ChatResponseChunk {
+  string request_id = 1;
+  string chunk = 2;
+  bool is_final = 3;
+  string provider = 4;
+  int32 tokens_used = 5;
+}
+
+service ChatService {
+  rpc ChatCompletion (ChatRequest) returns (ChatResponse);
+  rpc ChatCompletionStream (ChatRequest) returns (stream ChatResponseChunk);
+}

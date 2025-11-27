@@ -1,0 +1,23 @@
+syntax = "proto3";
+option go_package = "./gen";
+package cache;
+
+message CacheGetRequest { string key = 1; }
+message CacheGetResponse { bool hit = 1; string value_json = 2; }
+
+message CacheSetRequest { string key = 1; string value_json = 2; int32 ttl_seconds = 3; }
+message CacheSetResponse { bool stored = 1; }
+
+message SemanticUpsertRequest { string id = 1; string text = 2; string value_json = 3; string model = 4; }
+message SemanticUpsertResponse { bool ok = 1; string id = 2; }
+
+message SemanticQueryRequest { string text = 1; string model = 2; int32 top_k = 3; float min_score = 4; }
+message SemanticHit { string id = 1; float score = 2; string value_json = 3; }
+message SemanticQueryResponse { repeated SemanticHit hits = 1; }
+
+service CacheService {
+  rpc Get (CacheGetRequest) returns (CacheGetResponse);
+  rpc Set (CacheSetRequest) returns (CacheSetResponse);
+  rpc SemanticUpsert (SemanticUpsertRequest) returns (SemanticUpsertResponse);
+  rpc SemanticQuery  (SemanticQueryRequest) returns (SemanticQueryResponse);
+}

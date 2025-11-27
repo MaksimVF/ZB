@@ -1,0 +1,22 @@
+version: "3.8"
+services:
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+  cache:
+    image: ghcr.io/redis/redis:7
+    command: ["redis-server"]
+  model-proxy:
+    build: ./services/model-proxy
+    ports: ["8100:8100"]
+  head:
+    build: ./services/head-go
+    ports: ["50055:50055","9001:9001"]
+    depends_on: ["model-proxy","cache"]
+  tail:
+    build: ./services/tail-go
+    ports: ["8000:8000"]
+    depends_on: ["head"]
+  ui:
+    build: ./ui
+    ports: ["3000:5173"]

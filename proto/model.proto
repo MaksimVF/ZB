@@ -1,0 +1,18 @@
+syntax = "proto3";
+option go_package = "./ervices/head-go/gen_model";
+package model;
+
+message GenRequest {
+  string request_id = 1;
+  string model = 2;
+  repeated string messages = 3;
+  float temperature = 4;
+  int32 max_tokens = 5;
+  bool stream = 6;
+}
+message GenResponse { string request_id = 1; string text = 2; int32 tokens_used = 3; }
+
+service ModelService {
+  rpc Generate (GenRequest) returns (GenResponse);
+  rpc GenerateStream (GenRequest) returns (stream GenResponse);
+}
