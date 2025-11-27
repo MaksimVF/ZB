@@ -1,0 +1,6 @@
+{
+  "CN": "head",
+  "key": { "algo": "rsa", "size": 2048 },
+  "names": [{ "C": "RU", "O": "MyCompany" }],
+  "hosts": ["localhost", "127.0.0.1", "head", "head.localhost"]
+}

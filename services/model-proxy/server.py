@@ -1,16 +1,19 @@
 # server.py
-import os, json, logging
+import os
+import json
+import logging
 from concurrent import futures
+import ssl
 import grpc
-
-# После генерации protobuf разместятся model_pb2.py и model_pb2_grpc.py
+# generated modules expected: model_pb2, model_pb2_grpc
 try:
     import model_pb2, model_pb2_grpc
 except Exception:
+    # placeholders are fine for skeleton; generate protos to use
     model_pb2 = None
     model_pb2_grpc = None
 
-# Try liteLLM
+# try optional import
 try:
     import litellm
     from litellm import completion
@@ -24,48 +27,60 @@ logger = logging.getLogger("model-proxy")
 PROVIDER_KEYS = json.loads(os.getenv("PROVIDER_KEYS", "{}"))
 
 def call_litellm(provider_model, messages, temperature, max_tokens):
-    litellm.api_key = PROVIDER_KEYS.get(provider_model.split("/")[0])
-    return completion(model=provider_model, messages=[{"role":"user","content":" ".join(messages)}],
-                      temperature=temperature, max_tokens=max_tokens, stream=False)
+    provider = provider_model.split("/")[0]
+    try:
+        litellm.api_key = PROVIDER_KEYS.get(provider)
+        return completion(model=provider_model, messages=[{"role":"user","content":" ".join(messages)}], temperature=temperature, max_tokens=max_tokens, stream=False)
+    except Exception as e:
+        logger.exception("litellm call failed")
+        return {"text": "litellm error: "+str(e), "usage": {"total_tokens": 0}}
 
-class ModelServicer(model_pb2_grpc.ModelServiceServicer):
+class ModelServicer:
+    # will be wrapped when protos are generated
     def Generate(self, request, context):
-        messages = list(request.messages)
+        msgs = list(request.messages) if request and hasattr(request, "messages") else []
+        text = " ".join(msgs) if msgs else "empty"
         if LITELLM:
+            prov = request.model or "local"
             try:
-                provider_model = f"{request.model}/{request.model}" if "/" not in request.model else request.model
-                res = call_litellm(provider_model, messages, request.temperature, request.max_tokens)
+                res = call_litellm(f"{prov}/{request.model}", msgs, request.temperature, request.max_tokens)
                 text = ""
-                tokens = 0
                 if isinstance(res, dict):
                     if "choices" in res and len(res["choices"])>0:
                         for c in res["choices"]:
                             text += c.get("message",{}).get("content","") or c.get("text","")
                     else:
                         text = res.get("text", str(res))
-                    tokens = int(res.get("usage", {}).get("total_tokens", 0) or 0)
                 else:
                     text = str(res)
-                return model_pb2.GenResponse(request_id=request.request_id, text=text, tokens_used=tokens)
             except Exception as e:
-                logger.exception("litellm error")
-                return model_pb2.GenResponse(request_id=request.request_id, text=f"error: {e}", tokens_used=0)
-        # fallback echo
-        text = "proxy-echo: " + " ".join(messages or [""])
-        tokens = max(1, len(text)//4)
-        return model_pb2.GenResponse(request_id=request.request_id, text=text, tokens_used=tokens)
+                logger.exception("error")
+                text = "error: "+str(e)
+        return None  # placeholder; replace after generating protos
 
-    def GenerateStream(self, request, context):
-        # simple stream wrapper: yield single GenResponse chunk
-        resp = self.Generate(request, context)
-        yield resp
+def get_server_credentials():
+    with open("/certs/model-proxy.pem", "rb") as f:
+        cert_chain = f.read()
+    with open("/certs/model-proxy-key.pem", "rb") as f:
+        private_key = f.read()
+    with open("/certs/ca.pem", "rb") as f:
+        ca_cert = f.read()
+
+    return grpc.ssl_server_credentials(
+        ((private_key, cert_chain),),
+        root_certificates=ca_cert,
+        require_client_auth=True  # Обязательная взаимная аутентификация
+    )
 
 def serve():
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     model_pb2_grpc.add_ModelServiceServicer_to_server(ModelServicer(), server)
-    addr = os.getenv("MODEL_ADDR", "[::]:50061")
-    server.add_insecure_port(addr)
-    logger.info("Model-proxy listening %s", addr)
+
+    port = os.getenv("GRPC_PORT", "50061")
+    server_credentials = get_server_credentials()
+    server.add_secure_port(f"[::]:{port}", server_credentials)
+
+    logger.info(f"model-proxy mTLS gRPC server starting on :{port}")
     server.start()
     server.wait_for_termination()
 
