@@ -1,0 +1,48 @@
+syntax = "proto3";
+option go_package = "./services/tail-go/batch-processor/pb";
+package batch;
+
+service BatchProcessor {
+  rpc SubmitBatch(SubmitBatchRequest) returns (SubmitBatchResponse);
+  rpc GetBatchStatus(GetBatchStatusRequest) returns (BatchStatus);
+  rpc GetBatchResults(GetBatchStatusRequest) returns (stream BatchResult);
+}
+
+message SubmitBatchRequest {
+  repeated BatchItem items = 1;
+  string mode = 2;  // "sync" или "async"
+}
+
+message BatchItem {
+  string model = 1;
+  repeated Message messages = 2;
+  string request_id = 3;
+}
+
+message Message {
+  string role = 1;
+  string content = 2;
+}
+
+message SubmitBatchResponse {
+  string batch_id = 1;
+  string status = 2;  // "processing" или "completed"
+}
+
+message GetBatchStatusRequest {
+  string batch_id = 1;
+}
+
+message BatchStatus {
+  string batch_id = 1;
+  string status = 2;     // "processing", "completed", "failed"
+  int64 created_at = 3;
+  int64 completed_at = 4;
+}
+
+message BatchResult {
+  string request_id = 1;
+  string response = 2;
+  int64 tokens_used = 3;
+  string error = 4;
+}
