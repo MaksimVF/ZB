@@ -1,0 +1,20 @@
+{
+  "gpt-4o": {
+    "input": 500,
+    "output": 1500,
+    "name": "GPT-4o",
+    "provider": "openai"
+  },
+  "claude-3-opus": {
+    "input": 1500,
+    "output": 7500,
+    "name": "Claude 3 Opus",
+    "provider": "anthropic"
+  },
+  "llama3-70b": {
+    "input": 20,
+    "output": 60,
+    "name": "Llama 3 70B",
+    "provider": "groq"
+  }
+}

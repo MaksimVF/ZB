@@ -1,39 +1,107 @@
+// services/gateway/handlers/chat.go
 package handlers
 
 import (
+"context"
 "encoding/json"
 "io"
+"log"
 "net/http"
-"llm-gateway-pro/services/gateway/internal/grpc"
+"llm-gateway-pro/services/gateway/internal/secrets" // ← наш общий helper
 )
 
-func ChatCompletion(headClient *grpc.HeadClient) http.HandlerFunc {
-return func(w http.ResponseWriter, r *http.Request) {
-var req struct {
-Model    string `json:"model"`
-Messages []struct {
+type OpenAIRequest struct {
+Model    string    `json:"model"`
+Messages []Message `json:"messages"`
+Stream   bool      `json:"stream,omitempty"`
+}
+
+type Message struct {
 Role    string `json:"role"`
 Content string `json:"content"`
-} `json:"messages"`
-Stream bool `json:"stream"`
 }
 
-json.NewDecoder(r.Body).Decode(&req)
+func ChatCompletion(w http.ResponseWriter, r *http.Request) {
+var req OpenAIRequest
+if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+return
+}
+
+// Определяем провайдера по модели
+provider, ok := modelToProvider[req.Model]
+if !ok {
+provider = "openai" // дефолт
+}
+
+// Получаем API-ключ из Vault через secret-service
+apiKey, err := secrets.Get(fmt.Sprintf("llm/%s/api_key", provider))
+if err != nil {
+log.Printf("Ошибка получения секрета %s: %v", provider, err)
+http.Error(w, `{"error":"internal configuration error"}`, http.StatusInternalServerError)
+return
+}
+
+// Формируем запрос к провайдеру
+providerURL := providerBaseURL[provider]
+client := &http.Client{Timeout: 180 * time.Second}
+
+// Пересылаем тело почти без изменений
+proxyReq, _ := http.NewRequest("POST", providerURL+"/v1/chat/completions", r.Body)
+proxyReq.Header.Set("Authorization", "Bearer "+apiKey)
+proxyReq.Header.Set("Content-Type", "application/json")
 
 if req.Stream {
-// стриминг через SSE
 w.Header().Set("Content-Type", "text/event-stream")
-stream, _ := headClient.Stream(r.Context(), req.Model, req.Messages)
-for chunk := range stream {
-io.WriteString(w, "data: "+chunk+"\n\n")
-if f, ok := w.(http.Flusher); ok {
-f.Flush()
+w.Header().Set("Cache-Control", "no-cache")
+w.Header().Set("Connection", "keep-alive")
+
+resp, err := client.Do(proxyReq)
+if err != nil {
+http.Error(w, `{"error":"provider unreachable"}`, http.StatusBadGateway)
+return
+}
+defer resp.Body.Close()
+
+scanner := bufio.NewScanner(resp.Body)
+for scanner.Scan() {
+line := scanner.Text()
+if strings.HasPrefix(line, "data: ") {
+io.WriteString(w, line+"\n\n")
+if flusher, ok := w.(http.Flusher); ok {
+flusher.Flush()
 }
 }
-io.WriteString(w, "data: [DONE]\n\n")
-} else {
-resp, _ := headClient.Completion(r.Context(), req.Model, req.Messages)
-json.NewEncoder(w).Encode(resp)
 }
+return
 }
+
+// Не стриминг — обычный запрос
+resp, err := client.Do(proxyReq)
+if err != nil {
+http.Error(w, `{"error":"provider error"}`, http.StatusBadGateway)
+return
 }
+defer resp.Body.Close()
+
+w.Header().Set("Content-Type", "application/json")
+w.WriteHeader(resp.StatusCode)
+io.Copy(w, resp.Body)
+}
+
+// Маппинги (можно вынести в config или Redis)
+var (
+modelToProvider = map[string]string{
+"gpt-4o":          "openai",
+"gpt-4-turbo":     "openai",
+"claude-3-opus":   "anthropic",
+"llama3-70b":      "groq",
+"gemini-pro":      "google",
+}
+providerBaseURL = map[string]string{
+"openai":     "https://api.openai.com",
+"anthropic":  "https://api.anthropic.com",
+"groq":       "https://api.groq.com/openai",
+"google":     "https://generativelanguage.googleapis.com",
+}
+)
