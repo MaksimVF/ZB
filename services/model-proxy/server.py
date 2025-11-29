@@ -56,14 +56,78 @@ class ModelServicer:
             except Exception as e:
                 logger.exception("error")
                 text = "error: "+str(e)
-        return None  # placeholder; replace after generating protos
+
+        # Create and return proper GenResponse
+        tokens_used = max(1, len(text) // 4)  # Simple token estimation
+        return model_pb2.GenResponse(
+            request_id=request.request_id if request and hasattr(request, "request_id") else "",
+            text=text,
+            tokens_used=tokens_used
+        )
+
+    def GenerateStream(self, request, context):
+        """Streaming version of Generate that yields multiple responses"""
+        msgs = list(request.messages) if request and hasattr(request, "messages") else []
+        text = " ".join(msgs) if msgs else "empty"
+
+        # For streaming, we'll split the response into chunks
+        if LITELLM:
+            prov = request.model or "local"
+            try:
+                res = call_litellm(f"{prov}/{request.model}", msgs, request.temperature, request.max_tokens)
+                if isinstance(res, dict):
+                    if "choices" in res and len(res["choices"])>0:
+                        # Yield each choice as a separate response
+                        for c in res["choices"]:
+                            chunk_text = c.get("message",{}).get("content","") or c.get("text","")
+                            if chunk_text:
+                                tokens_used = max(1, len(chunk_text) // 4)
+                                yield model_pb2.GenResponse(
+                                    request_id=request.request_id if request and hasattr(request, "request_id") else "",
+                                    text=chunk_text,
+                                    tokens_used=tokens_used
+                                )
+                    else:
+                        # Single response
+                        text = res.get("text", str(res))
+                        tokens_used = max(1, len(text) // 4)
+                        yield model_pb2.GenResponse(
+                            request_id=request.request_id if request and hasattr(request, "request_id") else "",
+                            text=text,
+                            tokens_used=tokens_used
+                        )
+                else:
+                    # Fallback for non-dict responses
+                    text = str(res)
+                    tokens_used = max(1, len(text) // 4)
+                    yield model_pb2.GenResponse(
+                        request_id=request.request_id if request and hasattr(request, "request_id") else "",
+                        text=text,
+                        tokens_used=tokens_used
+                    )
+            except Exception as e:
+                logger.exception("error")
+                error_text = "error: "+str(e)
+                yield model_pb2.GenResponse(
+                    request_id=request.request_id if request and hasattr(request, "request_id") else "",
+                    text=error_text,
+                    tokens_used=1
+                )
+        else:
+            # Fallback echo for non-litellm case
+            tokens_used = max(1, len(text) // 4)
+            yield model_pb2.GenResponse(
+                request_id=request.request_id if request and hasattr(request, "request_id") else "",
+                text=f"proxy-echo: {text}",
+                tokens_used=tokens_used
+            )
 
 def get_server_credentials():
-    with open("/certs/model-proxy.pem", "rb") as f:
+    with open("/workspace/ZB/certs/model-proxy.pem", "rb") as f:
         cert_chain = f.read()
-    with open("/certs/model-proxy-key.pem", "rb") as f:
+    with open("/workspace/ZB/certs/model-proxy-key.pem", "rb") as f:
         private_key = f.read()
-    with open("/certs/ca.pem", "rb") as f:
+    with open("/workspace/ZB/certs/ca.pem", "rb") as f:
         ca_cert = f.read()
 
     return grpc.ssl_server_credentials(
