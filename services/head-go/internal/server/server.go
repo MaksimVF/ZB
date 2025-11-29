@@ -64,7 +64,14 @@ func (s *HeadServer) Run() error {
         return fmt.Errorf("model client initialization failed: %w", err)
     }
 
-    srv := grpc.NewServer() // mTLS уже настроен на стороне клиента и сервера через credentials в Dial
+    // Load TLS credentials for mTLS
+    creds, err := loadServerTLSCredentials()
+    if err != nil {
+        log.Printf("Failed to load TLS credentials: %v", err)
+        return fmt.Errorf("failed to load TLS credentials: %w", err)
+    }
+
+    srv := grpc.NewServer(grpc.Creds(creds))
     gen.RegisterChatServiceServer(srv, s)
 
     lis, err := net.Listen("tcp", s.cfg.GRPCAddr)
@@ -80,6 +87,36 @@ func (s *HeadServer) Run() error {
     }
 
     return nil
+}
+
+// loadServerTLSCredentials loads gRPC TLS credentials with proper certificate validation
+func loadServerTLSCredentials() (credentials.TransportCredentials, error) {
+    // Load server certificate and key
+    serverCert, err := tls.LoadX509KeyPair("/certs/head.pem", "/certs/head-key.pem")
+    if err != nil {
+        return nil, fmt.Errorf("failed to load server certificate: %w", err)
+    }
+
+    // Load CA certificate for client verification
+    caCert, err := os.ReadFile("/certs/ca.pem")
+    if err != nil {
+        return nil, fmt.Errorf("failed to load CA certificate: %w", err)
+    }
+
+    certPool := x509.NewCertPool()
+    if !certPool.AppendCertsFromPEM(caCert) {
+        return nil, fmt.Errorf("failed to add CA certificate to pool")
+    }
+
+    // Create TLS config with proper validation
+    tlsConfig := &tls.Config{
+        Certificates: []tls.Certificate{serverCert},
+        ClientAuth:   tls.RequireAndVerifyClientCert,
+        ClientCAs:    certPool,
+        MinVersion:   tls.VersionTLS12,
+    }
+
+    return credentials.NewTLS(tlsConfig), nil
 }
 
 func (s *HeadServer) Shutdown(ctx context.Context) error {

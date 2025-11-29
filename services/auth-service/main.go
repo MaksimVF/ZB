@@ -63,16 +63,58 @@ r.HandleFunc("/api-keys", AuthMiddleware(ListAPIKeys)).Methods("GET")
 r.HandleFunc("/api-keys", AuthMiddleware(CreateAPIKey)).Methods("POST")
 r.HandleFunc("/balance", AuthMiddleware(GetBalance)).Methods("GET")
 
-// gRPC для gateway
+// gRPC для gateway с mTLS
 go func() {
-lis, _ := net.Listen("tcp", ":50051")
-s := grpc.NewServer()
+lis, err := net.Listen("tcp", ":50051")
+if err != nil {
+log.Fatalf("Failed to listen: %v", err)
+}
+
+creds, err := loadTLSCredentials()
+if err != nil {
+log.Fatalf("Failed to load TLS credentials: %v", err)
+}
+
+s := grpc.NewServer(grpc.Creds(creds))
 pb.RegisterAuthServiceServer(s, &server{})
-s.Serve(lis)
+log.Println("Auth service gRPC+mTLS listening on :50051")
+if err := s.Serve(lis); err != nil {
+log.Fatalf("gRPC server failed: %v", err)
+}
 }()
 
-log.Println("Auth service: HTTP :8081 | gRPC :50051")
-http.ListenAndServe(":8081", r)
+log.Println("Auth service: HTTP :8081 | gRPC+mTLS :50051")
+log.Fatal(http.ListenAndServe(":8081", r))
+}
+
+// loadTLSCredentials loads gRPC TLS credentials with proper certificate validation
+func loadTLSCredentials() (credentials.TransportCredentials, error) {
+// Load server certificate and key
+serverCert, err := tls.LoadX509KeyPair("/certs/auth-service.pem", "/certs/auth-service-key.pem")
+if err != nil {
+return nil, fmt.Errorf("failed to load server certificate: %w", err)
+}
+
+// Load CA certificate for client verification
+caCert, err := os.ReadFile("/certs/ca.pem")
+if err != nil {
+return nil, fmt.Errorf("failed to load CA certificate: %w", err)
+}
+
+certPool := x509.NewCertPool()
+if !certPool.AppendCertsFromPEM(caCert) {
+return nil, fmt.Errorf("failed to add CA certificate to pool")
+}
+
+// Create TLS config with proper validation
+tlsConfig := &tls.Config{
+Certificates: []tls.Certificate{serverCert},
+ClientAuth:   tls.RequireAndVerifyClientCert,
+ClientCAs:    certPool,
+MinVersion:   tls.VersionTLS12,
+}
+
+return credentials.NewTLS(tlsConfig), nil
 }
 
 // === HTTP API ===
