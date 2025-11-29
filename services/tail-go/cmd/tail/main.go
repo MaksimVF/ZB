@@ -18,8 +18,8 @@ import (
 
 pb "llm-gateway-pro/services/secret-service/pb" // <-- твой proto
 "llm-gateway-pro/services/gateway/handlers"
+	"llm-gateway-pro/services/tail-go/cmd/tail/middleware"
 )
-    "llm-gateway-pro/services/tail-go/cmd/tail/middleware"
 
 // Глобальные клиенты
 var (
@@ -63,6 +63,7 @@ mux.HandleFunc("POST /v1/batch", middleware.RateLimiter(handlers.BatchSubmit))
 mux.HandleFunc("POST /v1/embeddings", middleware.RateLimiter(handlers.Embeddings))
 mux.HandleFunc("POST /v1/agentic", middleware.RateLimiter(handlers.AgenticHandler))
 
+/*
 // Проверяем авторизацию
 conn, _ := grpc.Dial("auth-service:50051", grpc.WithInsecure())
 client := pb.NewAuthServiceClient(conn)
@@ -71,6 +72,7 @@ resp, _ := client.ValidateAPIKey(ctx, &pb.ValidateRequest{ApiKey: apiKey})
 if !resp.Valid { http.Error(w, "invalid key", 401); return }
 userID = resp.UserId
 balance = resp.Balance
+*/
 
 // Health check
 mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
