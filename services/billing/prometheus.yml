@@ -1,0 +1,52 @@
+
+
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'billing-core'
+    static_configs:
+      - targets: ['billing-core:50052']
+
+  - job_name: 'pricing-service'
+    static_configs:
+      - targets: ['pricing-service:50053']
+
+  - job_name: 'exchange-service'
+    static_configs:
+      - targets: ['exchange-service:50054']
+
+  - job_name: 'monitoring-service'
+    static_configs:
+      - targets: ['monitoring-service:50055']
+
+  - job_name: 'admin-service'
+    static_configs:
+      - targets: ['admin-service:50056']
+
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'grafana'
+    static_configs:
+      - targets: ['localhost:3000']
+
+  - job_name: 'loki'
+    static_configs:
+      - targets: ['localhost:3100']
+
+rule_files:
+  - "alerts.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['localhost:9093']
+
+
+
+
+
