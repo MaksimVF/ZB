@@ -180,50 +180,92 @@ return b
 
 // slidingWindow и tokenBucket — без изменений (рабочие)
 func slidingWindow(key string, limit int64, window time.Duration) bool {
-now := time.Now().UnixNano()
-cutoff := strconv.FormatInt(now-int64(window), 10)
+	now := time.Now().UnixNano()
+	cutoff := strconv.FormatInt(now-int64(window), 10)
 
-pipe := rdb.Pipeline()
-pipe.ZRemRangeByScore(ctx, key, "-inf", cutoff)
-pipe.ZCard(ctx, key)
-pipe.ZAdd(ctx, key, &redis.Z{Score: float64(now), Member: now})
-pipe.Expire(ctx, key, window+time.Minute)
-results, _ := pipe.Exec()
+	pipe := rdb.Pipeline()
+	pipe.ZRemRangeByScore(ctx, key, "-inf", cutoff)
+	pipe.ZCard(ctx, key)
+	pipe.ZAdd(ctx, key, &redis.Z{Score: float64(now), Member: now})
+	pipe.Expire(ctx, key, window+time.Minute)
+	results, err := pipe.Exec()
+	if err != nil {
+		log.Printf("Redis error in slidingWindow: %v", err)
+		// In case of Redis failure, allow the request to avoid complete service disruption
+		return true
+	}
 
-count, _ := results[1].(*redis.IntCmd).Result()
-return count < limit
+	countCmd, ok := results[1].(*redis.IntCmd)
+	if !ok {
+		log.Printf("Unexpected Redis response type in slidingWindow")
+		return true
+	}
+
+	count, err := countCmd.Result()
+	if err != nil {
+		log.Printf("Redis count error in slidingWindow: %v", err)
+		return true
+	}
+
+	return count < limit
 }
 
 func tokenBucket(key string, capacity, rate int64, period time.Duration) bool {
-now := time.Now().Unix()
+	now := time.Now().Unix()
 
-data, _ := rdb.HGetAll(ctx, key).Result()
-if len(data) == 0 {
-rdb.HSet(ctx, key, map[string]interface{}{
-"tokens":      capacity,
-"last_refill": now,
-})
-return true
-}
+	data, err := rdb.HGetAll(ctx, key).Result()
+	if err != nil {
+		if err != redis.Nil {
+			log.Printf("Redis error in tokenBucket: %v", err)
+		}
+		// Initialize new bucket on first access or Redis failure
+		err := rdb.HSet(ctx, key, map[string]interface{}{
+			"tokens":      capacity,
+			"last_refill": now,
+		}).Err()
+		if err != nil {
+			log.Printf("Redis initialization error in tokenBucket: %v", err)
+		}
+		return true
+	}
 
-tokens, _ := strconv.ParseFloat(data["tokens"], 64)
-lastRefill, _ := strconv.ParseInt(data["last_refill"], 10, 64)
+	tokens, err := strconv.ParseFloat(data["tokens"], 64)
+	if err != nil {
+		log.Printf("Token parse error in tokenBucket: %v", err)
+		return true
+	}
 
-elapsed := now - lastRefill
-add := float64(elapsed) * float64(rate) / float64(period.Seconds())
-tokens += add
-if tokens > float64(capacity) {
-tokens = float64(capacity)
-}
+	lastRefill, err := strconv.ParseInt(data["last_refill"], 10, 64)
+	if err != nil {
+		log.Printf("Last refill parse error in tokenBucket: %v", err)
+		return true
+	}
 
-if tokens < 1 {
-return false
-}
+	elapsed := now - lastRefill
+	add := float64(elapsed) * float64(rate) / float64(period.Seconds())
+	tokens += add
+	if tokens > float64(capacity) {
+		tokens = float64(capacity)
+	}
 
-tokens -= 1
-rdb.HSet(ctx, key, "tokens", tokens)
-rdb.HSet(ctx, key, "last_refill", now)
-return true
+	if tokens < 1 {
+		return false
+	}
+
+	tokens -= 1
+	err = rdb.HSet(ctx, key, "tokens", tokens).Err()
+	if err != nil {
+		log.Printf("Redis token update error in tokenBucket: %v", err)
+		// Allow request even if update fails
+		return true
+	}
+
+	err = rdb.HSet(ctx, key, "last_refill", now).Err()
+	if err != nil {
+		log.Printf("Redis last_refill update error in tokenBucket: %v", err)
+	}
+
+	return true
 }
 
 // AdminHandler handles HTTP requests for rate limit administration
