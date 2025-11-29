@@ -1,0 +1,26 @@
+
+
+
+
+
+syntax = "proto3";
+
+package rate_limiter;
+
+service RateLimiter {
+  rpc Check(CheckRequest) returns (CheckResponse);
+}
+
+message CheckRequest {
+  string authorization = 1;
+  string path = 2;
+}
+
+message CheckResponse {
+  bool allowed = 1;
+  uint32 retry_after_secs = 2;
+}
+
+
+
+

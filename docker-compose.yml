@@ -26,3 +26,23 @@ services:
   ui:
     build: ./ui
     ports: ["3000:5173"]
+
+  rate-limiter:
+    build:
+      context: .
+      dockerfile: services/rate-limiter/Dockerfile
+    ports:
+      - "50051:50051"
+    networks:
+      - default
+
+  gateway:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      - rate-limiter
+    networks:
+      - default
