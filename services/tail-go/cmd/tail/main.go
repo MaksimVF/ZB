@@ -19,6 +19,7 @@ import (
 pb "llm-gateway-pro/services/secret-service/pb" // <-- твой proto
 "llm-gateway-pro/services/gateway/handlers"
 )
+    "llm-gateway-pro/services/tail-go/cmd/tail/middleware"
 
 // Глобальные клиенты
 var (
@@ -56,11 +57,11 @@ go watchSecretsUpdates()
 mux := http.NewServeMux()
 
 // Публичные эндпоинты
-mux.HandleFunc("POST /v1/chat/completions", rateLimiterMiddleware(handlers.ChatCompletion))
-mux.HandleFunc("POST /v1/completions", rateLimiterMiddleware(handlers.ChatCompletion))
-mux.HandleFunc("POST /v1/batch", rateLimiterMiddleware(handlers.BatchSubmit))
-mux.HandleFunc("POST /v1/embeddings", rateLimiterMiddleware(handlers.Embeddings))
-mux.HandleFunc("POST /v1/agentic", rateLimiterMiddleware(handlers.AgenticHandler))
+mux.HandleFunc("POST /v1/chat/completions", middleware.RateLimiter(handlers.ChatCompletion))
+mux.HandleFunc("POST /v1/completions", middleware.RateLimiter(handlers.ChatCompletion))
+mux.HandleFunc("POST /v1/batch", middleware.RateLimiter(handlers.BatchSubmit))
+mux.HandleFunc("POST /v1/embeddings", middleware.RateLimiter(handlers.Embeddings))
+mux.HandleFunc("POST /v1/agentic", middleware.RateLimiter(handlers.AgenticHandler))
 
 // Проверяем авторизацию
 conn, _ := grpc.Dial("auth-service:50051", grpc.WithInsecure())

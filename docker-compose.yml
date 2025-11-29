@@ -22,7 +22,16 @@ services:
   tail:
     build: ./services/tail-go
     ports: ["8000:8000"]
-    depends_on: ["head"]
+    depends_on: ["head", "rate-limiter"]
   ui:
     build: ./ui
     ports: ["3000:5173"]
+
+  rate-limiter:
+    build:
+      context: .
+      dockerfile: services/rate-limiter/Dockerfile
+    ports:
+      - "50051:50051"
+    networks:
+      - default
