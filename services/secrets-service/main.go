@@ -2,57 +2,42 @@ package main
 
 import (
 "context"
-"crypto/aes"
-"crypto/cipher"
-"crypto/rand"
-"encoding/base64"
 "encoding/json"
 "log"
 "net"
 "net/http"
 "os"
-"sync"
 
-"github.com/go-redis/redis/v8"
+"github.com/hashicorp/vault/api"
 "google.golang.org/grpc"
 "google.golang.org/grpc/credentials"
 pb "llm-gateway-pro/services/secret-service/pb"
 )
 
-var (
-rdb        *redis.Client
-aesgcm     cipher.AEAD
-encryptOnce sync.Once
-masterKey   []byte
-)
+var vaultClient *api.Client
 
 type server struct{ pb.UnimplementedSecretServiceServer }
 
-func initEncryption() {
-key := os.Getenv("ENCRYPTION_MASTER_KEY")
-if key == "" {
-log.Fatal("ENCRYPTION_MASTER_KEY required")
+func init() {
+config := api.DefaultConfig()
+config.Address = os.Getenv("VAULT_ADDR") // http://vault:8200
+client, err := api.NewClient(config)
+if err != nil {
+log.Fatal(err)
 }
-var err error
-masterKey, err = base64.StdEncoding.DecodeString(key)
-if err != nil || len(masterKey) != 32 {
-log.Fatal("ENCRYPTION_MASTER_KEY must be 32-byte base64")
-}
-block, _ := aes.NewCipher(masterKey)
-aesgcm, _ = cipher.NewGCM(block)
+client.SetToken(os.Getenv("VAULT_TOKEN")) // token with proper rights
+vaultClient = client
 }
 
 // ===================== gRPC =====================
 func (s *server) GetSecret(ctx context.Context, req *pb.GetSecretRequest) (*pb.GetSecretResponse, error) {
-encrypted, err := rdb.HGet(ctx, "secrets", req.Name).Result()
-if err != nil {
+secret, err := vaultClient.Logical().Read("secret/data/" + req.Name)
+if err != nil || secret == nil {
 return nil, err
 }
-plaintext, err := decrypt(encrypted)
-if err != nil {
-return nil, err
-}
-return &pb.GetSecretResponse{Value: plaintext}, nil
+data := secret.Data["data"].(map[string]interface{})
+value := data["value"].(string)
+return &pb.GetSecretResponse{Value: value}, nil
 }
 
 // ===================== HTTP Admin API =====================
@@ -71,109 +56,48 @@ return
 
 switch r.Method {
 case http.MethodGet:
-secrets, _ := rdb.HGetAll(r.Context(), "secrets").Result()
-visible := map[string]string{}
-for k, v := range secrets {
-if dec, err := decrypt(v); err == nil && len(dec) > 8 {
-visible[k] = "sk-... " + dec[len(dec)-8:]
-} else {
-visible[k] = "invalid"
-}
-}
-json.NewEncoder(w).Encode(visible)
+secrets, _ := vaultClient.Logical().List("secret/metadata/llm")
+json.NewEncoder(w).Encode(secrets)
 
 case http.MethodPost:
 var input struct {
-Name  string `json:"name"`  // "openai.api_key"
+Path  string `json:"path"`  // "llm/openai/api_key"
 Value string `json:"value"`
 }
 json.NewDecoder(r.Body).Decode(&input)
-encrypted := encrypt(input.Value)
-rdb.HSet(r.Context(), "secrets", input.Name, encrypted)
-rdb.Publish(r.Context(), "secrets:updated", input.Name)
+_, err := vaultClient.Logical().Write("secret/data/"+input.Path, map[string]interface{}{
+"data": map[string]interface{}{"value": input.Value},
+})
+if err != nil {
+http.Error(w, err.Error(), 500)
+return
+}
 json.NewEncoder(w).Encode(map[string]string{"status": "saved"})
 
 case http.MethodDelete:
 name := r.URL.Path[len("/admin/api/secrets/"):]
-rdb.HDel(r.Context(), "secrets", name)
+_, err := vaultClient.Logical().Delete("secret/data/" + name)
+if err != nil {
+http.Error(w, err.Error(), 500)
+return
+}
 json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
 }
 }
 
-func encrypt(plain string) string {
-encryptOnce.Do(initEncryption)
-nonce := make([]byte, aesgcm.NonceSize())
-rand.Read(nonce)
-ciphertext := aesgcm.Seal(nonce, nonce, []byte(plain), nil)
-return base64.StdEncoding.EncodeToString(ciphertext)
-}
-
-func decrypt(encrypted string) (string, error) {
-encryptOnce.Do(initEncryption)
-data, _ := base64.StdEncoding.DecodeString(encrypted)
-nonceSize := aesgcm.NonceSize()
-nonce, ciphertext := data[:nonceSize], data[nonceSize:]
-plain, err := aesgcm.Open(nil, nonce, ciphertext, nil)
-return string(plain), err
-}
-
 func main() {
-rdb = redis.NewClient(&redis.Options{Addr: "redis:6379"})
-initEncryption()
+init()
 
-// gRPC сервер (mTLS)
-lis, err := net.Listen("tcp", ":50053")
-if err != nil {
-log.Fatalf("Failed to listen: %v", err)
-}
-
-creds, err := loadTLSCredentials()
-if err != nil {
-log.Fatalf("Failed to load TLS credentials: %v", err)
-}
-
+// gRPC (mTLS)
+lis, _ := net.Listen("tcp", ":50053")
+creds, _ := credentials.NewServerTLSFromFile("/certs/secret-service.pem", "/certs/secret-service-key.pem")
 grpcServer := grpc.NewServer(grpc.Creds(creds))
 pb.RegisterSecretServiceServer(grpcServer, &server{})
-go func() {
-log.Println("Secret service gRPC+mTLS listening on :50053")
-if err := grpcServer.Serve(lis); err != nil {
-log.Fatalf("gRPC server failed: %v", err)
-}
-}()
+go grpcServer.Serve(lis)
 
 // HTTP Admin API
 http.HandleFunc("/admin/api/secrets", adminHandler)
 http.HandleFunc("/admin/api/secrets/", adminHandler)
-log.Println("secret-service: gRPC+mTLS :50053, HTTP :8082")
+log.Println("secret-service: Vault + gRPC :50053 + HTTP :8082")
 log.Fatal(http.ListenAndServe(":8082", nil))
-}
-
-// loadTLSCredentials loads gRPC TLS credentials with proper certificate validation
-func loadTLSCredentials() (credentials.TransportCredentials, error) {
-// Load server certificate and key
-serverCert, err := tls.LoadX509KeyPair("/certs/secret-service.pem", "/certs/secret-service-key.pem")
-if err != nil {
-return nil, fmt.Errorf("failed to load server certificate: %w", err)
-}
-
-// Load CA certificate for client verification
-caCert, err := os.ReadFile("/certs/ca.pem")
-if err != nil {
-return nil, fmt.Errorf("failed to load CA certificate: %w", err)
-}
-
-certPool := x509.NewCertPool()
-if !certPool.AppendCertsFromPEM(caCert) {
-return nil, fmt.Errorf("failed to add CA certificate to pool")
-}
-
-// Create TLS config with proper validation
-tlsConfig := &tls.Config{
-Certificates: []tls.Certificate{serverCert},
-ClientAuth:   tls.RequireAndVerifyClientCert,
-ClientCAs:    certPool,
-MinVersion:   tls.VersionTLS12,
-}
-
-return credentials.NewTLS(tlsConfig), nil
 }
