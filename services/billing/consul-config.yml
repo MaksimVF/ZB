@@ -1,0 +1,115 @@
+
+
+
+
+
+version: '3.8'
+
+services:
+  consul:
+    image: consul:1.15.0
+    ports:
+      - "8500:8500"
+      - "8600:8600"
+    command: "agent -server -bootstrap-expect=1 -ui -bind=0.0.0.0 -client=0.0.0.0"
+    volumes:
+      - consul_data:/consul/data
+    environment:
+      - CONSUL_LOCAL_CONFIG={"leave_on_terminate": true}
+
+  billing-core:
+    build:
+      context: .
+      dockerfile: Dockerfile.billing_core
+    ports:
+      - "50052:50052"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=default-super-secret-key-2025
+      - ADMIN_KEY=default-admin-key-2025
+      - CONSUL_HTTP_ADDR=consul:8500
+    depends_on:
+      - consul
+      - redis
+
+  pricing-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.pricing_service
+    ports:
+      - "50053:50053"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=default-super-secret-key-2025
+      - ADMIN_KEY=default-admin-key-2025
+      - CONSUL_HTTP_ADDR=consul:8500
+    depends_on:
+      - consul
+      - redis
+
+  exchange-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.exchange_service
+    ports:
+      - "50054:50054"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=default-super-secret-key-2025
+      - ADMIN_KEY=default-admin-key-2025
+      - CONSUL_HTTP_ADDR=consul:8500
+    depends_on:
+      - consul
+      - redis
+
+  monitoring-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.monitoring_service
+    ports:
+      - "50055:50055"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=default-super-secret-key-2025
+      - ADMIN_KEY=default-admin-key-2025
+      - CONSUL_HTTP_ADDR=consul:8500
+    depends_on:
+      - consul
+      - redis
+
+  admin-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.admin_service
+    ports:
+      - "50056:50056"
+      - "50057:50057"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=default-super-secret-key-2025
+      - ADMIN_KEY=default-admin-key-2025
+      - STRIPE_WEBHOOK_SECRET=default-stripe-secret-2025
+      - CONSUL_HTTP_ADDR=consul:8500
+    depends_on:
+      - consul
+      - redis
+
+  redis:
+    image: redis:7.0-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  consul_data:
+  redis_data:
+
+
+
+
+
+
+
+
+
