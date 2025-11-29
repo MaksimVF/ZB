@@ -1,0 +1,103 @@
+
+
+
+
+
+
+groups:
+  - name: system_alerts
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service {{ $labels.job }} is down"
+          description: "Service has been down for more than 2 minutes"
+
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate in {{ $labels.job }}"
+          description: "Error rate is above 5% for the last 5 minutes"
+
+      - alert: HighLatency
+        expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (job)) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High latency in {{ $labels.job }}"
+          description: "95th percentile latency is above 1 second"
+
+      - alert: HighMemoryUsage
+        expr: process_resident_memory_bytes / 1024 / 1024 > 500
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage in {{ $labels.job }}"
+          description: "Memory usage is above 500MB"
+
+      - alert: HighCPUUsage
+        expr: rate(process_cpu_seconds_total[5m]) > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage in {{ $labels.job }}"
+          description: "CPU usage is above 80%"
+
+  - name: billing_alerts
+    rules:
+      - alert: LowBalance
+        expr: user_balance < 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low balance for user {{ $labels.user_id }}"
+          description: "User balance is below $10"
+
+      - alert: HighTokenUsage
+        expr: rate(tokens_used_total[1h]) > 1000000
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High token usage by user {{ $labels.user_id }}"
+          description: "User has used more than 1M tokens in the last hour"
+
+      - alert: ReservationTimeout
+        expr: reservation_age_seconds > 3600
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Reservation timeout for {{ $labels.user_id }}"
+          description: "Reservation has been active for more than 1 hour"
+
+      - alert: ExchangeRateStale
+        expr: time() - exchange_rate_last_update > 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Exchange rates are stale"
+          description: "Exchange rates haven't been updated in the last 24 hours"
+
+
+
+
+
+
+
+
+
+
+
+
