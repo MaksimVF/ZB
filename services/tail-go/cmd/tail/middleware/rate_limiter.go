@@ -7,8 +7,13 @@ package middleware
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 	"strconv"
@@ -22,9 +27,9 @@ var rateLimiterClient pb.RateLimiterClient
 
 func init() {
 	// Try to establish secure connection first
-	creds, err := credentials.NewClientTLSFromFile("/certs/rate-limiter.pem", "")
+	creds, err := loadTLSCredentials()
 	if err != nil {
-		log.Println("Failed to load rate-limiter TLS cert, falling back to insecure connection:", err)
+		log.Println("Failed to load TLS credentials, falling back to insecure connection:", err)
 		conn, err := grpc.Dial("rate-limiter:50051", grpc.WithInsecure())
 		if err != nil {
 			panic("cannot connect to rate-limiter: " + err.Error())
@@ -44,6 +49,27 @@ func init() {
 		return
 	}
 	rateLimiterClient = pb.NewRateLimiterClient(conn)
+}
+
+func loadTLSCredentials() (credentials.TransportCredentials, error) {
+	// Load the certificate from file
+	certPEMBlock, err := os.ReadFile("/certs/rate-limiter.pem")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read certificate: %w", err)
+	}
+
+	// Parse the certificate
+	certPool := x509.NewCertPool()
+	if !certPool.AppendCertsFromPEM(certPEMBlock) {
+		return nil, fmt.Errorf("failed to parse certificate")
+	}
+
+	// Create TLS config
+	tlsConfig := &tls.Config{
+		RootCAs: certPool,
+	}
+
+	return credentials.NewTLS(tlsConfig), nil
 }
 
 func RateLimiter(next http.HandlerFunc) http.HandlerFunc {
