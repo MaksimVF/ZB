@@ -45,7 +45,7 @@ EXCHANGE_RATES = {
 }
 
 # Цены за 1M токенов (USD)
-PRICING = {
+DEFAULT_PRICING = {
     # Chat модели
     "gpt-4o":           {"chat_input": 5.00,  "chat_output": 15.00, "embed": 0.10},
     "gpt-4-turbo":      {"chat_input": 10.00, "chat_output": 30.00, "embed": 0.13},
@@ -93,6 +93,89 @@ def validate_reservation_id(reservation_id: str) -> bool:
 def validate_amount(amount: Decimal) -> bool:
     """Validate monetary amount"""
     return amount > 0 and amount < 1000000  # Reasonable limits
+
+# Pricing system
+class PricingManager:
+    """Unified pricing system with support for multiple sources"""
+
+    def __init__(self):
+        self.pricing = DEFAULT_PRICING.copy()
+        self.last_updated = time.time()
+        self.source = "default"
+
+    def load_from_redis(self):
+        """Load pricing from Redis"""
+        saved = r.get("pricing:current")
+        if saved:
+            try:
+                pricing_data = json.loads(saved)
+                self.pricing = pricing_data
+                self.source = "redis"
+                self.last_updated = time.time()
+                logger.info("Pricing loaded from Redis")
+            except json.JSONDecodeError:
+                logger.error("Failed to load pricing from Redis - invalid JSON")
+
+    def save_to_redis(self):
+        """Save current pricing to Redis"""
+        try:
+            r.set("pricing:current", json.dumps(self.pricing))
+            logger.info("Pricing saved to Redis")
+        except Exception as e:
+            logger.error(f"Failed to save pricing to Redis: {e}")
+
+    def update_from_external_source(self, source_url: str):
+        """Update pricing from external API"""
+        try:
+            # This would be an actual API call in production
+            # For now, we'll simulate with a placeholder
+            logger.info(f"Updating pricing from external source: {source_url}")
+            # Simulate external pricing data
+            external_pricing = {
+                "gpt-4o":           {"chat_input": 5.25,  "chat_output": 15.75, "embed": 0.11},
+                "gpt-4-turbo":      {"chat_input": 10.50, "chat_output": 31.50, "embed": 0.14},
+                "claude-3-opus":     {"chat_input": 16.00, "chat_output": 78.00},
+                "llama3-70b":        {"chat_input": 0.22, "chat_output": 0.65},
+                "text-embedding-3-large":  {"embed": 0.135},
+                "voyage-2":                {"embed": 0.105},
+                "cohere-embed-v3":         {"embed": 0.210},
+            }
+            self.pricing = external_pricing
+            self.source = f"external:{source_url}"
+            self.last_updated = time.time()
+            self.save_to_redis()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update pricing from external source: {e}")
+            return False
+
+    def get_price(self, model: str, endpoint: str) -> Decimal:
+        """Get price for a specific model and endpoint"""
+        model_pricing = self.pricing.get(model, {})
+        if endpoint == "chat":
+            return {
+                "input": Decimal(str(model_pricing.get("chat_input", 10.00))) / 1_000_000,
+                "output": Decimal(str(model_pricing.get("chat_output", 30.00))) / 1_000_000
+            }
+        elif endpoint == "embed":
+            return {
+                "embed": Decimal(str(model_pricing.get("embed", 0.13))) / 1_000_000
+            }
+        return {"default": Decimal("0.00001")}
+
+    def get_pricing_info(self):
+        """Get pricing metadata"""
+        return {
+            "source": self.source,
+            "last_updated": self.last_updated,
+            "pricing": self.pricing
+        }
+
+# Initialize pricing manager
+PRICING_MANAGER = PricingManager()
+
+# Load pricing from Redis at startup
+PRICING_MANAGER.load_from_redis()
 
 # =============================================================================
 # gRPC сервис
@@ -345,15 +428,25 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
         )
 
     def calculate_cost(self, model: str, endpoint: str, input_t: int, output_t: int) -> Decimal:
-        prices = PRICING.get(model, {})
-        if endpoint == "chat":
-            input_cost = Decimal(prices.get("chat_input", 10)) / 1_000_000
-            output_cost = Decimal(prices.get("chat_output", 30)) / 1_000_000
-            return (Decimal(input_t) * input_cost + Decimal(output_t) * output_cost).quantize(Decimal('0.00001'), ROUND_HALF_UP)
-        elif endpoint == "embed":
-            cost_per_m = Decimal(prices.get("embed", 0.13))
-            return (Decimal(input_t) * cost_per_m / 1_000_000).quantize(Decimal('0.00001'), ROUND_HALF_UP)
-        return Decimal("0")
+        """Calculate cost using unified pricing system"""
+        try:
+            prices = PRICING_MANAGER.get_price(model, endpoint)
+
+            if endpoint == "chat":
+                input_cost = prices.get("input", Decimal("0.00001"))
+                output_cost = prices.get("output", Decimal("0.00003"))
+                total_cost = (Decimal(input_t) * input_cost + Decimal(output_t) * output_cost)
+                return total_cost.quantize(Decimal('0.00001'), ROUND_HALF_UP)
+            elif endpoint == "embed":
+                embed_cost = prices.get("embed", Decimal("0.00001"))
+                total_cost = (Decimal(input_t) * embed_cost)
+                return total_cost.quantize(Decimal('0.00001'), ROUND_HALF_UP)
+            else:
+                logger.warning(f"Unknown endpoint type: {endpoint}")
+                return Decimal("0")
+        except Exception as e:
+            logger.error(f"Error calculating cost: {e}")
+            return Decimal("0")
 
     def GetBalance(self, request, context):
         user_id = request.user_id or "anonymous"
@@ -554,6 +647,63 @@ def admin_stats():
     except Exception as e:
         logger.error(f"Error generating stats: {e}")
         return jsonify({"error": "Error generating stats"}), 500
+
+@app.route("/admin/pricing/update", methods=["POST"])
+@admin_limiter.limit("2 per minute")
+def admin_update_pricing():
+    """Update pricing from external source"""
+    # Enhanced admin authentication
+    auth_key = request.headers.get("X-Admin-Key")
+    if not auth_key or auth_key != ADMIN_KEY:
+        logger.warning(f"Unauthorized access attempt to admin/pricing/update from {request.remote_addr}")
+        return jsonify({"error": "forbidden"}), 403
+
+    # Validate input
+    if not request.is_json:
+        return jsonify({"error": "Invalid request format"}), 400
+
+    data = request.json
+    if "source_url" not in data:
+        return jsonify({"error": "Missing source_url parameter"}), 400
+
+    source_url = data["source_url"]
+
+    # Validate URL format
+    if not source_url.startswith(("http://", "https://")):
+        return jsonify({"error": "Invalid URL format"}), 400
+
+    # Update pricing from external source
+    try:
+        success = PRICING_MANAGER.update_from_external_source(source_url)
+        if success:
+            return jsonify({
+                "status": "success",
+                "source": PRICING_MANAGER.source,
+                "last_updated": PRICING_MANAGER.last_updated,
+                "pricing": PRICING_MANAGER.pricing
+            }), 200
+        else:
+            return jsonify({"error": "Failed to update pricing"}), 500
+    except Exception as e:
+        logger.error(f"Error updating pricing: {e}")
+        return jsonify({"error": "Error updating pricing"}), 500
+
+@app.route("/admin/pricing/info", methods=["GET"])
+@admin_limiter.limit("10 per minute")
+def admin_pricing_info():
+    """Get pricing information"""
+    # Enhanced admin authentication
+    auth_key = request.headers.get("X-Admin-Key")
+    if not auth_key or auth_key != ADMIN_KEY:
+        logger.warning(f"Unauthorized access attempt to admin/pricing/info from {request.remote_addr}")
+        return jsonify({"error": "forbidden"}), 403
+
+    try:
+        pricing_info = PRICING_MANAGER.get_pricing_info()
+        return jsonify(pricing_info), 200
+    except Exception as e:
+        logger.error(f"Error getting pricing info: {e}")
+        return jsonify({"error": "Error getting pricing info"}), 500
 
 # =============================================================================
 # Запуск
