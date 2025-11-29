@@ -1,0 +1,94 @@
+
+
+
+
+
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # System services
+  - job_name: 'head-go'
+    static_configs:
+      - targets: ['head-go:8080']
+
+  - job_name: 'tail-go'
+    static_configs:
+      - targets: ['tail-go:8081']
+
+  - job_name: 'ui'
+    static_configs:
+      - targets: ['ui:8082']
+
+  - job_name: 'auth'
+    static_configs:
+      - targets: ['auth:8083']
+
+  - job_name: 'proxy'
+    static_configs:
+      - targets: ['proxy:8084']
+
+  - job_name: 'secret'
+    static_configs:
+      - targets: ['secret:8085']
+
+  - job_name: 'rate-limiter'
+    static_configs:
+      - targets: ['rate-limiter:8086']
+
+  # Billing services
+  - job_name: 'billing-core'
+    static_configs:
+      - targets: ['billing-core:50052']
+
+  - job_name: 'pricing-service'
+    static_configs:
+      - targets: ['pricing-service:50053']
+
+  - job_name: 'exchange-service'
+    static_configs:
+      - targets: ['exchange-service:50054']
+
+  - job_name: 'monitoring-service'
+    static_configs:
+      - targets: ['monitoring-service:50055']
+
+  - job_name: 'admin-service'
+    static_configs:
+      - targets: ['admin-service:50056']
+
+  # Observability services
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'grafana'
+    static_configs:
+      - targets: ['localhost:3000']
+
+  - job_name: 'loki'
+    static_configs:
+      - targets: ['localhost:3100']
+
+  - job_name: 'jaeger'
+    static_configs:
+      - targets: ['localhost:14268']
+
+rule_files:
+  - "alerts.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['localhost:9093']
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,43 @@
+
+
+
+
+apiVersion: 1
+
+providers:
+  - name: 'Billing'
+    orgId: 1
+    folder: 'Billing'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards/billing
+
+dashboards:
+  - name: 'Billing Overview'
+    url: 'https://raw.githubusercontent.com/MaksimVF/ZB/main/services/billing/dashboards/billing-overview.json'
+    datasource: 'Prometheus'
+
+  - name: 'Service Health'
+    url: 'https://raw.githubusercontent.com/MaksimVF/ZB/main/services/billing/dashboards/service-health.json'
+    datasource: 'Prometheus'
+
+  - name: 'Usage Metrics'
+    url: 'https://raw.githubusercontent.com/MaksimVF/ZB/main/services/billing/dashboards/usage-metrics.json'
+    datasource: 'Prometheus'
+
+  - name: 'Error Rates'
+    url: 'https://raw.githubusercontent.com/MaksimVF/ZB/main/services/billing/dashboards/error-rates.json'
+    datasource: 'Prometheus'
+
+  - name: 'Log Analysis'
+    url: 'https://raw.githubusercontent.com/MaksimVF/ZB/main/services/billing/dashboards/log-analysis.json'
+    datasource: 'Loki'
+
+
+
+
+
+
+
