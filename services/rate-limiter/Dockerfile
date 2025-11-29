@@ -31,6 +31,12 @@ FROM alpine:latest
 
 WORKDIR /app
 
+# Create certs directory
+RUN mkdir -p /certs
+
+# Copy certificates (these should be mounted in production)
+COPY certs/* /certs/ || true
+
 COPY --from=builder /rate-limiter .
 
 EXPOSE 50051
