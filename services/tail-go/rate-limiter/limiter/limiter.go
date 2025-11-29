@@ -19,10 +19,42 @@ pb "llm-gateway-pro/services/rate-limiter/pb"
 )
 
 var (
-rdb       = redis.NewClient(&redis.Options{Addr: "redis:6379"})
+rdb       = newRedisClient()
 ctx       = context.Background()
 jwtSecret = getJWTSecret() // Load from environment variable or secret service
 )
+
+// newRedisClient creates a Redis client with connection pooling and health checks
+func newRedisClient() *redis.Client {
+	options := &redis.Options{
+		Addr:         "redis:6379",
+		PoolSize:      100, // Connection pool size
+		MinIdleConns:  10,  // Minimum idle connections
+		MaxConnAge:    30 * time.Minute,
+		IdleTimeout:   5 * time.Minute,
+		ReadTimeout:   1 * time.Second,
+		WriteTimeout:  1 * time.Second,
+		DialTimeout:   5 * time.Second,
+		PoolTimeout:   5 * time.Second,
+	}
+
+	client := redis.NewClient(options)
+
+	// Test the connection
+	err := client.Ping(ctx).Err()
+	if err != nil {
+		log.Fatalf("Failed to connect to Redis: %v", err)
+	}
+
+	log.Println("Redis connection established successfully")
+	return client
+}
+
+// checkRedisHealth checks if Redis is healthy
+func checkRedisHealth() bool {
+	err := rdb.Ping(ctx).Err()
+	return err == nil
+}
 
 func getJWTSecret() []byte {
 	// Try to get from environment variable first
@@ -325,6 +357,12 @@ func tokenBucket(key string, capacity, rate int64, period time.Duration) bool {
 
 // AdminHandler handles HTTP requests for rate limit administration
 func AdminHandler(w http.ResponseWriter, r *http.Request) {
+	// Check Redis health first
+	if !checkRedisHealth() {
+		http.Error(w, "Redis is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
 		// Return current rate limits from Redis or defaults
