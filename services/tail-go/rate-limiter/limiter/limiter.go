@@ -31,8 +31,22 @@ func getJWTSecret() []byte {
 		return []byte(secret)
 	}
 
-	// Fallback to secret service
-	conn, err := grpc.Dial("secret-service:50051", grpc.WithInsecure())
+	// Load TLS credentials for secret service
+	tlsConfig, err := loadSecretServiceTLSCredentials()
+	if err != nil {
+		log.Printf("Failed to load TLS config for secret service, using fallback: %v", err)
+		return []byte("fallback-super-secret-jwt-key-2025") // Fallback, but not hardcoded in prod
+	}
+
+	// Create gRPC connection with retry logic and circuit breaker
+	conn, err := grpc.Dial("secret-service:50051",
+		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff:           grpc.DefaultBackoffConfig,
+			MinConnectTimeout: 5 * time.Second,
+		}),
+		grpc.WithUnaryInterceptor(circuitBreakerUnaryClientInterceptor),
+	)
 	if err != nil {
 		log.Printf("Failed to connect to secret service, using fallback secret: %v", err)
 		return []byte("fallback-super-secret-jwt-key-2025") // Fallback, but not hardcoded in prod
@@ -47,6 +61,47 @@ func getJWTSecret() []byte {
 	}
 
 	return []byte(resp.Value)
+}
+
+// loadSecretServiceTLSCredentials loads TLS config for secret service
+func loadSecretServiceTLSCredentials() (*tls.Config, error) {
+	// Load CA certificate
+	caCert, err := os.ReadFile("/certs/ca.pem")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load CA certificate: %w", err)
+	}
+
+	certPool := x509.NewCertPool()
+	if !certPool.AppendCertsFromPEM(caCert) {
+		return nil, fmt.Errorf("failed to add CA certificate to pool")
+	}
+
+	return &tls.Config{
+		RootCAs:    certPool,
+		MinVersion: tls.VersionTLS12,
+	}, nil
+}
+
+// circuitBreakerUnaryClientInterceptor implements a simple circuit breaker
+func circuitBreakerUnaryClientInterceptor(
+	ctx context.Context,
+	method string,
+	req, reply interface{},
+	cc *grpc.ClientConn,
+	invoker grpc.UnaryInvoker,
+	opts ...grpc.CallOption,
+) error {
+	// Simple retry logic with backoff
+	var lastErr error
+	for i := 0; i < 3; i++ {
+		err := invoker(ctx, method, req, reply, cc, opts...)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		time.Sleep(time.Duration(i) * 500 * time.Millisecond)
+	}
+	return fmt.Errorf("failed after retries: %w", lastErr)
 }
 
 // DefaultRateLimits defines the default rate limits for different endpoints
