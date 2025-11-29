@@ -1,0 +1,85 @@
+
+version: '3.8'
+
+services:
+  billing-core:
+    build:
+      context: .
+      dockerfile: Dockerfile.billing_core
+    ports:
+      - "50052:50052"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=default-super-secret-key-2025
+      - ADMIN_KEY=default-admin-key-2025
+    depends_on:
+      - redis
+
+  pricing-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.pricing_service
+    ports:
+      - "50053:50053"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=default-super-secret-key-2025
+      - ADMIN_KEY=default-admin-key-2025
+    depends_on:
+      - redis
+
+  exchange-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.exchange_service
+    ports:
+      - "50054:50054"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=default-super-secret-key-2025
+      - ADMIN_KEY=default-admin-key-2025
+    depends_on:
+      - redis
+
+  monitoring-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.monitoring_service
+    ports:
+      - "50055:50055"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=default-super-secret-key-2025
+      - ADMIN_KEY=default-admin-key-2025
+    depends_on:
+      - redis
+
+  admin-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.admin_service
+    ports:
+      - "50056:50056"
+      - "50057:50057"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=default-super-secret-key-2025
+      - ADMIN_KEY=default-admin-key-2025
+      - STRIPE_WEBHOOK_SECRET=default-stripe-secret-2025
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7.0-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
+
+
+
+
+
