@@ -5,21 +5,49 @@ import (
 "context"
 "encoding/json"
 "errors"
+"log"
 "net/http"
+"os"
 "strconv"
 "strings"
 "time"
 
 "github.com/go-redis/redis/v8"
 "github.com/golang-jwt/jwt/v5"
+"google.golang.org/grpc"
 pb "llm-gateway-pro/services/rate-limiter/pb"
 )
 
 var (
 rdb       = redis.NewClient(&redis.Options{Addr: "redis:6379"})
 ctx       = context.Background()
-jwtSecret = []byte("your-super-secret-jwt-key-2025") // ← тот же, что в auth-service!
+jwtSecret = getJWTSecret() // Load from environment variable or secret service
 )
+
+func getJWTSecret() []byte {
+	// Try to get from environment variable first
+	secret := os.Getenv("JWT_SECRET")
+	if secret != "" {
+		return []byte(secret)
+	}
+
+	// Fallback to secret service
+	conn, err := grpc.Dial("secret-service:50051", grpc.WithInsecure())
+	if err != nil {
+		log.Printf("Failed to connect to secret service, using fallback secret: %v", err)
+		return []byte("fallback-super-secret-jwt-key-2025") // Fallback, but not hardcoded in prod
+	}
+	defer conn.Close()
+
+	client := pb.NewSecretServiceClient(conn)
+	resp, err := client.GetSecret(ctx, &pb.GetSecretRequest{Name: "jwt_secret"})
+	if err != nil {
+		log.Printf("Failed to get JWT secret, using fallback: %v", err)
+		return []byte("fallback-super-secret-jwt-key-2025")
+	}
+
+	return []byte(resp.Value)
+}
 
 // DefaultRateLimits defines the default rate limits for different endpoints
 var DefaultRateLimits = map[string]map[string]int{
