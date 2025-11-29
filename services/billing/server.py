@@ -208,7 +208,7 @@ def validate_amount(amount: Decimal) -> bool:
 
 # Exchange rate manager
 class ExchangeRateManager:
-    """Automated exchange rate updater"""
+    """Automated exchange rate updater with admin currency management"""
 
     def __init__(self):
         self.rates = EXCHANGE_RATES.copy()
@@ -216,6 +216,7 @@ class ExchangeRateManager:
         self.update_interval = 3600  # 1 hour
         self.api_url = "https://api.exchangerate-api.com/v4/latest/USD"
         self.lock = threading.Lock()
+        self.supported_currencies = ["USD", "EUR", "RUB", "USDT", "GBP", "CNY", "JPY", "INR"]
 
     def fetch_exchange_rates(self):
         """Fetch exchange rates from external API"""
@@ -229,13 +230,22 @@ class ExchangeRateManager:
                 if "rates" not in data:
                     raise ExternalServiceError("Invalid exchange rate API response")
 
-                # Update rates
-                new_rates = {
-                    "USD": Decimal("1"),
-                    "EUR": Decimal(str(data["rates"].get("EUR", "0.92"))),
-                    "RUB": Decimal(str(data["rates"].get("RUB", "96.50"))),
-                    "USDT": Decimal("1")
-                }
+                # Update rates for supported currencies
+                new_rates = {"USD": Decimal("1")}  # USD is always 1
+
+                for currency in self.supported_currencies:
+                    if currency == "USD":
+                        continue
+                    if currency == "USDT":
+                        new_rates[currency] = Decimal("1")  # USDT is pegged to USD
+                    else:
+                        rate = data["rates"].get(currency)
+                        if rate:
+                            new_rates[currency] = Decimal(str(rate))
+                        else:
+                            logger.warning(f"Currency {currency} not found in API response, using default")
+                            # Keep existing rate or use default
+                            new_rates[currency] = self.rates.get(currency, Decimal("1"))
 
                 self.rates = new_rates
                 self.last_updated = int(time.time())
@@ -243,6 +253,7 @@ class ExchangeRateManager:
                 # Save to Redis
                 r.set("exchange_rates:current", json.dumps(new_rates))
                 r.set("exchange_rates:last_updated", self.last_updated)
+                r.set("exchange_rates:supported", json.dumps(self.supported_currencies))
 
                 logger.info(f"Exchange rates updated: {new_rates}")
                 return True
@@ -262,10 +273,13 @@ class ExchangeRateManager:
             with self.lock:
                 saved_rates = r.get("exchange_rates:current")
                 last_updated = r.get("exchange_rates:last_updated")
+                supported_currencies = r.get("exchange_rates:supported")
 
                 if saved_rates and last_updated:
                     self.rates = json.loads(saved_rates)
                     self.last_updated = int(last_updated)
+                    if supported_currencies:
+                        self.supported_currencies = json.loads(supported_currencies)
                     logger.info(f"Exchange rates loaded from Redis, last updated: {datetime.fromtimestamp(self.last_updated)}")
                     return True
                 return False
@@ -278,6 +292,60 @@ class ExchangeRateManager:
         if currency not in self.rates:
             raise ValidationError(f"Unsupported currency: {currency}")
         return self.rates[currency]
+
+    def add_currency(self, currency: str, rate: Decimal):
+        """Add a new currency to the system"""
+        if currency in self.rates:
+            raise ValidationError(f"Currency {currency} already exists")
+
+        if not currency.isalpha() or len(currency) != 3:
+            raise ValidationError(f"Invalid currency code: {currency}")
+
+        with self.lock:
+            self.rates[currency] = rate
+            self.supported_currencies.append(currency)
+
+            # Save to Redis
+            r.set("exchange_rates:current", json.dumps(self.rates))
+            r.set("exchange_rates:supported", json.dumps(self.supported_currencies))
+
+            logger.info(f"Added new currency: {currency} = {rate}")
+            return True
+
+    def remove_currency(self, currency: str):
+        """Remove a currency from the system"""
+        if currency == "USD" or currency == "USDT":
+            raise ValidationError("Cannot remove base currencies (USD, USDT)")
+
+        if currency not in self.rates:
+            raise ValidationError(f"Currency {currency} not found")
+
+        with self.lock:
+            del self.rates[currency]
+            self.supported_currencies.remove(currency)
+
+            # Save to Redis
+            r.set("exchange_rates:current", json.dumps(self.rates))
+            r.set("exchange_rates:supported", json.dumps(self.supported_currencies))
+
+            logger.info(f"Removed currency: {currency}")
+            return True
+
+    def update_currency_rate(self, currency: str, rate: Decimal):
+        """Update exchange rate for a specific currency"""
+        if currency not in self.rates:
+            raise ValidationError(f"Currency {currency} not found")
+
+        with self.lock:
+            self.rates[currency] = rate
+            self.last_updated = int(time.time())
+
+            # Save to Redis
+            r.set("exchange_rates:current", json.dumps(self.rates))
+            r.set("exchange_rates:last_updated", self.last_updated)
+
+            logger.info(f"Updated currency rate: {currency} = {rate}")
+            return True
 
     def start_auto_update(self):
         """Start automatic exchange rate updates"""
@@ -468,6 +536,9 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
         balance_key = f"balance:{user_id}"
         balance = Decimal(r.get(balance_key) or "0")
 
+        # Check user balance and alert if low
+        MONITORING.check_user_balance(user_id, balance)
+
         if balance < cost:
             raise BalanceError("Insufficient balance")
 
@@ -487,6 +558,9 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
         r.xadd("billing:log", tx)
         r.hincrby(f"usage:{user_id}:model:{model}", "direct", tokens_used)
         r.hincrby(f"usage:daily:{datetime.now():%Y-%m-%d}", model, tokens_used)
+
+        # Log transaction for monitoring
+        MONITORING.log_transaction("charge", cost, success=True)
 
         logger.info(f"Charged {cost:.5f} USD → {user_id} | {model} | {tokens_used} tokens")
         return billing_pb2.BillResponse(
@@ -534,6 +608,9 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
         balance_key = f"balance:{user_id}"
         balance = Decimal(r.get(balance_key) or "0")
 
+        # Check user balance and alert if low
+        MONITORING.check_user_balance(user_id, balance)
+
         if balance < estimated_cost:
             raise BalanceError("Insufficient balance")
 
@@ -562,6 +639,9 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
         # Deduct estimated amount from balance
         new_balance = balance - estimated_cost
         r.set(balance_key, str(new_balance))
+
+        # Log transaction for monitoring
+        MONITORING.log_transaction("reserve", estimated_cost, success=True)
 
         logger.info(f"Reserved {estimated_cost:.5f} USD → {user_id} | {reservation_id}")
         return billing_pb2.ReserveResponse(
@@ -653,6 +733,9 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
         r.hincrby(f"usage:{user_id}:model:{model}", endpoint, input_tokens_actual + output_tokens_actual)
         r.hincrby(f"usage:daily:{datetime.now():%Y-%m-%d}", model, input_tokens_actual + output_tokens_actual)
 
+        # Log transaction for monitoring
+        MONITORING.log_transaction("commit", actual_cost, success=True)
+
         logger.info(f"Committed {actual_cost:.5f} USD → {user_id} | {reservation_id}")
         return billing_pb2.CommitResponse(
             success=True,
@@ -691,6 +774,10 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
         validate_user_id(user_id)
 
         balance = Decimal(r.get(f"balance:{user_id}") or "0")
+
+        # Check user balance and alert if low
+        MONITORING.check_user_balance(user_id, balance)
+
         try:
             return billing_pb2.GetBalanceResponse(
                 balance_usd=float(balance),
@@ -725,6 +812,9 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
             "reason": reason,
             "timestamp": int(time.time())
         })
+
+        # Log transaction for monitoring
+        MONITORING.log_transaction("adjust", amount_usd, success=True)
 
         return billing_pb2.AdjustBalanceResponse(success=True, new_balance_usd=float(new))
 
@@ -998,26 +1088,111 @@ def admin_stats():
         logger.error(f"Error generating stats: {e}")
         raise ExternalServiceError("Error generating stats")
 
-@app.route("/admin/exchange-rates", methods=["GET"])
+@app.route("/admin/exchange-rates", methods=["GET", "POST", "PUT", "DELETE"])
 @admin_limiter.limit("10 per minute")
 @handle_http_errors
 def admin_exchange_rates():
-    """Get current exchange rates"""
+    """Manage exchange rates"""
     # Enhanced admin authentication
     auth_key = request.headers.get("X-Admin-Key")
     if not auth_key or auth_key != ADMIN_KEY:
         logger.warning(f"Unauthorized access attempt to admin/exchange-rates from {request.remote_addr}")
         raise AuthenticationError("Invalid admin key")
 
-    try:
-        return jsonify({
-            "rates": EXCHANGE_MANAGER.rates,
-            "last_updated": EXCHANGE_MANAGER.last_updated,
-            "source": "automated"
-        }), 200
-    except Exception as e:
-        logger.error(f"Error getting exchange rates: {e}")
-        raise ExternalServiceError("Error getting exchange rates")
+    if request.method == "GET":
+        # Get current exchange rates
+        try:
+            return jsonify({
+                "rates": EXCHANGE_MANAGER.rates,
+                "last_updated": EXCHANGE_MANAGER.last_updated,
+                "supported_currencies": EXCHANGE_MANAGER.supported_currencies,
+                "source": "automated"
+            }), 200
+        except Exception as e:
+            logger.error(f"Error getting exchange rates: {e}")
+            raise ExternalServiceError("Error getting exchange rates")
+
+    elif request.method == "POST":
+        # Add a new currency
+        if not request.is_json:
+            raise ValidationError("Invalid request format")
+
+        data = request.json
+        if "currency" not in data or "rate" not in data:
+            raise ValidationError("Missing required parameters")
+
+        currency = data["currency"]
+        try:
+            rate = Decimal(str(data["rate"]))
+        except (InvalidOperation, ValueError):
+            raise ValidationError("Invalid rate format")
+
+        try:
+            EXCHANGE_MANAGER.add_currency(currency, rate)
+            return jsonify({
+                "status": "success",
+                "currency": currency,
+                "rate": float(rate)
+            }), 201
+        except ValidationError as e:
+            raise
+        except Exception as e:
+            logger.error(f"Error adding currency: {e}")
+            raise ExternalServiceError("Error adding currency")
+
+    elif request.method == "PUT":
+        # Update an existing currency rate
+        if not request.is_json:
+            raise ValidationError("Invalid request format")
+
+        data = request.json
+        if "currency" not in data or "rate" not in data:
+            raise ValidationError("Missing required parameters")
+
+        currency = data["currency"]
+        try:
+            rate = Decimal(str(data["rate"]))
+        except (InvalidOperation, ValueError):
+            raise ValidationError("Invalid rate format")
+
+        try:
+            EXCHANGE_MANAGER.update_currency_rate(currency, rate)
+            return jsonify({
+                "status": "success",
+                "currency": currency,
+                "rate": float(rate)
+            }), 200
+        except ValidationError as e:
+            raise
+        except Exception as e:
+            logger.error(f"Error updating currency rate: {e}")
+            raise ExternalServiceError("Error updating currency rate")
+
+    elif request.method == "DELETE":
+        # Remove a currency
+        if not request.is_json:
+            raise ValidationError("Invalid request format")
+
+        data = request.json
+        if "currency" not in data:
+            raise ValidationError("Missing currency parameter")
+
+        currency = data["currency"]
+
+        try:
+            EXCHANGE_MANAGER.remove_currency(currency)
+            return jsonify({
+                "status": "success",
+                "currency": currency
+            }), 200
+        except ValidationError as e:
+            raise
+        except Exception as e:
+            logger.error(f"Error removing currency: {e}")
+            raise ExternalServiceError("Error removing currency")
+
+    else:
+        raise ValidationError("Unsupported HTTP method")
 
 @app.route("/admin/exchange-rates/update", methods=["POST"])
 @admin_limiter.limit("2 per minute")
@@ -1045,6 +1220,261 @@ def admin_update_exchange_rates():
     except Exception as e:
         logger.error(f"Error updating exchange rates: {e}")
         raise ExternalServiceError("Error updating exchange rates")
+
+@app.route("/admin/exchange-rates/sources", methods=["GET"])
+@admin_limiter.limit("10 per minute")
+@handle_http_errors
+def admin_exchange_rate_sources():
+    """Get available exchange rate sources"""
+    # Enhanced admin authentication
+    auth_key = request.headers.get("X-Admin-Key")
+    if not auth_key or auth_key != ADMIN_KEY:
+        logger.warning(f"Unauthorized access attempt to admin/exchange-rates/sources from {request.remote_addr}")
+        raise AuthenticationError("Invalid admin key")
+
+    # List of available exchange rate APIs
+    sources = [
+        {
+            "name": "exchangerate-api",
+            "url": "https://api.exchangerate-api.com/v4/latest/USD",
+            "description": "Free exchange rate API with hourly updates",
+            "currencies": ["USD", "EUR", "RUB", "GBP", "CNY", "JPY", "INR"]
+        },
+        {
+            "name": "openexchangerates",
+            "url": "https://openexchangerates.org/api/latest.json",
+            "description": "Paid exchange rate API with real-time updates",
+            "currencies": ["USD", "EUR", "RUB", "GBP", "CNY", "JPY", "INR"]
+        },
+        {
+            "name": "currencyapi",
+            "url": "https://api.currencyapi.com/v3/latest",
+            "description": "Paid exchange rate API with high accuracy",
+            "currencies": ["USD", "EUR", "RUB", "GBP", "CNY", "JPY", "INR"]
+        }
+    ]
+
+    return jsonify({
+        "sources": sources,
+        "current_source": EXCHANGE_MANAGER.api_url
+    }), 200
+
+@app.route("/admin/monitoring", methods=["GET"])
+@admin_limiter.limit("10 per minute")
+@handle_http_errors
+def admin_monitoring():
+    """Get monitoring metrics and alerts"""
+    # Enhanced admin authentication
+    auth_key = request.headers.get("X-Admin-Key")
+    if not auth_key or auth_key != ADMIN_KEY:
+        logger.warning(f"Unauthorized access attempt to admin/monitoring from {request.remote_addr}")
+        raise AuthenticationError("Invalid admin key")
+
+    try:
+        # Get metrics from monitoring system
+        metrics = MONITORING.get_metrics()
+
+        # Get recent alerts
+        alerts = []
+        try:
+            alert_stream = r.xrange("billing:alerts")
+            for alert in alert_stream:
+                alerts.append(alert)
+                if len(alerts) >= 10:  # Limit to 10 most recent alerts
+                    break
+        except Exception as e:
+            logger.error(f"Failed to get alerts: {e}")
+            alerts = []
+
+        # Get system health
+        system_health = {
+            "status": "healthy",
+            "redis_connected": r.ping() == b"PONG",
+            "last_exchange_update": EXCHANGE_MANAGER.last_updated,
+            "last_pricing_update": PRICING_MANAGER.last_updated,
+            "reservation_ttl": RESERVATION_TTL,
+            "reservation_ttl_healthy": RESERVATION_TTL >= MONITORING.alert_thresholds["reservation_ttl"]
+        }
+
+        return jsonify({
+            "metrics": metrics,
+            "alerts": alerts,
+            "system_health": system_health
+        }), 200
+    except Exception as e:
+        logger.error(f"Error getting monitoring data: {e}")
+        raise ExternalServiceError("Error getting monitoring data")
+
+@app.route("/admin/monitoring/alerts", methods=["GET"])
+@admin_limiter.limit("10 per minute")
+@handle_http_errors
+def admin_alerts():
+    """Get recent alerts"""
+    # Enhanced admin authentication
+    auth_key = request.headers.get("X-Admin-Key")
+    if not auth_key or auth_key != ADMIN_KEY:
+        logger.warning(f"Unauthorized access attempt to admin/monitoring/alerts from {request.remote_addr}")
+        raise AuthenticationError("Invalid admin key")
+
+    try:
+        alerts = []
+        alert_stream = r.xrange("billing:alerts")
+        for alert in alert_stream:
+            alerts.append(alert)
+            if len(alerts) >= 50:  # Limit to 50 most recent alerts
+                break
+
+        return jsonify({
+            "alerts": alerts,
+            "count": len(alerts)
+        }), 200
+    except Exception as e:
+        logger.error(f"Error getting alerts: {e}")
+        raise ExternalServiceError("Error getting alerts")
+
+@app.route("/admin/monitoring/thresholds", methods=["GET", "POST"])
+@admin_limiter.limit("5 per minute")
+@handle_http_errors
+def admin_monitoring_thresholds():
+    """Manage monitoring thresholds"""
+    # Enhanced admin authentication
+    auth_key = request.headers.get("X-Admin-Key")
+    if not auth_key or auth_key != ADMIN_KEY:
+        logger.warning(f"Unauthorized access attempt to admin/monitoring/thresholds from {request.remote_addr}")
+        raise AuthenticationError("Invalid admin key")
+
+    if request.method == "GET":
+        # Get current thresholds
+        return jsonify(MONITORING.alert_thresholds), 200
+
+    elif request.method == "POST":
+        # Update thresholds
+        if not request.is_json:
+            raise ValidationError("Invalid request format")
+
+        data = request.json
+        if not isinstance(data, dict):
+            raise ValidationError("Invalid thresholds format")
+
+        try:
+            with MONITORING.lock:
+                for key, value in data.items():
+                    if key in MONITORING.alert_thresholds:
+                        if key == "low_balance":
+                            MONITORING.alert_thresholds[key] = Decimal(str(value))
+                        else:
+                            MONITORING.alert_thresholds[key] = value
+                    else:
+                        logger.warning(f"Invalid threshold key: {key}")
+
+                logger.info(f"Updated monitoring thresholds: {MONITORING.alert_thresholds}")
+                return jsonify(MONITORING.alert_thresholds), 200
+        except Exception as e:
+            logger.error(f"Error updating thresholds: {e}")
+            raise ExternalServiceError("Error updating thresholds")
+
+# Monitoring and alerting
+class MonitoringSystem:
+    """Comprehensive monitoring and alerting system"""
+
+    def __init__(self):
+        self.alert_thresholds = {
+            "low_balance": Decimal("10.00"),  # Alert when user balance < $10
+            "high_usage": 1000000,  # Alert when token usage > 1M in 24h
+            "error_rate": 0.05,  # Alert when error rate > 5%
+            "reservation_ttl": 300,  # Alert when reservation TTL < 5 min
+        }
+        self.metrics = {
+            "total_requests": 0,
+            "successful_requests": 0,
+            "failed_requests": 0,
+            "total_charges": Decimal("0"),
+            "total_reservations": 0,
+            "total_commits": 0,
+            "last_alert": 0,
+            "alert_cooldown": 3600,  # 1 hour cooldown between alerts
+        }
+        self.lock = threading.Lock()
+
+    def log_transaction(self, tx_type: str, amount: Decimal = None, success: bool = True):
+        """Log a transaction for monitoring"""
+        with self.lock:
+            self.metrics["total_requests"] += 1
+            if success:
+                self.metrics["successful_requests"] += 1
+            else:
+                self.metrics["failed_requests"] += 1
+
+            if tx_type == "charge" and amount:
+                self.metrics["total_charges"] += amount
+            elif tx_type == "reserve":
+                self.metrics["total_reservations"] += 1
+            elif tx_type == "commit":
+                self.metrics["total_commits"] += 1
+
+            # Check for alerts
+            self.check_alerts()
+
+    def check_alerts(self):
+        """Check metrics and trigger alerts if needed"""
+        with self.lock:
+            now = time.time()
+            if now - self.metrics["last_alert"] < self.alert_cooldown:
+                return
+
+            # Calculate error rate
+            total = self.metrics["total_requests"]
+            if total > 0:
+                error_rate = self.metrics["failed_requests"] / total
+                if error_rate > self.alert_thresholds["error_rate"]:
+                    self.trigger_alert(f"High error rate: {error_rate:.2%}")
+                    return
+
+            # Check reservation TTL
+            if RESERVATION_TTL < self.alert_thresholds["reservation_ttl"]:
+                self.trigger_alert(f"Low reservation TTL: {RESERVATION_TTL} seconds")
+                return
+
+    def trigger_alert(self, message: str):
+        """Trigger an alert (log and optionally send notification)"""
+        with self.lock:
+            self.metrics["last_alert"] = time.time()
+            logger.warning(f"ALERT: {message}")
+
+            # In production, this could send to monitoring system
+            # or notification service (e.g., email, Slack, PagerDuty)
+            try:
+                alert_data = {
+                    "message": message,
+                    "timestamp": int(time.time()),
+                    "metrics": self.metrics
+                }
+                r.xadd("billing:alerts", alert_data)
+                logger.info("Alert logged to Redis")
+            except Exception as e:
+                logger.error(f"Failed to log alert: {e}")
+
+    def get_metrics(self):
+        """Get current metrics"""
+        with self.lock:
+            return {
+                "metrics": self.metrics,
+                "thresholds": self.alert_thresholds,
+                "last_alert": datetime.fromtimestamp(self.metrics["last_alert"]).isoformat() if self.metrics["last_alert"] > 0 else None
+            }
+
+    def check_user_balance(self, user_id: str, balance: Decimal):
+        """Check user balance and alert if low"""
+        if balance < self.alert_thresholds["low_balance"]:
+            self.trigger_alert(f"Low balance for user {user_id}: {balance:.2f} USD")
+
+    def check_usage(self, user_id: str, tokens: int, period: str = "24h"):
+        """Check token usage and alert if high"""
+        if tokens > self.alert_thresholds["high_usage"]:
+            self.trigger_alert(f"High usage for user {user_id}: {tokens} tokens in {period}")
+
+# Initialize monitoring system
+MONITORING = MonitoringSystem()
 
 # =============================================================================
 # Запуск
