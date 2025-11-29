@@ -53,7 +53,6 @@ func (s *RateLimiterServer) Run() error {
 }
 
 func (s *RateLimiterServer) Check(ctx context.Context, req *pb.CheckRequest) (*pb.CheckResponse, error) {
-	// Default limits - in a real implementation, these would come from config
 	path := req.GetPath()
 	auth := req.GetAuthorization()
 
@@ -114,6 +113,50 @@ func (s *RateLimiterServer) Check(ctx context.Context, req *pb.CheckRequest) (*p
 	return &pb.CheckResponse{
 		Allowed:          true,
 		RetryAfterSecs:   0,
+	}, nil
+}
+
+func (s *RateLimiterServer) SetLimit(ctx context.Context, req *pb.SetLimitRequest) (*pb.SetLimitResponse, error) {
+	path := req.GetPath()
+	authType := req.GetAuthType()
+	limit := req.GetLimit()
+
+	// Validate auth type
+	if authType != "jwt" && authType != "api_key" && authType != "anonymous" {
+		return &pb.SetLimitResponse{
+			Success: false,
+			Message: "Invalid auth_type. Must be 'jwt', 'api_key', or 'anonymous'",
+		}, nil
+	}
+
+	// Initialize path if not exists
+	if s.limits[path] == nil {
+		s.limits[path] = make(map[string]int)
+	}
+
+	// Set the limit
+	s.limits[path][authType] = int(limit)
+
+	return &pb.SetLimitResponse{
+		Success: true,
+		Message: fmt.Sprintf("Limit set for %s/%s: %d", path, authType, limit),
+	}, nil
+}
+
+func (s *RateLimiterServer) GetLimits(ctx context.Context, req *pb.GetLimitsRequest) (*pb.GetLimitsResponse, error) {
+	limits := make(map[string]*pb.LimitConfig)
+
+	for path, authLimits := range s.limits {
+		limits[path] = &pb.LimitConfig{
+			Path:          path,
+			JwtLimit:      int32(authLimits["jwt"]),
+			ApiKeyLimit:   int32(authLimits["api_key"]),
+			AnonymousLimit: int32(authLimits["anonymous"]),
+		}
+	}
+
+	return &pb.GetLimitsResponse{
+		Limits: limits,
 	}, nil
 }
 

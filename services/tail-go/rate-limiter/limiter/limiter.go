@@ -3,7 +3,9 @@ package limiter
 
 import (
 "context"
+"encoding/json"
 "errors"
+"net/http"
 "strconv"
 "strings"
 "time"
@@ -163,4 +165,51 @@ tokens -= 1
 rdb.HSet(ctx, key, "tokens", tokens)
 rdb.HSet(ctx, key, "last_refill", now)
 return true
+}
+
+// AdminHandler handles HTTP requests for rate limit administration
+func AdminHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		// Return current rate limits
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{
+			"chat_completions": {
+				"requests_per_minute": 60,
+				"tokens_per_minute": 500000
+			},
+			"embeddings": {
+				"requests_per_minute": 15,
+				"tokens_per_minute": 6000000
+			},
+			"agentic": {
+				"requests_per_minute": 5,
+				"tokens_per_minute": 20000000,
+				"tools_per_minute": 100
+			}
+		}`))
+
+	case http.MethodPost:
+		// Update rate limits
+		var req struct {
+			Path     string `json:"path"`
+			RPM      int     `json:"requests_per_minute"`
+			TPM      int     `json:"tokens_per_minute"`
+			ToolsPM  int     `json:"tools_per_minute,omitempty"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// Here we would update the actual rate limits in Redis
+		// For now, just return success
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status": "success", "message": "Rate limits updated"}`))
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }

@@ -9,6 +9,8 @@ package rate_limiter;
 
 service RateLimiter {
   rpc Check(CheckRequest) returns (CheckResponse);
+  rpc SetLimit(SetLimitRequest) returns (SetLimitResponse);
+  rpc GetLimits(GetLimitsRequest) returns (GetLimitsResponse);
 }
 
 message CheckRequest {
@@ -19,6 +21,32 @@ message CheckRequest {
 message CheckResponse {
   bool allowed = 1;
   uint32 retry_after_secs = 2;
+}
+
+message SetLimitRequest {
+  string path = 1;
+  string auth_type = 2; // "jwt", "api_key", "anonymous"
+  int32 limit = 3;     // requests per minute
+}
+
+message SetLimitResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message GetLimitsRequest {
+  // Empty request
+}
+
+message GetLimitsResponse {
+  map<string, LimitConfig> limits = 1;
+}
+
+message LimitConfig {
+  string path = 1;
+  int32 jwt_limit = 2;
+  int32 api_key_limit = 3;
+  int32 anonymous_limit = 4;
 }
 
 
