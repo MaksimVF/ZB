@@ -6,6 +6,7 @@ import logging
 import time
 import uuid
 import re
+import threading
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from datetime import datetime, timedelta
 from concurrent import futures
@@ -15,6 +16,7 @@ import grpc
 import redis
 import stripe
 import jwt
+import requests
 from flask import Flask, request, jsonify, render_template_string
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -203,6 +205,106 @@ def validate_amount(amount: Decimal) -> bool:
     if amount <= 0 or amount >= 1000000:
         raise ValidationError(f"Invalid amount: {amount}")
     return True
+
+# Exchange rate manager
+class ExchangeRateManager:
+    """Automated exchange rate updater"""
+
+    def __init__(self):
+        self.rates = EXCHANGE_RATES.copy()
+        self.last_updated = 0
+        self.update_interval = 3600  # 1 hour
+        self.api_url = "https://api.exchangerate-api.com/v4/latest/USD"
+        self.lock = threading.Lock()
+
+    def fetch_exchange_rates(self):
+        """Fetch exchange rates from external API"""
+        try:
+            with self.lock:
+                logger.info("Fetching exchange rates from external API")
+                response = requests.get(self.api_url, timeout=10)
+                response.raise_for_status()
+
+                data = response.json()
+                if "rates" not in data:
+                    raise ExternalServiceError("Invalid exchange rate API response")
+
+                # Update rates
+                new_rates = {
+                    "USD": Decimal("1"),
+                    "EUR": Decimal(str(data["rates"].get("EUR", "0.92"))),
+                    "RUB": Decimal(str(data["rates"].get("RUB", "96.50"))),
+                    "USDT": Decimal("1")
+                }
+
+                self.rates = new_rates
+                self.last_updated = int(time.time())
+
+                # Save to Redis
+                r.set("exchange_rates:current", json.dumps(new_rates))
+                r.set("exchange_rates:last_updated", self.last_updated)
+
+                logger.info(f"Exchange rates updated: {new_rates}")
+                return True
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to fetch exchange rates: {e}")
+            raise ExternalServiceError("Failed to fetch exchange rates")
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.error(f"Invalid exchange rate API response: {e}")
+            raise ExternalServiceError("Invalid exchange rate API response")
+        except Exception as e:
+            logger.error(f"Unexpected error fetching exchange rates: {e}")
+            raise ExternalServiceError("Failed to update exchange rates")
+
+    def load_from_redis(self):
+        """Load exchange rates from Redis"""
+        try:
+            with self.lock:
+                saved_rates = r.get("exchange_rates:current")
+                last_updated = r.get("exchange_rates:last_updated")
+
+                if saved_rates and last_updated:
+                    self.rates = json.loads(saved_rates)
+                    self.last_updated = int(last_updated)
+                    logger.info(f"Exchange rates loaded from Redis, last updated: {datetime.fromtimestamp(self.last_updated)}")
+                    return True
+                return False
+        except Exception as e:
+            logger.error(f"Failed to load exchange rates from Redis: {e}")
+            return False
+
+    def get_rate(self, currency: str) -> Decimal:
+        """Get exchange rate for a specific currency"""
+        if currency not in self.rates:
+            raise ValidationError(f"Unsupported currency: {currency}")
+        return self.rates[currency]
+
+    def start_auto_update(self):
+        """Start automatic exchange rate updates"""
+        def update_loop():
+            while True:
+                try:
+                    time.sleep(self.update_interval)
+                    self.fetch_exchange_rates()
+                except Exception as e:
+                    logger.error(f"Exchange rate update failed: {e}")
+                    time.sleep(60)  # Retry after 1 minute on failure
+
+        threading.Thread(target=update_loop, daemon=True, name="ExchangeRateUpdater").start()
+
+# Initialize exchange rate manager
+EXCHANGE_MANAGER = ExchangeRateManager()
+
+# Load exchange rates from Redis at startup
+try:
+    if not EXCHANGE_MANAGER.load_from_redis():
+        # Fetch fresh rates if not available in Redis
+        EXCHANGE_MANAGER.fetch_exchange_rates()
+except Exception as e:
+    logger.error(f"Failed to initialize exchange rates: {e}")
+
+# Start automatic exchange rate updates
+EXCHANGE_MANAGER.start_auto_update()
 
 # Pricing system
 class PricingManager:
@@ -589,11 +691,19 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
         validate_user_id(user_id)
 
         balance = Decimal(r.get(f"balance:{user_id}") or "0")
-        return billing_pb2.GetBalanceResponse(
-            balance_usd=float(balance),
-            balance_rub=float(balance * EXCHANGE_RATES["RUB"]),
-            balance_eur=float(balance * EXCHANGE_RATES["EUR"])
-        )
+        try:
+            return billing_pb2.GetBalanceResponse(
+                balance_usd=float(balance),
+                balance_rub=float(balance * EXCHANGE_MANAGER.get_rate("RUB")),
+                balance_eur=float(balance * EXCHANGE_MANAGER.get_rate("EUR"))
+            )
+        except ValidationError as e:
+            logger.error(f"Invalid currency in GetBalance: {e}")
+            return billing_pb2.GetBalanceResponse(
+                balance_usd=float(balance),
+                balance_rub=0,
+                balance_eur=0
+            )
 
     @handle_billing_errors
     def AdjustBalance(self, request, context):
@@ -887,6 +997,54 @@ def admin_stats():
     except Exception as e:
         logger.error(f"Error generating stats: {e}")
         raise ExternalServiceError("Error generating stats")
+
+@app.route("/admin/exchange-rates", methods=["GET"])
+@admin_limiter.limit("10 per minute")
+@handle_http_errors
+def admin_exchange_rates():
+    """Get current exchange rates"""
+    # Enhanced admin authentication
+    auth_key = request.headers.get("X-Admin-Key")
+    if not auth_key or auth_key != ADMIN_KEY:
+        logger.warning(f"Unauthorized access attempt to admin/exchange-rates from {request.remote_addr}")
+        raise AuthenticationError("Invalid admin key")
+
+    try:
+        return jsonify({
+            "rates": EXCHANGE_MANAGER.rates,
+            "last_updated": EXCHANGE_MANAGER.last_updated,
+            "source": "automated"
+        }), 200
+    except Exception as e:
+        logger.error(f"Error getting exchange rates: {e}")
+        raise ExternalServiceError("Error getting exchange rates")
+
+@app.route("/admin/exchange-rates/update", methods=["POST"])
+@admin_limiter.limit("2 per minute")
+@handle_http_errors
+def admin_update_exchange_rates():
+    """Manually update exchange rates"""
+    # Enhanced admin authentication
+    auth_key = request.headers.get("X-Admin-Key")
+    if not auth_key or auth_key != ADMIN_KEY:
+        logger.warning(f"Unauthorized access attempt to admin/exchange-rates/update from {request.remote_addr}")
+        raise AuthenticationError("Invalid admin key")
+
+    try:
+        success = EXCHANGE_MANAGER.fetch_exchange_rates()
+        if success:
+            return jsonify({
+                "status": "success",
+                "rates": EXCHANGE_MANAGER.rates,
+                "last_updated": EXCHANGE_MANAGER.last_updated
+            }), 200
+        else:
+            raise ExternalServiceError("Failed to update exchange rates")
+    except ExternalServiceError as e:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating exchange rates: {e}")
+        raise ExternalServiceError("Error updating exchange rates")
 
 # =============================================================================
 # Запуск
