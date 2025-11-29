@@ -122,15 +122,58 @@ rdb = redis.NewClient(&redis.Options{Addr: "redis:6379"})
 initEncryption()
 
 // gRPC сервер (mTLS)
-lis, _ := net.Listen("tcp", ":50053")
-creds, _ := credentials.NewServerTLSFromFile("/certs/secret-service.pem", "/certs/secret-service-key.pem")
+lis, err := net.Listen("tcp", ":50053")
+if err != nil {
+log.Fatalf("Failed to listen: %v", err)
+}
+
+creds, err := loadTLSCredentials()
+if err != nil {
+log.Fatalf("Failed to load TLS credentials: %v", err)
+}
+
 grpcServer := grpc.NewServer(grpc.Creds(creds))
 pb.RegisterSecretServiceServer(grpcServer, &server{})
-go grpcServer.Serve(lis)
+go func() {
+log.Println("Secret service gRPC+mTLS listening on :50053")
+if err := grpcServer.Serve(lis); err != nil {
+log.Fatalf("gRPC server failed: %v", err)
+}
+}()
 
 // HTTP Admin API
 http.HandleFunc("/admin/api/secrets", adminHandler)
 http.HandleFunc("/admin/api/secrets/", adminHandler)
-log.Println("secret-service: gRPC :50053 (mTLS), HTTP :8082")
+log.Println("secret-service: gRPC+mTLS :50053, HTTP :8082")
 log.Fatal(http.ListenAndServe(":8082", nil))
+}
+
+// loadTLSCredentials loads gRPC TLS credentials with proper certificate validation
+func loadTLSCredentials() (credentials.TransportCredentials, error) {
+// Load server certificate and key
+serverCert, err := tls.LoadX509KeyPair("/certs/secret-service.pem", "/certs/secret-service-key.pem")
+if err != nil {
+return nil, fmt.Errorf("failed to load server certificate: %w", err)
+}
+
+// Load CA certificate for client verification
+caCert, err := os.ReadFile("/certs/ca.pem")
+if err != nil {
+return nil, fmt.Errorf("failed to load CA certificate: %w", err)
+}
+
+certPool := x509.NewCertPool()
+if !certPool.AppendCertsFromPEM(caCert) {
+return nil, fmt.Errorf("failed to add CA certificate to pool")
+}
+
+// Create TLS config with proper validation
+tlsConfig := &tls.Config{
+Certificates: []tls.Certificate{serverCert},
+ClientAuth:   tls.RequireAndVerifyClientCert,
+ClientCAs:    certPool,
+MinVersion:   tls.VersionTLS12,
+}
+
+return credentials.NewTLS(tlsConfig), nil
 }
