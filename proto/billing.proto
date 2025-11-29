@@ -2,19 +2,18 @@ syntax = "proto3";
 option go_package = "./gen";
 package billing;
 
-message RecordUsageRequest {
+message BillRequest {
   string user_id = 1;
-  string model = 2;
-  string endpoint = 3;  // "chat", "embed", "batch"
-  int32 input_tokens = 4;
-  int32 output_tokens = 5;
+  string request_id = 2;
+  string model = 3;
+  int32 tokens_used = 4;
+  double cost = 5;
 }
 
-message RecordUsageResponse {
+message BillResponse {
   bool success = 1;
-  double cost_usd = 2;
-  double balance_usd = 3;
-  string error = 4;
+  double new_balance = 2;
+  string error = 3;
 }
 
 message ReserveRequest {
@@ -69,7 +68,7 @@ message AdjustBalanceResponse {
 }
 
 service BillingService {
-  rpc RecordUsage (RecordUsageRequest) returns (RecordUsageResponse);
+  rpc Charge (BillRequest) returns (BillResponse);
   rpc Reserve (ReserveRequest) returns (ReserveResponse);
   rpc Commit (CommitRequest) returns (CommitResponse);
   rpc GetBalance (GetBalanceRequest) returns (GetBalanceResponse);
