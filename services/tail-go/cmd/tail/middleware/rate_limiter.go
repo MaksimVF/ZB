@@ -7,6 +7,7 @@ package middleware
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -14,14 +15,33 @@ import (
 
 	pb "llm-gateway-pro/services/rate-limiter/pb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 var rateLimiterClient pb.RateLimiterClient
 
 func init() {
-	conn, err := grpc.Dial("rate-limiter:50051", grpc.WithInsecure())
+	// Try to establish secure connection first
+	creds, err := credentials.NewClientTLSFromFile("/certs/rate-limiter.pem", "")
 	if err != nil {
-		panic("cannot connect to rate-limiter: " + err.Error())
+		log.Println("Failed to load rate-limiter TLS cert, falling back to insecure connection:", err)
+		conn, err := grpc.Dial("rate-limiter:50051", grpc.WithInsecure())
+		if err != nil {
+			panic("cannot connect to rate-limiter: " + err.Error())
+		}
+		rateLimiterClient = pb.NewRateLimiterClient(conn)
+		return
+	}
+
+	conn, err := grpc.Dial("rate-limiter:50051", grpc.WithTransportCredentials(creds))
+	if err != nil {
+		log.Println("Failed to connect with TLS, falling back to insecure connection:", err)
+		conn, err := grpc.Dial("rate-limiter:50051", grpc.WithInsecure())
+		if err != nil {
+			panic("cannot connect to rate-limiter: " + err.Error())
+		}
+		rateLimiterClient = pb.NewRateLimiterClient(conn)
+		return
 	}
 	rateLimiterClient = pb.NewRateLimiterClient(conn)
 }

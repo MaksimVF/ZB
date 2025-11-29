@@ -35,10 +35,20 @@ func (s *RateLimiterServer) Run() error {
 		return err
 	}
 
-	grpcServer := grpc.NewServer()
+	// Load TLS credentials
+	creds, err := credentials.NewServerTLSFromFile("/certs/rate-limiter.pem", "/certs/rate-limiter-key.pem")
+	if err != nil {
+		log.Printf("Failed to load TLS credentials: %v. Running without TLS.", err)
+		grpcServer := grpc.NewServer()
+		pb.RegisterRateLimiterServer(grpcServer, s)
+		log.Println("Rate limiter service running on :50051 (no TLS)")
+		return grpcServer.Serve(lis)
+	}
+
+	grpcServer := grpc.NewServer(grpc.Creds(creds))
 	pb.RegisterRateLimiterServer(grpcServer, s)
 
-	log.Println("Rate limiter service running on :50051")
+	log.Println("Rate limiter service running on :50051 (TLS enabled)")
 	return grpcServer.Serve(lis)
 }
 
