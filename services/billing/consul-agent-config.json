@@ -1,0 +1,67 @@
+
+
+
+
+
+
+
+{
+  "server": true,
+  "bootstrap_expect": 1,
+  "ui": true,
+  "bind_addr": "0.0.0.0",
+  "client_addr": "0.0.0.0",
+  "data_dir": "/consul/data",
+  "log_level": "INFO",
+  "enable_syslog": true,
+  "retry_join": ["consul"],
+  "retry_interval": "5s",
+  "retry_max": 0,
+  "datacenter": "dc1",
+  "domain": "consul",
+  "enable_debug": false,
+  "leave_on_terminate": true,
+  "skip_leave_on_interrupt": false,
+  "ports": {
+    "dns": 8600,
+    "http": 8500,
+    "https": -1,
+    "grpc": 8502,
+    "serf_lan": 8301,
+    "serf_wan": 8302,
+    "server": 8300
+  },
+  "addresses": {
+    "http": "0.0.0.0",
+    "https": "0.0.0.0",
+    "grpc": "0.0.0.0",
+    "dns": "0.0.0.0"
+  },
+  "connect": {
+    "enabled": true
+  },
+  "telemetry": {
+    "prometheus_retention_time": "24h",
+    "disable_hostname": true
+  },
+  "limits": {
+    "http_max_conns_per_client": 200,
+    "rpc_max_conns_per_client": 200
+  },
+  "performance": {
+    "raft_multiplier": 1
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
