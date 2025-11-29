@@ -2,45 +2,76 @@ syntax = "proto3";
 option go_package = "./gen";
 package billing;
 
-message BillRequest {
+message RecordUsageRequest {
   string user_id = 1;
-  string request_id = 2;
-  string model = 3;
-  int32 tokens_used = 4;
-  double cost = 5;
+  string model = 2;
+  string endpoint = 3;  // "chat", "embed", "batch"
+  int32 input_tokens = 4;
+  int32 output_tokens = 5;
 }
-message BillResponse {
+
+message RecordUsageResponse {
   bool success = 1;
-  double new_balance = 2;
-  string error = 3;
+  double cost_usd = 2;
+  double balance_usd = 3;
+  string error = 4;
 }
 
 message ReserveRequest {
   string user_id = 1;
   string request_id = 2;
-  int32 tokens_estimate = 3;
-  double cost_estimate = 4;
+  string model = 3;
+  string endpoint = 4;  // "chat", "embed", "batch"
+  int32 input_tokens_estimate = 5;
+  int32 output_tokens_estimate = 6;
 }
+
 message ReserveResponse {
   bool success = 1;
   string reservation_id = 2;
-  double remaining_balance = 3;
-  string error = 4;
+  double reserved_amount = 3;
+  double remaining_balance = 4;
+  string error = 5;
 }
 
 message CommitRequest {
   string reservation_id = 1;
-  int32 tokens_actual = 2;
-  double cost_actual = 3;
+  int32 input_tokens_actual = 2;
+  int32 output_tokens_actual = 3;
 }
+
 message CommitResponse {
   bool success = 1;
-  double remaining_balance = 2;
-  string error = 3;
+  double final_cost = 2;
+  double remaining_balance = 3;
+  string error = 4;
+}
+
+message GetBalanceRequest {
+  string user_id = 1;
+}
+
+message GetBalanceResponse {
+  double balance_usd = 1;
+  double balance_rub = 2;
+  double balance_eur = 3;
+}
+
+message AdjustBalanceRequest {
+  string user_id = 1;
+  double amount_usd = 2;
+  string reason = 3;
+}
+
+message AdjustBalanceResponse {
+  bool success = 1;
+  double new_balance_usd = 2;
 }
 
 service BillingService {
-  rpc Charge (BillRequest) returns (BillResponse);
+  rpc RecordUsage (RecordUsageRequest) returns (RecordUsageResponse);
   rpc Reserve (ReserveRequest) returns (ReserveResponse);
-  rpc Commit  (CommitRequest) returns (CommitResponse);
+  rpc Commit (CommitRequest) returns (CommitResponse);
+  rpc GetBalance (GetBalanceRequest) returns (GetBalanceResponse);
+  rpc AdjustBalance (AdjustBalanceRequest) returns (AdjustBalanceResponse);
 }
