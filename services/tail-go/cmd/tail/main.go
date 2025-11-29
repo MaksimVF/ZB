@@ -145,11 +145,44 @@ return resp.Value, nil
 
 // Фоновая подписка на обновления секретов
 func watchSecretsUpdates() {
-pubsub := redisClient.Subscribe(context.Background(), "secrets:updated")
-defer pubsub.Close()
+	retryDelay := 5 * time.Second
+	maxRetryDelay := 60 * time.Second
 
-for msg := range pubsub.Channel() {
-log.Printf("Секрет обновлён: %s — очищаем кэш", msg.Payload)
-secretsCache.Delete(msg.Payload)
-}
+	for {
+		log.Println("Connecting to Redis for secret updates...")
+		pubsub := redisClient.Subscribe(context.Background(), "secrets:updated")
+
+		// Wait for subscription confirmation
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := pubsub.Receive(ctx); err != nil {
+			log.Printf("Failed to subscribe to Redis: %v. Retrying in %v...", err, retryDelay)
+			time.Sleep(retryDelay)
+			retryDelay = time.Duration(float64(retryDelay) * 1.5) // exponential backoff
+			if retryDelay > maxRetryDelay {
+				retryDelay = maxRetryDelay
+			}
+			continue
+		}
+
+		// Reset retry delay on successful connection
+		retryDelay = 5 * time.Second
+
+		log.Println("Successfully subscribed to Redis secret updates")
+
+		// Process messages
+		for {
+			msg, err := pubsub.ReceiveMessage()
+			if err != nil {
+				log.Printf("Redis subscription error: %v. Reconnecting...", err)
+				break
+			}
+			log.Printf("Секрет обновлён: %s — очищаем кэш", msg.Payload)
+			secretsCache.Delete(msg.Payload)
+		}
+
+		// Clean up and reconnect
+		pubsub.Close()
+		time.Sleep(retryDelay)
+	}
 }
