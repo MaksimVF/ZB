@@ -361,32 +361,77 @@ return a
 return b
 }
 
+// Lua scripts for atomic rate limiting operations
+var (
+	slidingWindowScript = redis.NewScript(`
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local cutoff = now - window
+
+-- Remove old entries
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', cutoff)
+
+-- Add new entry
+redis.call('ZADD', KEYS[1], now, now)
+
+-- Set expiration
+redis.call('EXPIRE', KEYS[1], math.ceil(window / 1000000000) + 60)
+
+-- Get count
+local count = redis.call('ZCARD', KEYS[1])
+
+return count < limit
+`)
+
+	tokenBucketScript = redis.NewScript(`
+local now = tonumber(ARGV[1])
+local capacity = tonumber(ARGV[2])
+local rate = tonumber(ARGV[3])
+local period = tonumber(ARGV[4])
+
+local data = redis.call('HGETALL', KEYS[1])
+if next(data) == nil then
+    -- Initialize new bucket
+    redis.call('HSET', KEYS[1], 'tokens', capacity, 'last_refill', now)
+    return 1
+end
+
+local tokens = tonumber(data[2])
+local last_refill = tonumber(data[4])
+
+local elapsed = now - last_refill
+local add = (elapsed * rate) / period
+tokens = tokens + add
+if tokens > capacity then
+    tokens = capacity
+end
+
+if tokens < 1 then
+    return 0
+end
+
+tokens = tokens - 1
+redis.call('HSET', KEYS[1], 'tokens', tokens, 'last_refill', now)
+return 1
+`)
+)
+
 // slidingWindow и tokenBucket — без изменений (рабочие)
 func slidingWindow(key string, limit int64, window time.Duration) bool {
 	now := time.Now().UnixNano()
-	cutoff := strconv.FormatInt(now-int64(window), 10)
 
-	pipe := rdb.Pipeline()
-	pipe.ZRemRangeByScore(ctx, key, "-inf", cutoff)
-	pipe.ZCard(ctx, key)
-	pipe.ZAdd(ctx, key, &redis.Z{Score: float64(now), Member: now})
-	pipe.Expire(ctx, key, window+time.Minute)
-	results, err := pipe.Exec()
+	result, err := slidingWindowScript.Run(ctx, rdb, []string{key},
+		now, window.Nanoseconds(), limit).Result()
 	if err != nil {
 		log.Printf("Redis error in slidingWindow: %v", err)
 		// In case of Redis failure, allow the request to avoid complete service disruption
 		return true
 	}
 
-	countCmd, ok := results[1].(*redis.IntCmd)
+	count, ok := result.(int64)
 	if !ok {
 		log.Printf("Unexpected Redis response type in slidingWindow")
-		return true
-	}
-
-	count, err := countCmd.Result()
-	if err != nil {
-		log.Printf("Redis count error in slidingWindow: %v", err)
 		return true
 	}
 
@@ -396,59 +441,21 @@ func slidingWindow(key string, limit int64, window time.Duration) bool {
 func tokenBucket(key string, capacity, rate int64, period time.Duration) bool {
 	now := time.Now().Unix()
 
-	data, err := rdb.HGetAll(ctx, key).Result()
+	result, err := tokenBucketScript.Run(ctx, rdb, []string{key},
+		now, capacity, rate, int64(period.Seconds())).Result()
 	if err != nil {
-		if err != redis.Nil {
-			log.Printf("Redis error in tokenBucket: %v", err)
-		}
-		// Initialize new bucket on first access or Redis failure
-		err := rdb.HSet(ctx, key, map[string]interface{}{
-			"tokens":      capacity,
-			"last_refill": now,
-		}).Err()
-		if err != nil {
-			log.Printf("Redis initialization error in tokenBucket: %v", err)
-		}
+		log.Printf("Redis error in tokenBucket: %v", err)
+		// In case of Redis failure, allow the request to avoid complete service disruption
 		return true
 	}
 
-	tokens, err := strconv.ParseFloat(data["tokens"], 64)
-	if err != nil {
-		log.Printf("Token parse error in tokenBucket: %v", err)
+	allowed, ok := result.(int64)
+	if !ok {
+		log.Printf("Unexpected Redis response type in tokenBucket")
 		return true
 	}
 
-	lastRefill, err := strconv.ParseInt(data["last_refill"], 10, 64)
-	if err != nil {
-		log.Printf("Last refill parse error in tokenBucket: %v", err)
-		return true
-	}
-
-	elapsed := now - lastRefill
-	add := float64(elapsed) * float64(rate) / float64(period.Seconds())
-	tokens += add
-	if tokens > float64(capacity) {
-		tokens = float64(capacity)
-	}
-
-	if tokens < 1 {
-		return false
-	}
-
-	tokens -= 1
-	err = rdb.HSet(ctx, key, "tokens", tokens).Err()
-	if err != nil {
-		log.Printf("Redis token update error in tokenBucket: %v", err)
-		// Allow request even if update fails
-		return true
-	}
-
-	err = rdb.HSet(ctx, key, "last_refill", now).Err()
-	if err != nil {
-		log.Printf("Redis last_refill update error in tokenBucket: %v", err)
-	}
-
-	return true
+	return allowed == 1
 }
 
 // AdminHandler handles HTTP requests for rate limit administration
