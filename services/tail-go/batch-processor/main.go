@@ -79,7 +79,13 @@ func processBatch(batchID string) {
 	}
 
 	var items []BatchItem
-	if err := json.Unmarshal([]byte(data["requests"]), &items); err != nil {
+	requestsData, ok := data["requests"]
+	if !ok || requestsData == "" {
+		log.Printf("Batch %s has no requests data", batchID)
+		return
+	}
+
+	if err := json.Unmarshal([]byte(requestsData), &items); err != nil {
 		log.Printf("Invalid batch data: %v", err)
 		return
 	}
@@ -108,15 +114,25 @@ func processSingleItem(item BatchItem) map[string]interface{} {
 		messages = append(messages, fmt.Sprintf("%s: %s", msg.Role, msg.Content))
 	}
 
-	// Prepare gRPC request
-	req := &pb.GenRequest{
-		RequestId:   item.CustomID,
-		Model:       item.Model,
-		Messages:    messages,
-		Temperature:  float32(*item.Temperature),
-		MaxTokens:   int32(*item.MaxTokens),
-		Stream:      false,
-	}
+    // Prepare gRPC request with nil pointer checks
+    temperature := 0.7 // default value
+    if item.Temperature != nil {
+        temperature = float32(*item.Temperature)
+    }
+
+    maxTokens := int32(100) // default value
+    if item.MaxTokens != nil {
+        maxTokens = int32(*item.MaxTokens)
+    }
+
+    req := &pb.GenRequest{
+            RequestId:   item.CustomID,
+            Model:       item.Model,
+            Messages:    messages,
+            Temperature:  temperature,
+            MaxTokens:   maxTokens,
+            Stream:      false,
+    }
 
 	// Call model-proxy gRPC service
 	resp, err := modelProxyClient.Generate(ctx, req)
