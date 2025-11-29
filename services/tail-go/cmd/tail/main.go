@@ -76,8 +76,26 @@ balance = resp.Balance
 
 // Health check
 mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-w.WriteHeader(http.StatusOK)
-fmt.Fprint(w, "OK")
+	// Check Redis connection
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := redisClient.Ping(ctx).Err(); err != nil {
+		http.Error(w, fmt.Sprintf("Redis unavailable: %v", err), http.StatusServiceUnavailable)
+		return
+	}
+
+	// Check gRPC connection to secret-service
+	ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if _, err := secretClient.GetSecret(ctx, &pb.GetSecretRequest{Name: "health_check"}); err != nil {
+		http.Error(w, fmt.Sprintf("Secret service unavailable: %v", err), http.StatusServiceUnavailable)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, "OK")
 })
 
 srv := &http.Server{
