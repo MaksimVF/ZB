@@ -92,15 +92,24 @@ func RateLimiter(next http.HandlerFunc) http.HandlerFunc {
 			Path:          path,
 		})
 
-		if err != nil || !resp.Allowed {
-			retryAfter := int(resp.RetryAfterSecs)
-			if retryAfter == 0 {
-				retryAfter = 30
-			}
-			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
-			http.Error(w, `{"error": "rate limit exceeded"}`, http.StatusTooManyRequests)
-			return
-		}
+                // Handle gRPC errors first
+                if err != nil {
+                        log.Printf("Rate limiter error: %v", err)
+                        w.Header().Set("Retry-After", "30")
+                        http.Error(w, `{"error": "rate limiter unavailable"}`, http.StatusServiceUnavailable)
+                        return
+                }
+
+                // Handle rate limiting response
+                if !resp.Allowed {
+                        retryAfter := int(resp.RetryAfterSecs)
+                        if retryAfter == 0 {
+                                retryAfter = 30 // Default retry-after in seconds (should be configurable)
+                        }
+                        w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+                        http.Error(w, `{"error": "rate limit exceeded"}`, http.StatusTooManyRequests)
+                        return
+                }
 
 		next(w, r)
 	}
