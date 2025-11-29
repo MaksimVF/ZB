@@ -15,6 +15,7 @@ This service provides a unified gateway for LLM APIs with special support for La
 - **Multi-provider support**: Works with OpenAI, Anthropic, Google, and Meta models
 - **Comprehensive monitoring**: Prometheus metrics and health checks
 - **Error handling**: Proper error handling and logging
+- **LiteLLM Integration**: Dynamic provider selection and routing
 
 ## Features
 
@@ -29,11 +30,13 @@ This service provides a unified gateway for LLM APIs with special support for La
 | Multi-provider support | ✅ | ✅ |
 | Rate limiting | ✅ | ✅ |
 | Usage tracking | ✅ | ✅ |
+| Dynamic provider routing | ✅ | ✅ |
+| Provider management API | ✅ | ✅ |
 
 ## Architecture
 
 ```
-LangChain Clients → Gateway Service → LLM Providers
+LangChain Clients → Gateway Service → LiteLLM Router → LLM Providers
                     ↓
                Usage Tracking
                     ↓
@@ -66,7 +69,7 @@ from langchain_openai import ChatOpenAI
 llm = ChatOpenAI(
     base_url="https://your-gateway.com/v1/langchain",
     api_key="langchain-xxxxxxxxxxxxx",
-    model="gpt-4o",
+    model="gpt-4o",  # Automatically routed to OpenAI
     temperature=0.7,
     streaming=True,
 )
@@ -84,13 +87,19 @@ curl -X POST -H "Authorization: Bearer your-api-key" \
      https://your-gateway.com/v1/chat/completions
 ```
 
-### 3. Health Check
+### 3. Provider Management
+
+- **List Providers**: `GET /v1/providers`
+- **Add Provider**: `POST /v1/providers`
+- **Remove Provider**: `DELETE /v1/providers/{provider}`
+
+### 4. Health Check
 
 ```bash
 curl https://your-gateway.com/health
 ```
 
-### 4. Metrics
+### 5. Metrics
 
 ```bash
 curl https://your-gateway.com/metrics
@@ -115,15 +124,23 @@ The `/v1/langchain/chat/completions` endpoint:
 - Provides enhanced monitoring
 - Ensures full compatibility with LangChain
 
-### 2. Usage Tracking
+### 2. LiteLLM Integration
+
+The gateway uses LiteLLM for:
+- **Dynamic Provider Selection**: Automatically routes requests based on model name
+- **Flexible Configuration**: Easily add, remove, or update providers via API
+- **Multi-Provider Support**: Works with any LLM provider with a compatible API
+
+### 3. Usage Tracking
 
 Each request is tracked with:
 - User ID
+- Provider
 - Model used
 - Token count
 - Request duration
 
-### 3. Monitoring
+### 4. Monitoring
 
 Prometheus metrics include:
 - `langchain_requests_total`: Count of LangChain requests
@@ -137,6 +154,7 @@ Prometheus metrics include:
 - **Multi-Provider**: Access to multiple LLM providers
 - **Scalable**: Handles high volumes of requests
 - **Secure**: Proper authentication and error handling
+- **Flexible**: Easily add or remove providers without code changes
 
 ## Contributing
 

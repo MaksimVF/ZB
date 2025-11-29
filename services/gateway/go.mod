@@ -19,6 +19,7 @@ require (
 replace llm-gateway-pro/services/gateway/internal/secrets => ./internal/secrets
 replace llm-gateway-pro/services/gateway/internal/handlers => ./internal/handlers
 replace llm-gateway-pro/services/gateway/internal/billing => ./internal/billing
+replace llm-gateway-pro/services/gateway/internal/providers => ./internal/providers
 
 
 

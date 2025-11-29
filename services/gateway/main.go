@@ -16,6 +16,7 @@ import (
 	"github.com/rs/zerolog"
 	"llm-gateway-pro/services/gateway/internal/handlers"
 	"llm-gateway-pro/services/gateway/internal/billing"
+	"llm-gateway-pro/services/gateway/internal/providers"
 )
 
 var logger zerolog.Logger
@@ -48,6 +49,34 @@ func main() {
 	}
 	defer billing.Close()
 
+	// Initialize LiteLLM providers
+	providerConfig := providers.LiteLLMConfig{
+		Providers: map[string]providers.ProviderConfig{
+			"openai": {
+				BaseURL:    "https://api.openai.com",
+				APIKey:     os.Getenv("OPENAI_API_KEY"),
+				ModelNames: []string{"gpt-4", "gpt-3.5-turbo", "gpt-4o"},
+			},
+			"anthropic": {
+				BaseURL:    "https://api.anthropic.com",
+				APIKey:     os.Getenv("ANTHROPIC_API_KEY"),
+				ModelNames: []string{"claude-3", "claude-2", "claude-instant"},
+			},
+			"google": {
+				BaseURL:    "https://api.google.com",
+				APIKey:     os.Getenv("GOOGLE_API_KEY"),
+				ModelNames: []string{"gemini-1.5", "gemini-1.0", "gemini-pro"},
+			},
+			"meta": {
+				BaseURL:    "https://api.meta.com",
+				APIKey:     os.Getenv("META_API_KEY"),
+				ModelNames: []string{"llama-3", "llama-2", "llama-1"},
+			},
+		},
+	}
+
+	providers.Init(providerConfig)
+
 	r := mux.NewRouter()
 
 	// LangChain-specific endpoint
@@ -55,6 +84,11 @@ func main() {
 
 	// Standard OpenAI-compatible endpoint
 	r.HandleFunc("/v1/chat/completions", handlers.ChatCompletion).Methods("POST")
+
+	// Provider management endpoints
+	r.HandleFunc("/v1/providers", handlers.ListProviders).Methods("GET")
+	r.HandleFunc("/v1/providers", handlers.AddProvider).Methods("POST")
+	r.HandleFunc("/v1/providers/{provider}", handlers.RemoveProvider).Methods("DELETE")
 
 	// Health check
 	r.HandleFunc("/health", HealthCheck).Methods("GET")
