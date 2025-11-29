@@ -56,56 +56,55 @@ RESERVATION_TTL = 600
 # =============================================================================
 class BillingService(billing_pb2_grpc.BillingServiceServicer):
 
-    def RecordUsage(self, request, context):
+    def Charge(self, request, context):
         """Direct usage recording without reservation"""
         user_id = request.user_id or "anonymous"
         model = request.model
-        endpoint = request.endpoint  # "chat", "embed", "batch"
+        tokens_used = request.tokens_used
+        cost = Decimal(str(request.cost))
 
-        input_tokens = request.input_tokens
-        output_tokens = request.output_tokens or 0
-
-        # Получаем цену
-        cost_usd = self.calculate_cost(model, endpoint, input_tokens, output_tokens)
-        if cost_usd <= 0:
-            return billing_pb2.RecordUsageResponse(success=True, cost_usd=0, balance_usd=0)
+        # Check if cost was provided, otherwise calculate it
+        if cost <= 0:
+            # Try to calculate cost based on tokens (if we have enough info)
+            # For now, return error if cost is not provided
+            return billing_pb2.BillResponse(
+                success=False,
+                error="invalid_cost",
+                new_balance=0
+            )
 
         # Проверяем баланс
         balance_key = f"balance:{user_id}"
         balance = Decimal(r.get(balance_key) or "0")
 
-        if balance < cost_usd:
-            return billing_pb2.RecordUsageResponse(
+        if balance < cost:
+            return billing_pb2.BillResponse(
                 success=False,
                 error="insufficient_balance",
-                cost_usd=float(cost_usd),
-                balance_usd=float(balance)
+                new_balance=float(balance)
             )
 
         # Списываем
-        new_balance = balance - cost_usd
+        new_balance = balance - cost
         r.set(balance_key, str(new_balance))
 
         # Логируем транзакцию
         tx = {
             "user_id": user_id,
             "model": model,
-            "endpoint": endpoint,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cost_usd": float(cost_usd),
+            "tokens_used": tokens_used,
+            "cost_usd": float(cost),
             "balance_usd": float(new_balance),
             "timestamp": int(time.time())
         }
         r.xadd("billing:log", tx)
-        r.hincrby(f"usage:{user_id}:model:{model}", endpoint, input_tokens + output_tokens)
-        r.hincrby(f"usage:daily:{datetime.now():%Y-%m-%d}", model, input_tokens + output_tokens)
+        r.hincrby(f"usage:{user_id}:model:{model}", "direct", tokens_used)
+        r.hincrby(f"usage:daily:{datetime.now():%Y-%m-%d}", model, tokens_used)
 
-        logger.info(f"Billed {cost_usd:.5f} USD → {user_id} | {model} | {endpoint}")
-        return billing_pb2.RecordUsageResponse(
+        logger.info(f"Charged {cost:.5f} USD → {user_id} | {model} | {tokens_used} tokens")
+        return billing_pb2.BillResponse(
             success=True,
-            cost_usd=float(cost_usd),
-            balance_usd=float(new_balance)
+            new_balance=float(new_balance)
         )
 
     def Reserve(self, request, context):
