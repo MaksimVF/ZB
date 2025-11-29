@@ -1,27 +1,52 @@
+
 // services/rate-limiter/internal/limiter/limiter.go
 package limiter
 
 import (
-"context"
-"encoding/json"
-"errors"
-"log"
-"net/http"
-"os"
-"strconv"
-"strings"
-"time"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"time"
 
-"github.com/go-redis/redis/v8"
-"github.com/golang-jwt/jwt/v5"
-"google.golang.org/grpc"
-pb "llm-gateway-pro/services/rate-limiter/pb"
+	"github.com/go-redis/redis/v8"
+	"github.com/golang-jwt/jwt/v5"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"crypto/tls"
+	"crypto/x509"
+	pb "llm-gateway-pro/services/rate-limiter/pb"
+)
+
+// Rate limit constants with explanations
+const (
+	// Chat completions limits
+	ChatRequestsPerMinute = 60
+	ChatTokensPerMinute   = 500000 // 500K tokens per minute for chat completions
+
+	// Completions limits (same as chat for consistency)
+	CompletionsRequestsPerMinute = 60
+	CompletionsTokensPerMinute   = 500000 // 500K tokens per minute for completions
+
+	// Embeddings limits
+	EmbeddingsRequestsPerMinute = 15
+	EmbeddingsTokensPerMinute   = 6000000 // 6M tokens per minute for embeddings
+
+	// Agentic workflow limits
+	AgenticRequestsPerMinute = 5
+	AgenticTokensPerMinute   = 20000000 // 20M tokens per minute for agentic workflows
+	AgenticToolsPerMinute    = 100      // 100 tool calls per minute for agentic workflows
 )
 
 var (
-rdb       = newRedisClient()
-ctx       = context.Background()
-jwtSecret = getJWTSecret() // Load from environment variable or secret service
+	rdb       = newRedisClient()
+	ctx       = context.Background()
+	jwtSecret = getJWTSecret() // Load from environment variable or secret service
 )
 
 // newRedisClient creates a Redis client with connection pooling and health checks
@@ -227,194 +252,194 @@ func circuitBreakerUnaryClientInterceptor(
 
 // DefaultRateLimits defines the default rate limits for different endpoints
 var DefaultRateLimits = map[string]map[string]int{
-"/v1/chat/completions": {
-"requests_per_minute": 60,
-"tokens_per_minute":   500000,
-},
-"/v1/completions": {
-"requests_per_minute": 60,
-"tokens_per_minute":   500000,
-},
-"/v1/embeddings": {
-"requests_per_minute": 15,
-"tokens_per_minute":   6000000,
-},
-"/v1/agentic": {
-"requests_per_minute": 5,
-"tokens_per_minute":   20000000,
-"tools_per_minute":    100,
-},
+	"/v1/chat/completions": {
+		"requests_per_minute": ChatRequestsPerMinute,
+		"tokens_per_minute":   ChatTokensPerMinute,
+	},
+	"/v1/completions": {
+		"requests_per_minute": CompletionsRequestsPerMinute,
+		"tokens_per_minute":   CompletionsTokensPerMinute,
+	},
+	"/v1/embeddings": {
+		"requests_per_minute": EmbeddingsRequestsPerMinute,
+		"tokens_per_minute":   EmbeddingsTokensPerMinute,
+	},
+	"/v1/agentic": {
+		"requests_per_minute": AgenticRequestsPerMinute,
+		"tokens_per_minute":   AgenticTokensPerMinute,
+		"tools_per_minute":    AgenticToolsPerMinute,
+	},
 }
 
 // Извлекает и валидирует JWT → возвращает clientID
 func extractClientID(authHeader string) (string, error) {
-if authHeader == "" {
-return "anonymous", nil
-}
+	if authHeader == "" {
+		return "anonymous", nil
+	}
 
-// API-ключ tvo_...
-if strings.HasPrefix(authHeader, "tvo_") {
-return "key:" + authHeader, nil
-}
+	// API-ключ tvo_...
+	if strings.HasPrefix(authHeader, "tvo_") {
+		return "key:" + authHeader, nil
+	}
 
-// JWT: Bearer ...
-if !strings.HasPrefix(authHeader, "Bearer ") {
-return "", errors.New("invalid auth format")
-}
+	// JWT: Bearer ...
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		return "", errors.New("invalid auth format")
+	}
 
-tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 
-// Try to refresh the token if it's about to expire
-refreshedToken, err := validateAndRefreshToken(tokenStr)
-if err == nil && refreshedToken != tokenStr {
-log.Printf("Token refreshed for client")
-}
+	// Try to refresh the token if it's about to expire
+	refreshedToken, err := validateAndRefreshToken(tokenStr)
+	if err == nil && refreshedToken != tokenStr {
+		log.Printf("Token refreshed for client")
+	}
 
-token, err := jwt.ParseWithClaims(tokenStr, &jwt.MapClaims{}, func(t *jwt.Token) (interface{}, error) {
-if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-return nil, errors.New("invalid signing method")
-}
-return jwtSecret, nil
-}, jwt.WithValidMethods([]string{"HS256"}))
+	token, err := jwt.ParseWithClaims(tokenStr, &jwt.MapClaims{}, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("invalid signing method")
+		}
+		return jwtSecret, nil
+	}, jwt.WithValidMethods([]string{"HS256"}))
 
-if err != nil {
-return "", err
-}
-if !token.Valid {
-return "", errors.New("token expired or invalid")
-}
+	if err != nil {
+		return "", err
+	}
+	if !token.Valid {
+		return "", errors.New("token expired or invalid")
+	}
 
-claims, ok := token.Claims.(*jwt.MapClaims)
-if !ok {
-return "", errors.New("invalid claims")
-}
+	claims, ok := token.Claims.(*jwt.MapClaims)
+	if !ok {
+		return "", errors.New("invalid claims")
+	}
 
-userID, ok := (*claims)["user_id"].(string)
-if !ok || userID == "" {
-return "", errors.New("missing user_id")
-}
+	userID, ok := (*claims)["user_id"].(string)
+	if !ok || userID == "" {
+		return "", errors.New("missing user_id")
+	}
 
-return "user:" + userID, nil
+	return "user:" + userID, nil
 }
 
 type Server struct {
-pb.UnimplementedRateLimiterServer
+	pb.UnimplementedRateLimiterServer
 }
 
 func (s *Server) Check(_ context.Context, req *pb.CheckRequest) (*pb.CheckResponse, error) {
-clientID, err := extractClientID(req.Authorization)
-if err != nil {
-clientID = "invalid:" + req.Authorization[:min(len(req.Authorization), 16)]
-}
+	clientID, err := extractClientID(req.Authorization)
+	if err != nil {
+		clientID = "invalid:" + req.Authorization[:min(len(req.Authorization), 16)]
+	}
 
-path := req.Path
-now := time.Now().UnixNano()
+	path := req.Path
+	now := time.Now().UnixNano()
 
-// Get rate limits from Redis or use defaults
-limits, err := getRateLimitsFromRedis()
-if err != nil {
-limits = DefaultRateLimits
-}
+	// Get rate limits from Redis or use defaults
+	limits, err := getRateLimitsFromRedis()
+	if err != nil {
+		limits = DefaultRateLimits
+	}
 
-// Determine which endpoint this request is for
-var endpoint string
-if strings.Contains(path, "/v1/chat/completions") || strings.Contains(path, "/v1/completions") {
-endpoint = "/v1/chat/completions"
-} else if strings.HasPrefix(path, "/v1/embeddings") {
-endpoint = "/v1/embeddings"
-} else if strings.HasPrefix(path, "/v1/agentic") {
-endpoint = "/v1/agentic"
-} else {
-return &pb.CheckResponse{Allowed: true}, nil
-}
+	// Determine which endpoint this request is for
+	var endpoint string
+	if strings.Contains(path, "/v1/chat/completions") || strings.Contains(path, "/v1/completions") {
+		endpoint = "/v1/chat/completions"
+	} else if strings.HasPrefix(path, "/v1/embeddings") {
+		endpoint = "/v1/embeddings"
+	} else if strings.HasPrefix(path, "/v1/agentic") {
+		endpoint = "/v1/agentic"
+	} else {
+		return &pb.CheckResponse{Allowed: true}, nil
+	}
 
-// Get limits for this endpoint
-endpointLimits, exists := limits[endpoint]
-if !exists {
-return &pb.CheckResponse{Allowed: true}, nil
-}
+	// Get limits for this endpoint
+	endpointLimits, exists := limits[endpoint]
+	if !exists {
+		return &pb.CheckResponse{Allowed: true}, nil
+	}
 
-if !slidingWindow("rl:"+endpoint+":rq:"+clientID, int64(endpointLimits["requests_per_minute"]), time.Minute) {
-return &pb.CheckResponse{Allowed: false, RetryAfterSecs: 30}, nil
-}
-if !tokenBucket("rl:"+endpoint+":tk:"+clientID, int64(endpointLimits["tokens_per_minute"]), int64(endpointLimits["tokens_per_minute"]), time.Minute) {
-return &pb.CheckResponse{Allowed: false, RetryAfterSecs: 30}, nil
-}
+	if !slidingWindow("rl:"+endpoint+":rq:"+clientID, int64(endpointLimits["requests_per_minute"]), time.Minute) {
+		return &pb.CheckResponse{Allowed: false, RetryAfterSecs: 30}, nil
+	}
+	if !tokenBucket("rl:"+endpoint+":tk:"+clientID, int64(endpointLimits["tokens_per_minute"]), int64(endpointLimits["tokens_per_minute"]), time.Minute) {
+		return &pb.CheckResponse{Allowed: false, RetryAfterSecs: 30}, nil
+	}
 
-// Special case for agentic tools
-if endpoint == "/v1/agentic" {
-if toolsPM, exists := endpointLimits["tools_per_minute"]; exists {
-if !slidingWindow("rl:agentic:tools:"+clientID, int64(toolsPM), time.Minute) {
-return &pb.CheckResponse{Allowed: false, RetryAfterSecs: 60}, nil
-}
-}
-}
+	// Special case for agentic tools
+	if endpoint == "/v1/agentic" {
+		if toolsPM, exists := endpointLimits["tools_per_minute"]; exists {
+			if !slidingWindow("rl:agentic:tools:"+clientID, int64(toolsPM), time.Minute) {
+				return &pb.CheckResponse{Allowed: false, RetryAfterSecs: 60}, nil
+			}
+		}
+	}
 
-return &pb.CheckResponse{Allowed: true}, nil
+	return &pb.CheckResponse{Allowed: true}, nil
 }
 
 // Вспомогательная функция
 func min(a, b int) int {
-if a < b {
-return a
-}
-return b
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // Lua scripts for atomic rate limiting operations
 var (
 	slidingWindowScript = redis.NewScript(`
-local now = tonumber(ARGV[1])
-local window = tonumber(ARGV[2])
-local limit = tonumber(ARGV[3])
-local cutoff = now - window
+	local now = tonumber(ARGV[1])
+	local window = tonumber(ARGV[2])
+	local limit = tonumber(ARGV[3])
+	local cutoff = now - window
 
--- Remove old entries
-redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', cutoff)
+	-- Remove old entries
+	redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', cutoff)
 
--- Add new entry
-redis.call('ZADD', KEYS[1], now, now)
+	-- Add new entry
+	redis.call('ZADD', KEYS[1], now, now)
 
--- Set expiration
-redis.call('EXPIRE', KEYS[1], math.ceil(window / 1000000000) + 60)
+	-- Set expiration
+	redis.call('EXPIRE', KEYS[1], math.ceil(window / 1000000000) + 60)
 
--- Get count
-local count = redis.call('ZCARD', KEYS[1])
+	-- Get count
+	local count = redis.call('ZCARD', KEYS[1])
 
-return count < limit
-`)
+	return count < limit
+	`)
 
 	tokenBucketScript = redis.NewScript(`
-local now = tonumber(ARGV[1])
-local capacity = tonumber(ARGV[2])
-local rate = tonumber(ARGV[3])
-local period = tonumber(ARGV[4])
+	local now = tonumber(ARGV[1])
+	local capacity = tonumber(ARGV[2])
+	local rate = tonumber(ARGV[3])
+	local period = tonumber(ARGV[4])
 
-local data = redis.call('HGETALL', KEYS[1])
-if next(data) == nil then
-    -- Initialize new bucket
-    redis.call('HSET', KEYS[1], 'tokens', capacity, 'last_refill', now)
-    return 1
-end
+	local data = redis.call('HGETALL', KEYS[1])
+	if next(data) == nil then
+	    -- Initialize new bucket
+	    redis.call('HSET', KEYS[1], 'tokens', capacity, 'last_refill', now)
+	    return 1
+	end
 
-local tokens = tonumber(data[2])
-local last_refill = tonumber(data[4])
+	local tokens = tonumber(data[2])
+	local last_refill = tonumber(data[4])
 
-local elapsed = now - last_refill
-local add = (elapsed * rate) / period
-tokens = tokens + add
-if tokens > capacity then
-    tokens = capacity
-end
+	local elapsed = now - last_refill
+	local add = (elapsed * rate) / period
+	tokens = tokens + add
+	if tokens > capacity then
+	    tokens = capacity
+	end
 
-if tokens < 1 then
-    return 0
-end
+	if tokens < 1 then
+	    return 0
+	end
 
-tokens = tokens - 1
-redis.call('HSET', KEYS[1], 'tokens', tokens, 'last_refill', now)
-return 1
-`)
+	tokens = tokens - 1
+	redis.call('HSET', KEYS[1], 'tokens', tokens, 'last_refill', now)
+	return 1
+	`)
 )
 
 // slidingWindow и tokenBucket — без изменений (рабочие)
