@@ -99,26 +99,15 @@ return nil, status.Errorf(codes.Internal, "model error: %v", err)
 requestsTotal.WithLabelValues(modelName, "ok").Inc()
 requestLatency.WithLabelValues(modelName).Observe(time.Since(start).Seconds())
 
-return &gen.ChatResponse{
-RequestId:  req.RequestId,
-FullText:   text,
-Model:      modelName,
-Provider:  "litellm",
-TokensUsed: int32(tokens),
-}, nil
+	return &gen.ChatResponse{
+	RequestId:  req.RequestId,
+	FullText:   text,
+	Model:      modelName,
+	Provider:  "litellm",
+	TokensUsed: int32(tokens),
+	}, nil
 }
 
-requestsTotal.WithLabelValues(modelName, "ok").Inc()
-requestLatency.WithLabelValues(modelName).Observe(time.Since(start).Seconds())
-
-return &gen.ChatResponse{
-RequestId:  req.RequestId,
-FullText:   text,
-Model:      modelName,
-Provider:  "litellm",
-TokensUsed: int32(tokens),
-}, nil
-}
 
 // Стриминговый запрос — настоящий SSE-совместимый стриминг
 func (s *HeadServer) ChatCompletionStream(req *gen.ChatRequest, stream gen.ChatService_ChatCompletionStreamServer) error {
