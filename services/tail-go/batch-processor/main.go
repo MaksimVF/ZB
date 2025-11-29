@@ -79,7 +79,13 @@ func processBatch(batchID string) {
 	}
 
 	var items []BatchItem
-	if err := json.Unmarshal([]byte(data["requests"]), &items); err != nil {
+	requestsData, ok := data["requests"]
+	if !ok || requestsData == "" {
+		log.Printf("Batch %s has no requests data", batchID)
+		return
+	}
+
+	if err := json.Unmarshal([]byte(requestsData), &items); err != nil {
 		log.Printf("Invalid batch data: %v", err)
 		return
 	}
