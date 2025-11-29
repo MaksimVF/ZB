@@ -29,8 +29,22 @@ PROVIDER_KEYS = json.loads(os.getenv("PROVIDER_KEYS", "{}"))
 def call_litellm(provider_model, messages, temperature, max_tokens):
     provider = provider_model.split("/")[0]
     try:
+        # Convert messages to litellm format
+        litellm_messages = []
+        for msg in messages:
+            if hasattr(msg, 'role') and hasattr(msg, 'content'):
+                litellm_messages.append({"role": msg.role, "content": msg.content})
+            else:
+                litellm_messages.append({"role": "user", "content": str(msg)})
+
         litellm.api_key = PROVIDER_KEYS.get(provider)
-        return completion(model=provider_model, messages=[{"role":"user","content":" ".join(messages)}], temperature=temperature, max_tokens=max_tokens, stream=False)
+        return completion(
+            model=provider_model,
+            messages=litellm_messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=False
+        )
     except Exception as e:
         logger.exception("litellm call failed")
         return {"text": "litellm error: "+str(e), "usage": {"total_tokens": 0}}

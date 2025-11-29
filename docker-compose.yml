@@ -1,4 +1,10 @@
+
 version: "3.8"
+
+networks:
+  default:
+    name: llm-network
+
 services:
   redis:
     image: redis:7
@@ -8,7 +14,7 @@ services:
     command: ["redis-server"]
   model-proxy:
     build: ./services/model-proxy
-    ports: ["8100:8100"]
+    ports: ["8100:8100", "50061:50061", "50062:50062"]
   head:
     build: ./services/head-go
     ports: ["50055:50055","9001:9001"]
