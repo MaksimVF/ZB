@@ -208,7 +208,7 @@ def validate_amount(amount: Decimal) -> bool:
 
 # Exchange rate manager
 class ExchangeRateManager:
-    """Automated exchange rate updater"""
+    """Automated exchange rate updater with admin currency management"""
 
     def __init__(self):
         self.rates = EXCHANGE_RATES.copy()
@@ -216,6 +216,7 @@ class ExchangeRateManager:
         self.update_interval = 3600  # 1 hour
         self.api_url = "https://api.exchangerate-api.com/v4/latest/USD"
         self.lock = threading.Lock()
+        self.supported_currencies = ["USD", "EUR", "RUB", "USDT", "GBP", "CNY", "JPY", "INR"]
 
     def fetch_exchange_rates(self):
         """Fetch exchange rates from external API"""
@@ -229,13 +230,22 @@ class ExchangeRateManager:
                 if "rates" not in data:
                     raise ExternalServiceError("Invalid exchange rate API response")
 
-                # Update rates
-                new_rates = {
-                    "USD": Decimal("1"),
-                    "EUR": Decimal(str(data["rates"].get("EUR", "0.92"))),
-                    "RUB": Decimal(str(data["rates"].get("RUB", "96.50"))),
-                    "USDT": Decimal("1")
-                }
+                # Update rates for supported currencies
+                new_rates = {"USD": Decimal("1")}  # USD is always 1
+
+                for currency in self.supported_currencies:
+                    if currency == "USD":
+                        continue
+                    if currency == "USDT":
+                        new_rates[currency] = Decimal("1")  # USDT is pegged to USD
+                    else:
+                        rate = data["rates"].get(currency)
+                        if rate:
+                            new_rates[currency] = Decimal(str(rate))
+                        else:
+                            logger.warning(f"Currency {currency} not found in API response, using default")
+                            # Keep existing rate or use default
+                            new_rates[currency] = self.rates.get(currency, Decimal("1"))
 
                 self.rates = new_rates
                 self.last_updated = int(time.time())
@@ -243,6 +253,7 @@ class ExchangeRateManager:
                 # Save to Redis
                 r.set("exchange_rates:current", json.dumps(new_rates))
                 r.set("exchange_rates:last_updated", self.last_updated)
+                r.set("exchange_rates:supported", json.dumps(self.supported_currencies))
 
                 logger.info(f"Exchange rates updated: {new_rates}")
                 return True
@@ -262,10 +273,13 @@ class ExchangeRateManager:
             with self.lock:
                 saved_rates = r.get("exchange_rates:current")
                 last_updated = r.get("exchange_rates:last_updated")
+                supported_currencies = r.get("exchange_rates:supported")
 
                 if saved_rates and last_updated:
                     self.rates = json.loads(saved_rates)
                     self.last_updated = int(last_updated)
+                    if supported_currencies:
+                        self.supported_currencies = json.loads(supported_currencies)
                     logger.info(f"Exchange rates loaded from Redis, last updated: {datetime.fromtimestamp(self.last_updated)}")
                     return True
                 return False
@@ -278,6 +292,60 @@ class ExchangeRateManager:
         if currency not in self.rates:
             raise ValidationError(f"Unsupported currency: {currency}")
         return self.rates[currency]
+
+    def add_currency(self, currency: str, rate: Decimal):
+        """Add a new currency to the system"""
+        if currency in self.rates:
+            raise ValidationError(f"Currency {currency} already exists")
+
+        if not currency.isalpha() or len(currency) != 3:
+            raise ValidationError(f"Invalid currency code: {currency}")
+
+        with self.lock:
+            self.rates[currency] = rate
+            self.supported_currencies.append(currency)
+
+            # Save to Redis
+            r.set("exchange_rates:current", json.dumps(self.rates))
+            r.set("exchange_rates:supported", json.dumps(self.supported_currencies))
+
+            logger.info(f"Added new currency: {currency} = {rate}")
+            return True
+
+    def remove_currency(self, currency: str):
+        """Remove a currency from the system"""
+        if currency == "USD" or currency == "USDT":
+            raise ValidationError("Cannot remove base currencies (USD, USDT)")
+
+        if currency not in self.rates:
+            raise ValidationError(f"Currency {currency} not found")
+
+        with self.lock:
+            del self.rates[currency]
+            self.supported_currencies.remove(currency)
+
+            # Save to Redis
+            r.set("exchange_rates:current", json.dumps(self.rates))
+            r.set("exchange_rates:supported", json.dumps(self.supported_currencies))
+
+            logger.info(f"Removed currency: {currency}")
+            return True
+
+    def update_currency_rate(self, currency: str, rate: Decimal):
+        """Update exchange rate for a specific currency"""
+        if currency not in self.rates:
+            raise ValidationError(f"Currency {currency} not found")
+
+        with self.lock:
+            self.rates[currency] = rate
+            self.last_updated = int(time.time())
+
+            # Save to Redis
+            r.set("exchange_rates:current", json.dumps(self.rates))
+            r.set("exchange_rates:last_updated", self.last_updated)
+
+            logger.info(f"Updated currency rate: {currency} = {rate}")
+            return True
 
     def start_auto_update(self):
         """Start automatic exchange rate updates"""
@@ -998,26 +1066,111 @@ def admin_stats():
         logger.error(f"Error generating stats: {e}")
         raise ExternalServiceError("Error generating stats")
 
-@app.route("/admin/exchange-rates", methods=["GET"])
+@app.route("/admin/exchange-rates", methods=["GET", "POST", "PUT", "DELETE"])
 @admin_limiter.limit("10 per minute")
 @handle_http_errors
 def admin_exchange_rates():
-    """Get current exchange rates"""
+    """Manage exchange rates"""
     # Enhanced admin authentication
     auth_key = request.headers.get("X-Admin-Key")
     if not auth_key or auth_key != ADMIN_KEY:
         logger.warning(f"Unauthorized access attempt to admin/exchange-rates from {request.remote_addr}")
         raise AuthenticationError("Invalid admin key")
 
-    try:
-        return jsonify({
-            "rates": EXCHANGE_MANAGER.rates,
-            "last_updated": EXCHANGE_MANAGER.last_updated,
-            "source": "automated"
-        }), 200
-    except Exception as e:
-        logger.error(f"Error getting exchange rates: {e}")
-        raise ExternalServiceError("Error getting exchange rates")
+    if request.method == "GET":
+        # Get current exchange rates
+        try:
+            return jsonify({
+                "rates": EXCHANGE_MANAGER.rates,
+                "last_updated": EXCHANGE_MANAGER.last_updated,
+                "supported_currencies": EXCHANGE_MANAGER.supported_currencies,
+                "source": "automated"
+            }), 200
+        except Exception as e:
+            logger.error(f"Error getting exchange rates: {e}")
+            raise ExternalServiceError("Error getting exchange rates")
+
+    elif request.method == "POST":
+        # Add a new currency
+        if not request.is_json:
+            raise ValidationError("Invalid request format")
+
+        data = request.json
+        if "currency" not in data or "rate" not in data:
+            raise ValidationError("Missing required parameters")
+
+        currency = data["currency"]
+        try:
+            rate = Decimal(str(data["rate"]))
+        except (InvalidOperation, ValueError):
+            raise ValidationError("Invalid rate format")
+
+        try:
+            EXCHANGE_MANAGER.add_currency(currency, rate)
+            return jsonify({
+                "status": "success",
+                "currency": currency,
+                "rate": float(rate)
+            }), 201
+        except ValidationError as e:
+            raise
+        except Exception as e:
+            logger.error(f"Error adding currency: {e}")
+            raise ExternalServiceError("Error adding currency")
+
+    elif request.method == "PUT":
+        # Update an existing currency rate
+        if not request.is_json:
+            raise ValidationError("Invalid request format")
+
+        data = request.json
+        if "currency" not in data or "rate" not in data:
+            raise ValidationError("Missing required parameters")
+
+        currency = data["currency"]
+        try:
+            rate = Decimal(str(data["rate"]))
+        except (InvalidOperation, ValueError):
+            raise ValidationError("Invalid rate format")
+
+        try:
+            EXCHANGE_MANAGER.update_currency_rate(currency, rate)
+            return jsonify({
+                "status": "success",
+                "currency": currency,
+                "rate": float(rate)
+            }), 200
+        except ValidationError as e:
+            raise
+        except Exception as e:
+            logger.error(f"Error updating currency rate: {e}")
+            raise ExternalServiceError("Error updating currency rate")
+
+    elif request.method == "DELETE":
+        # Remove a currency
+        if not request.is_json:
+            raise ValidationError("Invalid request format")
+
+        data = request.json
+        if "currency" not in data:
+            raise ValidationError("Missing currency parameter")
+
+        currency = data["currency"]
+
+        try:
+            EXCHANGE_MANAGER.remove_currency(currency)
+            return jsonify({
+                "status": "success",
+                "currency": currency
+            }), 200
+        except ValidationError as e:
+            raise
+        except Exception as e:
+            logger.error(f"Error removing currency: {e}")
+            raise ExternalServiceError("Error removing currency")
+
+    else:
+        raise ValidationError("Unsupported HTTP method")
 
 @app.route("/admin/exchange-rates/update", methods=["POST"])
 @admin_limiter.limit("2 per minute")
@@ -1045,6 +1198,44 @@ def admin_update_exchange_rates():
     except Exception as e:
         logger.error(f"Error updating exchange rates: {e}")
         raise ExternalServiceError("Error updating exchange rates")
+
+@app.route("/admin/exchange-rates/sources", methods=["GET"])
+@admin_limiter.limit("10 per minute")
+@handle_http_errors
+def admin_exchange_rate_sources():
+    """Get available exchange rate sources"""
+    # Enhanced admin authentication
+    auth_key = request.headers.get("X-Admin-Key")
+    if not auth_key or auth_key != ADMIN_KEY:
+        logger.warning(f"Unauthorized access attempt to admin/exchange-rates/sources from {request.remote_addr}")
+        raise AuthenticationError("Invalid admin key")
+
+    # List of available exchange rate APIs
+    sources = [
+        {
+            "name": "exchangerate-api",
+            "url": "https://api.exchangerate-api.com/v4/latest/USD",
+            "description": "Free exchange rate API with hourly updates",
+            "currencies": ["USD", "EUR", "RUB", "GBP", "CNY", "JPY", "INR"]
+        },
+        {
+            "name": "openexchangerates",
+            "url": "https://openexchangerates.org/api/latest.json",
+            "description": "Paid exchange rate API with real-time updates",
+            "currencies": ["USD", "EUR", "RUB", "GBP", "CNY", "JPY", "INR"]
+        },
+        {
+            "name": "currencyapi",
+            "url": "https://api.currencyapi.com/v3/latest",
+            "description": "Paid exchange rate API with high accuracy",
+            "currencies": ["USD", "EUR", "RUB", "GBP", "CNY", "JPY", "INR"]
+        }
+    ]
+
+    return jsonify({
+        "sources": sources,
+        "current_source": EXCHANGE_MANAGER.api_url
+    }), 200
 
 # =============================================================================
 # Запуск
