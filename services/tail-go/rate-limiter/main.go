@@ -33,6 +33,9 @@ func main() {
 	s := grpc.NewServer(grpc.Creds(creds))
 	pb.RegisterRateLimiterServer(s, &limiter.Server{})
 
+	// Start JWT secret refresh in background
+	go limiter.refreshJWTSecret()
+
 	// HTTP админка (для UI) - also with TLS
 	go func() {
 		http.HandleFunc("/admin/api/rate-limits", limiter.AdminHandler)

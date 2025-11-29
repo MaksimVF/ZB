@@ -95,6 +95,95 @@ func getJWTSecret() []byte {
 	return []byte(resp.Value)
 }
 
+// refreshJWTSecret periodically refreshes the JWT secret from the secret service
+func refreshJWTSecret() {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		<-ticker.C
+		log.Println("Refreshing JWT secret...")
+
+		// Load TLS credentials for secret service
+		tlsConfig, err := loadSecretServiceTLSCredentials()
+		if err != nil {
+			log.Printf("Failed to load TLS config for secret service refresh: %v", err)
+			continue
+		}
+
+		// Create gRPC connection with retry logic and circuit breaker
+		conn, err := grpc.Dial("secret-service:50051",
+			grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
+			grpc.WithConnectParams(grpc.ConnectParams{
+				Backoff:           grpc.DefaultBackoffConfig,
+				MinConnectTimeout: 5 * time.Second,
+			}),
+			grpc.WithUnaryInterceptor(circuitBreakerUnaryClientInterceptor),
+		)
+		if err != nil {
+			log.Printf("Failed to connect to secret service for refresh: %v", err)
+			continue
+		}
+
+		client := pb.NewSecretServiceClient(conn)
+		resp, err := client.GetSecret(ctx, &pb.GetSecretRequest{Name: "jwt_secret"})
+		if err != nil {
+			log.Printf("Failed to refresh JWT secret: %v", err)
+			conn.Close()
+			continue
+		}
+
+		// Update the JWT secret
+		jwtSecret = []byte(resp.Value)
+		log.Println("JWT secret refreshed successfully")
+		conn.Close()
+	}
+}
+
+// validateAndRefreshToken checks if a token is valid and refreshes it if needed
+func validateAndRefreshToken(tokenStr string) (string, error) {
+	token, err := jwt.ParseWithClaims(tokenStr, &jwt.MapClaims{}, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("invalid signing method")
+		}
+		return jwtSecret, nil
+	}, jwt.WithValidMethods([]string{"HS256"}))
+
+	if err != nil {
+		return "", err
+	}
+
+	if !token.Valid {
+		return "", errors.New("token expired or invalid")
+	}
+
+	claims, ok := token.Claims.(*jwt.MapClaims)
+	if !ok {
+		return "", errors.New("invalid claims")
+	}
+
+	// Check if token needs refresh (e.g., less than 5 minutes remaining)
+	if exp, ok := (*claims)["exp"].(float64); ok {
+		expTime := time.Unix(int64(exp), 0)
+		if time.Until(expTime) < 5*time.Minute {
+			// Refresh the token
+			newToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+				"user_id": (*claims)["user_id"],
+				"exp":     time.Now().Add(1 * time.Hour).Unix(),
+			})
+
+			tokenStr, err := newToken.SignedString(jwtSecret)
+			if err != nil {
+				return "", err
+			}
+
+			return tokenStr, nil
+		}
+	}
+
+	return tokenStr, nil
+}
+
 // loadSecretServiceTLSCredentials loads TLS config for secret service
 func loadSecretServiceTLSCredentials() (*tls.Config, error) {
 	// Load CA certificate
@@ -174,6 +263,13 @@ return "", errors.New("invalid auth format")
 }
 
 tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+
+// Try to refresh the token if it's about to expire
+refreshedToken, err := validateAndRefreshToken(tokenStr)
+if err == nil && refreshedToken != tokenStr {
+log.Printf("Token refreshed for client")
+}
+
 token, err := jwt.ParseWithClaims(tokenStr, &jwt.MapClaims{}, func(t *jwt.Token) (interface{}, error) {
 if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 return nil, errors.New("invalid signing method")
