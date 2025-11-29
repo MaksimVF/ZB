@@ -5,14 +5,18 @@ import json
 import logging
 import time
 import uuid
-from decimal import Decimal, ROUND_HALF_UP
+import re
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from datetime import datetime, timedelta
 from concurrent import futures
 
 import grpc
 import redis
 import stripe
+import jwt
 from flask import Flask, request, jsonify, render_template_string
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 import billing_pb2
 import billing_pb2_grpc
@@ -23,6 +27,12 @@ import billing_pb2_grpc
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("billing")
 
+# Security configuration
+JWT_SECRET = os.getenv("JWT_SECRET", "default-super-secret-key-2025")
+ADMIN_KEY = os.getenv("ADMIN_KEY", "default-admin-key-2025")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+# Initialize services
 r = redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379"))
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
@@ -51,6 +61,39 @@ PRICING = {
 # Время жизни резервации (10 минут)
 RESERVATION_TTL = 600
 
+# Input validation patterns
+USER_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_\-]{3,64}$')
+MODEL_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_\-\.]{2,64}$')
+RESERVATION_ID_PATTERN = re.compile(r'^res:[a-zA-Z0-9_\-]{3,64}:[a-zA-Z0-9_\-]{3,64}:\d+$')
+
+# Security helpers
+def validate_jwt(token: str) -> bool:
+    """Validate JWT token"""
+    try:
+        if not token:
+            return False
+        decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        return True
+    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError) as e:
+        logger.warning(f"Invalid JWT: {e}")
+        return False
+
+def validate_user_id(user_id: str) -> bool:
+    """Validate user ID format"""
+    return bool(USER_ID_PATTERN.match(user_id))
+
+def validate_model_id(model_id: str) -> bool:
+    """Validate model ID format"""
+    return bool(MODEL_ID_PATTERN.match(model_id))
+
+def validate_reservation_id(reservation_id: str) -> bool:
+    """Validate reservation ID format"""
+    return bool(RESERVATION_ID_PATTERN.match(reservation_id))
+
+def validate_amount(amount: Decimal) -> bool:
+    """Validate monetary amount"""
+    return amount > 0 and amount < 1000000  # Reasonable limits
+
 # =============================================================================
 # gRPC сервис
 # =============================================================================
@@ -58,20 +101,38 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
 
     def Charge(self, request, context):
         """Direct usage recording without reservation"""
+        # Authentication check
+        metadata = context.invocation_metadata()
+        auth_token = None
+        for key, value in metadata:
+            if key == "authorization":
+                auth_token = value
+                break
+
+        if not auth_token or not validate_jwt(auth_token):
+            context.abort_with_status(grpc.StatusCode.UNAUTHENTICATED, "Invalid or missing authentication token")
+
+        # Input validation
         user_id = request.user_id or "anonymous"
         model = request.model
         tokens_used = request.tokens_used
         cost = Decimal(str(request.cost))
 
-        # Check if cost was provided, otherwise calculate it
+        # Validate inputs
+        if not validate_user_id(user_id):
+            context.abort_with_status(grpc.StatusCode.INVALID_ARGUMENT, "Invalid user_id format")
+
+        if not validate_model_id(model):
+            context.abort_with_status(grpc.StatusCode.INVALID_ARGUMENT, "Invalid model_id format")
+
+        if tokens_used <= 0:
+            context.abort_with_status(grpc.StatusCode.INVALID_ARGUMENT, "Invalid tokens_used value")
+
         if cost <= 0:
-            # Try to calculate cost based on tokens (if we have enough info)
-            # For now, return error if cost is not provided
-            return billing_pb2.BillResponse(
-                success=False,
-                error="invalid_cost",
-                new_balance=0
-            )
+            context.abort_with_status(grpc.StatusCode.INVALID_ARGUMENT, "Invalid cost value")
+
+        # Check if cost was provided, otherwise calculate it
+        # For now, we assume cost is provided and validated
 
         # Проверяем баланс
         balance_key = f"balance:{user_id}"
@@ -109,12 +170,34 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
 
     def Reserve(self, request, context):
         """Reserve funds for estimated usage"""
+        # Authentication check
+        metadata = context.invocation_metadata()
+        auth_token = None
+        for key, value in metadata:
+            if key == "authorization":
+                auth_token = value
+                break
+
+        if not auth_token or not validate_jwt(auth_token):
+            context.abort_with_status(grpc.StatusCode.UNAUTHENTICATED, "Invalid or missing authentication token")
+
+        # Input validation
         user_id = request.user_id or "anonymous"
         request_id = request.request_id or str(uuid.uuid4())
         model = request.model
         endpoint = request.endpoint
         input_tokens = request.input_tokens_estimate
         output_tokens = request.output_tokens_estimate
+
+        # Validate inputs
+        if not validate_user_id(user_id):
+            context.abort_with_status(grpc.StatusCode.INVALID_ARGUMENT, "Invalid user_id format")
+
+        if not validate_model_id(model):
+            context.abort_with_status(grpc.StatusCode.INVALID_ARGUMENT, "Invalid model_id format")
+
+        if input_tokens <= 0 or output_tokens < 0:
+            context.abort_with_status(grpc.StatusCode.INVALID_ARGUMENT, "Invalid token values")
 
         # Calculate estimated cost
         estimated_cost = self.calculate_cost(model, endpoint, input_tokens, output_tokens)
@@ -170,9 +253,28 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
 
     def Commit(self, request, context):
         """Commit actual usage against a reservation"""
+        # Authentication check
+        metadata = context.invocation_metadata()
+        auth_token = None
+        for key, value in metadata:
+            if key == "authorization":
+                auth_token = value
+                break
+
+        if not auth_token or not validate_jwt(auth_token):
+            context.abort_with_status(grpc.StatusCode.UNAUTHENTICATED, "Invalid or missing authentication token")
+
+        # Input validation
         reservation_id = request.reservation_id
         input_tokens_actual = request.input_tokens_actual
         output_tokens_actual = request.output_tokens_actual
+
+        # Validate inputs
+        if not validate_reservation_id(reservation_id):
+            context.abort_with_status(grpc.StatusCode.INVALID_ARGUMENT, "Invalid reservation_id format")
+
+        if input_tokens_actual <= 0 or output_tokens_actual < 0:
+            context.abort_with_status(grpc.StatusCode.INVALID_ARGUMENT, "Invalid token values")
 
         # Get reservation data
         reservation_key = f"reservation:{reservation_id}"
@@ -286,86 +388,172 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
 # =============================================================================
 app = Flask(__name__)
 
+# Rate limiting setup
+limiter = Limiter(
+    app,
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"]
+)
+
+# Admin endpoints rate limiting
+admin_limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=["50 per hour", "10 per minute"]
+)
+
 @app.route("/create-checkout", methods=["POST"])
+@limiter.limit("10 per minute")
 def create_checkout():
+    # Input validation
+    if not request.is_json:
+        return jsonify({"error": "Invalid request format"}), 400
+
     data = request.json
+    if not data or "user_id" not in data or "amount_usd" not in data:
+        return jsonify({"error": "Missing required parameters"}), 400
+
     user_id = data["user_id"]
     amount_usd = data["amount_usd"]
 
-    session = stripe.checkout.Session.create(
-        payment_method_types=['card'],
-        line_items=[{
-            'price_data': {
-                'currency': 'usd',
-                'product_data': {'name': 'LLM Credits'},
-                'unit_amount': int(Decimal(str(amount_usd)) * 100),
-            },
-            'quantity': 1,
-        }],
-        mode='payment',
-        success_url=os.getenv("DOMAIN") + "/dashboard?success=1",
-        cancel_url=os.getenv("DOMAIN") + "/dashboard",
-        metadata={"user_id": user_id}
-    )
-    return jsonify({"url": session.url})
+    # Validate inputs
+    if not validate_user_id(user_id):
+        return jsonify({"error": "Invalid user_id format"}), 400
+
+    try:
+        amount = Decimal(str(amount_usd))
+        if not validate_amount(amount):
+            return jsonify({"error": "Invalid amount"}), 400
+    except (InvalidOperation, ValueError):
+        return jsonify({"error": "Invalid amount format"}), 400
+
+    # Create Stripe session
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            line_items=[{
+                'price_data': {
+                    'currency': 'usd',
+                    'product_data': {'name': 'LLM Credits'},
+                    'unit_amount': int(amount * 100),  # Convert to cents
+                },
+                'quantity': 1,
+            }],
+            mode='payment',
+            success_url=os.getenv("DOMAIN") + "/dashboard?success=1",
+            cancel_url=os.getenv("DOMAIN") + "/dashboard",
+            metadata={"user_id": user_id}
+        )
+        return jsonify({"url": session.url})
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error: {e}")
+        return jsonify({"error": "Payment processing error"}), 500
 
 @app.route("/webhook", methods=["POST"])
 def stripe_webhook():
     payload = request.data
     sig = request.headers.get("Stripe-Signature")
 
+    # Validate webhook signature
     try:
-        event = stripe.Webhook.construct_event(payload, sig, os.getenv("STRIPE_WEBHOOK_SECRET"))
-    except:
-        return "invalid", 400
+        event = stripe.Webhook.construct_event(payload, sig, STRIPE_WEBHOOK_SECRET)
+    except ValueError as e:
+        # Invalid payload
+        logger.warning(f"Invalid webhook payload: {e}")
+        return "invalid payload", 400
+    except stripe.error.SignatureVerificationError as e:
+        # Invalid signature
+        logger.warning(f"Invalid webhook signature: {e}")
+        return "invalid signature", 400
 
+    # Handle the event
     if event.type == "checkout.session.completed":
         session = event.data.object
-        user_id = session.metadata.user_id
-        amount_usd = Decimal(session.amount_total) / 100
+        user_id = session.metadata.get("user_id")
 
-        key = f"balance:{user_id}"
-        current = Decimal(r.get(key) or "0")
-        r.set(key, str(current + amount_usd))
+        # Validate user_id
+        if not user_id or not validate_user_id(user_id):
+            logger.warning(f"Invalid user_id in webhook: {user_id}")
+            return "invalid user", 400
 
-        r.xadd("billing:deposits", {
-            "user_id": user_id,
-            "amount_usd": float(amount_usd),
-            "source": "stripe",
-            "timestamp": int(time.time())
-        })
-        logger.info(f"Top-up +{amount_usd} USD → {user_id}")
+        try:
+            amount_usd = Decimal(session.amount_total) / 100
+
+            # Update balance
+            key = f"balance:{user_id}"
+            current = Decimal(r.get(key) or "0")
+            r.set(key, str(current + amount_usd))
+
+            # Log deposit
+            r.xadd("billing:deposits", {
+                "user_id": user_id,
+                "amount_usd": float(amount_usd),
+                "source": "stripe",
+                "timestamp": int(time.time())
+            })
+            logger.info(f"Top-up +{amount_usd} USD → {user_id}")
+        except (InvalidOperation, ValueError) as e:
+            logger.error(f"Error processing webhook amount: {e}")
+            return "invalid amount", 400
 
     return "ok", 200
 
 @app.route("/admin/pricing", methods=["GET", "POST"])
+@admin_limiter.limit("5 per minute")
 def admin_pricing():
-    if request.headers.get("X-Admin-Key") != os.getenv("ADMIN_KEY"):
-        return "forbidden", 403
+    # Enhanced admin authentication
+    auth_key = request.headers.get("X-Admin-Key")
+    if not auth_key or auth_key != ADMIN_KEY:
+        logger.warning(f"Unauthorized access attempt to admin/pricing from {request.remote_addr}")
+        return jsonify({"error": "forbidden"}), 403
 
     if request.method == "POST":
+        # Validate input
+        if not request.is_json:
+            return jsonify({"error": "Invalid request format"}), 400
+
+        new_pricing = request.json
+        if not isinstance(new_pricing, dict):
+            return jsonify({"error": "Invalid pricing format"}), 400
+
+        # Validate pricing structure
+        for model_id, prices in new_pricing.items():
+            if not validate_model_id(model_id):
+                return jsonify({"error": f"Invalid model_id: {model_id}"}), 400
+            if not isinstance(prices, dict):
+                return jsonify({"error": f"Invalid pricing for {model_id}"}), 400
+
+        # Update pricing
         global PRICING
-        PRICING = request.json
+        PRICING = new_pricing
         r.set("pricing:current", json.dumps(PRICING))
-        return "saved", 200
+        logger.info(f"Pricing updated by {request.remote_addr}")
+        return jsonify({"status": "saved"}), 200
 
     return jsonify(PRICING)
 
 @app.route("/admin/stats")
+@admin_limiter.limit("5 per minute")
 def admin_stats():
-    if request.headers.get("X-Admin-Key") != os.getenv("ADMIN_KEY"):
-        return "forbidden", 403
+    # Enhanced admin authentication
+    auth_key = request.headers.get("X-Admin-Key")
+    if not auth_key or auth_key != ADMIN_KEY:
+        logger.warning(f"Unauthorized access attempt to admin/stats from {request.remote_addr}")
+        return jsonify({"error": "forbidden"}), 403
 
-    total_revenue = sum(float(x["cost_usd"]) for x in r.xrange("billing:log"))
-    users = len(r.keys("balance:*"))
-    today = datetime.now().strftime("%Y-%m-%d")
-    today_usage = r.hgetall(f"usage:daily:{today}")
+    try:
+        total_revenue = sum(float(x["cost_usd"]) for x in r.xrange("billing:log"))
+        users = len(r.keys("balance:*"))
+        today = datetime.now().strftime("%Y-%m-%d")
+        today_usage = r.hgetall(f"usage:daily:{today}")
 
-    return jsonify({
-        "total_revenue_usd": round(total_revenue, 2),
-        "active_users": users,
-        "today_usage": {k: int(v) for k, v in today_usage.items()}
-    })
+        return jsonify({
+            "total_revenue_usd": round(total_revenue, 2),
+            "active_users": users,
+            "today_usage": {k: int(v) for k, v in today_usage.items()}
+        })
+    except Exception as e:
+        logger.error(f"Error generating stats: {e}")
+        return jsonify({"error": "Error generating stats"}), 500
 
 # =============================================================================
 # Запуск
