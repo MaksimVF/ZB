@@ -21,6 +21,27 @@ ctx       = context.Background()
 jwtSecret = []byte("your-super-secret-jwt-key-2025") // ← тот же, что в auth-service!
 )
 
+// DefaultRateLimits defines the default rate limits for different endpoints
+var DefaultRateLimits = map[string]map[string]int{
+"/v1/chat/completions": {
+"requests_per_minute": 60,
+"tokens_per_minute":   500000,
+},
+"/v1/completions": {
+"requests_per_minute": 60,
+"tokens_per_minute":   500000,
+},
+"/v1/embeddings": {
+"requests_per_minute": 15,
+"tokens_per_minute":   6000000,
+},
+"/v1/agentic": {
+"requests_per_minute": 5,
+"tokens_per_minute":   20000000,
+"tools_per_minute":    100,
+},
+}
+
 // Извлекает и валидирует JWT → возвращает clientID
 func extractClientID(authHeader string) (string, error) {
 if authHeader == "" {
@@ -78,33 +99,43 @@ clientID = "invalid:" + req.Authorization[:min(len(req.Authorization), 16)]
 path := req.Path
 now := time.Now().UnixNano()
 
+// Get rate limits from Redis or use defaults
+limits, err := getRateLimitsFromRedis()
+if err != nil {
+limits = DefaultRateLimits
+}
+
+// Determine which endpoint this request is for
+var endpoint string
 if strings.Contains(path, "/v1/chat/completions") || strings.Contains(path, "/v1/completions") {
-if !slidingWindow("rl:chat:rq:"+clientID, 60, time.Minute) {
-return &pb.CheckResponse{Allowed: false, RetryAfterSecs: 30}, nil
-}
-if !tokenBucket("rl:chat:tk:"+clientID, 500_000, 500_000, time.Minute) {
-return &pb.CheckResponse{Allowed: false, RetryAfterSecs: 30}, nil
-}
-}
-
-if strings.HasPrefix(path, "/v1/embeddings") {
-if !slidingWindow("rl:emb:rq:"+clientID, 15, time.Minute) {
-return &pb.CheckResponse{Allowed: false, RetryAfterSecs: 60}, nil
-}
-if !tokenBucket("rl:emb:tk:"+clientID, 6_000_000, 6_000_000, time.Minute) {
-return &pb.CheckResponse{Allowed: false, RetryAfterSecs: 60}, nil
-}
+endpoint = "/v1/chat/completions"
+} else if strings.HasPrefix(path, "/v1/embeddings") {
+endpoint = "/v1/embeddings"
+} else if strings.HasPrefix(path, "/v1/agentic") {
+endpoint = "/v1/agentic"
+} else {
+return &pb.CheckResponse{Allowed: true}, nil
 }
 
-if strings.HasPrefix(path, "/v1/agentic") {
-if !slidingWindow("rl:agentic:rq:"+clientID, 5, time.Minute) {
+// Get limits for this endpoint
+endpointLimits, exists := limits[endpoint]
+if !exists {
+return &pb.CheckResponse{Allowed: true}, nil
+}
+
+if !slidingWindow("rl:"+endpoint+":rq:"+clientID, int64(endpointLimits["requests_per_minute"]), time.Minute) {
+return &pb.CheckResponse{Allowed: false, RetryAfterSecs: 30}, nil
+}
+if !tokenBucket("rl:"+endpoint+":tk:"+clientID, int64(endpointLimits["tokens_per_minute"]), int64(endpointLimits["tokens_per_minute"]), time.Minute) {
+return &pb.CheckResponse{Allowed: false, RetryAfterSecs: 30}, nil
+}
+
+// Special case for agentic tools
+if endpoint == "/v1/agentic" {
+if toolsPM, exists := endpointLimits["tools_per_minute"]; exists {
+if !slidingWindow("rl:agentic:tools:"+clientID, int64(toolsPM), time.Minute) {
 return &pb.CheckResponse{Allowed: false, RetryAfterSecs: 60}, nil
 }
-if !tokenBucket("rl:agentic:tk:"+clientID, 20_000_000, 20_000_000, time.Minute) {
-return &pb.CheckResponse{Allowed: false, RetryAfterSecs: 60}, nil
-}
-if !slidingWindow("rl:agentic:tools:"+clientID, 100, time.Minute) {
-return &pb.CheckResponse{Allowed: false, RetryAfterSecs: 60}, nil
 }
 }
 
@@ -171,24 +202,22 @@ return true
 func AdminHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		// Return current rate limits
+		// Return current rate limits from Redis or defaults
+		limits, err := getRateLimitsFromRedis()
+		if err != nil {
+			// Fallback to defaults
+			limits = DefaultRateLimits
+		}
+
+		response, err := json.Marshal(limits)
+		if err != nil {
+			http.Error(w, "Failed to serialize response", http.StatusInternalServerError)
+			return
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{
-			"chat_completions": {
-				"requests_per_minute": 60,
-				"tokens_per_minute": 500000
-			},
-			"embeddings": {
-				"requests_per_minute": 15,
-				"tokens_per_minute": 6000000
-			},
-			"agentic": {
-				"requests_per_minute": 5,
-				"tokens_per_minute": 20000000,
-				"tools_per_minute": 100
-			}
-		}`))
+		w.Write(response)
 
 	case http.MethodPost:
 		// Update rate limits
@@ -204,12 +233,78 @@ func AdminHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Here we would update the actual rate limits in Redis
-		// For now, just return success
+		// Validate path
+		if _, exists := DefaultRateLimits[req.Path]; !exists {
+			http.Error(w, "Invalid path", http.StatusBadRequest)
+			return
+		}
+
+		// Save to Redis
+		limits := map[string]int{
+			"requests_per_minute": req.RPM,
+			"tokens_per_minute":   req.TPM,
+		}
+		if req.ToolsPM > 0 {
+			limits["tools_per_minute"] = req.ToolsPM
+		}
+
+		if err := saveRateLimitsToRedis(req.Path, limits); err != nil {
+			http.Error(w, "Failed to save rate limits", http.StatusInternalServerError)
+			return
+		}
+
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status": "success", "message": "Rate limits updated"}`))
 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// getRateLimitsFromRedis retrieves rate limits from Redis
+func getRateLimitsFromRedis() (map[string]map[string]int, error) {
+	result := make(map[string]map[string]int)
+
+	for path := range DefaultRateLimits {
+		data, err := rdb.HGetAll(ctx, "rate_limits:"+path).Result()
+		if err != nil {
+			if err == redis.Nil {
+				// No data in Redis, use defaults
+				result[path] = DefaultRateLimits[path]
+				continue
+			}
+			return nil, err
+		}
+
+		// Convert Redis data to int map
+		limits := make(map[string]int)
+		for key, value := range data {
+			val, err := strconv.Atoi(value)
+			if err != nil {
+				continue // Skip invalid values
+			}
+			limits[key] = val
+		}
+
+		// Merge with defaults
+		for defaultKey, defaultVal := range DefaultRateLimits[path] {
+			if _, exists := limits[defaultKey]; !exists {
+				limits[defaultKey] = defaultVal
+			}
+		}
+
+		result[path] = limits
+	}
+
+	return result, nil
+}
+
+// saveRateLimitsToRedis saves rate limits to Redis
+func saveRateLimitsToRedis(path string, limits map[string]int) error {
+	pipeline := rdb.Pipeline()
+	for key, value := range limits {
+		pipeline.HSet(ctx, "rate_limits:"+path, key, value)
+	}
+	_, err := pipeline.Exec(ctx)
+	return err
 }
