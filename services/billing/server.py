@@ -536,6 +536,9 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
         balance_key = f"balance:{user_id}"
         balance = Decimal(r.get(balance_key) or "0")
 
+        # Check user balance and alert if low
+        MONITORING.check_user_balance(user_id, balance)
+
         if balance < cost:
             raise BalanceError("Insufficient balance")
 
@@ -555,6 +558,9 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
         r.xadd("billing:log", tx)
         r.hincrby(f"usage:{user_id}:model:{model}", "direct", tokens_used)
         r.hincrby(f"usage:daily:{datetime.now():%Y-%m-%d}", model, tokens_used)
+
+        # Log transaction for monitoring
+        MONITORING.log_transaction("charge", cost, success=True)
 
         logger.info(f"Charged {cost:.5f} USD → {user_id} | {model} | {tokens_used} tokens")
         return billing_pb2.BillResponse(
@@ -602,6 +608,9 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
         balance_key = f"balance:{user_id}"
         balance = Decimal(r.get(balance_key) or "0")
 
+        # Check user balance and alert if low
+        MONITORING.check_user_balance(user_id, balance)
+
         if balance < estimated_cost:
             raise BalanceError("Insufficient balance")
 
@@ -630,6 +639,9 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
         # Deduct estimated amount from balance
         new_balance = balance - estimated_cost
         r.set(balance_key, str(new_balance))
+
+        # Log transaction for monitoring
+        MONITORING.log_transaction("reserve", estimated_cost, success=True)
 
         logger.info(f"Reserved {estimated_cost:.5f} USD → {user_id} | {reservation_id}")
         return billing_pb2.ReserveResponse(
@@ -721,6 +733,9 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
         r.hincrby(f"usage:{user_id}:model:{model}", endpoint, input_tokens_actual + output_tokens_actual)
         r.hincrby(f"usage:daily:{datetime.now():%Y-%m-%d}", model, input_tokens_actual + output_tokens_actual)
 
+        # Log transaction for monitoring
+        MONITORING.log_transaction("commit", actual_cost, success=True)
+
         logger.info(f"Committed {actual_cost:.5f} USD → {user_id} | {reservation_id}")
         return billing_pb2.CommitResponse(
             success=True,
@@ -759,6 +774,10 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
         validate_user_id(user_id)
 
         balance = Decimal(r.get(f"balance:{user_id}") or "0")
+
+        # Check user balance and alert if low
+        MONITORING.check_user_balance(user_id, balance)
+
         try:
             return billing_pb2.GetBalanceResponse(
                 balance_usd=float(balance),
@@ -793,6 +812,9 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
             "reason": reason,
             "timestamp": int(time.time())
         })
+
+        # Log transaction for monitoring
+        MONITORING.log_transaction("adjust", amount_usd, success=True)
 
         return billing_pb2.AdjustBalanceResponse(success=True, new_balance_usd=float(new))
 
@@ -1236,6 +1258,223 @@ def admin_exchange_rate_sources():
         "sources": sources,
         "current_source": EXCHANGE_MANAGER.api_url
     }), 200
+
+@app.route("/admin/monitoring", methods=["GET"])
+@admin_limiter.limit("10 per minute")
+@handle_http_errors
+def admin_monitoring():
+    """Get monitoring metrics and alerts"""
+    # Enhanced admin authentication
+    auth_key = request.headers.get("X-Admin-Key")
+    if not auth_key or auth_key != ADMIN_KEY:
+        logger.warning(f"Unauthorized access attempt to admin/monitoring from {request.remote_addr}")
+        raise AuthenticationError("Invalid admin key")
+
+    try:
+        # Get metrics from monitoring system
+        metrics = MONITORING.get_metrics()
+
+        # Get recent alerts
+        alerts = []
+        try:
+            alert_stream = r.xrange("billing:alerts")
+            for alert in alert_stream:
+                alerts.append(alert)
+                if len(alerts) >= 10:  # Limit to 10 most recent alerts
+                    break
+        except Exception as e:
+            logger.error(f"Failed to get alerts: {e}")
+            alerts = []
+
+        # Get system health
+        system_health = {
+            "status": "healthy",
+            "redis_connected": r.ping() == b"PONG",
+            "last_exchange_update": EXCHANGE_MANAGER.last_updated,
+            "last_pricing_update": PRICING_MANAGER.last_updated,
+            "reservation_ttl": RESERVATION_TTL,
+            "reservation_ttl_healthy": RESERVATION_TTL >= MONITORING.alert_thresholds["reservation_ttl"]
+        }
+
+        return jsonify({
+            "metrics": metrics,
+            "alerts": alerts,
+            "system_health": system_health
+        }), 200
+    except Exception as e:
+        logger.error(f"Error getting monitoring data: {e}")
+        raise ExternalServiceError("Error getting monitoring data")
+
+@app.route("/admin/monitoring/alerts", methods=["GET"])
+@admin_limiter.limit("10 per minute")
+@handle_http_errors
+def admin_alerts():
+    """Get recent alerts"""
+    # Enhanced admin authentication
+    auth_key = request.headers.get("X-Admin-Key")
+    if not auth_key or auth_key != ADMIN_KEY:
+        logger.warning(f"Unauthorized access attempt to admin/monitoring/alerts from {request.remote_addr}")
+        raise AuthenticationError("Invalid admin key")
+
+    try:
+        alerts = []
+        alert_stream = r.xrange("billing:alerts")
+        for alert in alert_stream:
+            alerts.append(alert)
+            if len(alerts) >= 50:  # Limit to 50 most recent alerts
+                break
+
+        return jsonify({
+            "alerts": alerts,
+            "count": len(alerts)
+        }), 200
+    except Exception as e:
+        logger.error(f"Error getting alerts: {e}")
+        raise ExternalServiceError("Error getting alerts")
+
+@app.route("/admin/monitoring/thresholds", methods=["GET", "POST"])
+@admin_limiter.limit("5 per minute")
+@handle_http_errors
+def admin_monitoring_thresholds():
+    """Manage monitoring thresholds"""
+    # Enhanced admin authentication
+    auth_key = request.headers.get("X-Admin-Key")
+    if not auth_key or auth_key != ADMIN_KEY:
+        logger.warning(f"Unauthorized access attempt to admin/monitoring/thresholds from {request.remote_addr}")
+        raise AuthenticationError("Invalid admin key")
+
+    if request.method == "GET":
+        # Get current thresholds
+        return jsonify(MONITORING.alert_thresholds), 200
+
+    elif request.method == "POST":
+        # Update thresholds
+        if not request.is_json:
+            raise ValidationError("Invalid request format")
+
+        data = request.json
+        if not isinstance(data, dict):
+            raise ValidationError("Invalid thresholds format")
+
+        try:
+            with MONITORING.lock:
+                for key, value in data.items():
+                    if key in MONITORING.alert_thresholds:
+                        if key == "low_balance":
+                            MONITORING.alert_thresholds[key] = Decimal(str(value))
+                        else:
+                            MONITORING.alert_thresholds[key] = value
+                    else:
+                        logger.warning(f"Invalid threshold key: {key}")
+
+                logger.info(f"Updated monitoring thresholds: {MONITORING.alert_thresholds}")
+                return jsonify(MONITORING.alert_thresholds), 200
+        except Exception as e:
+            logger.error(f"Error updating thresholds: {e}")
+            raise ExternalServiceError("Error updating thresholds")
+
+# Monitoring and alerting
+class MonitoringSystem:
+    """Comprehensive monitoring and alerting system"""
+
+    def __init__(self):
+        self.alert_thresholds = {
+            "low_balance": Decimal("10.00"),  # Alert when user balance < $10
+            "high_usage": 1000000,  # Alert when token usage > 1M in 24h
+            "error_rate": 0.05,  # Alert when error rate > 5%
+            "reservation_ttl": 300,  # Alert when reservation TTL < 5 min
+        }
+        self.metrics = {
+            "total_requests": 0,
+            "successful_requests": 0,
+            "failed_requests": 0,
+            "total_charges": Decimal("0"),
+            "total_reservations": 0,
+            "total_commits": 0,
+            "last_alert": 0,
+            "alert_cooldown": 3600,  # 1 hour cooldown between alerts
+        }
+        self.lock = threading.Lock()
+
+    def log_transaction(self, tx_type: str, amount: Decimal = None, success: bool = True):
+        """Log a transaction for monitoring"""
+        with self.lock:
+            self.metrics["total_requests"] += 1
+            if success:
+                self.metrics["successful_requests"] += 1
+            else:
+                self.metrics["failed_requests"] += 1
+
+            if tx_type == "charge" and amount:
+                self.metrics["total_charges"] += amount
+            elif tx_type == "reserve":
+                self.metrics["total_reservations"] += 1
+            elif tx_type == "commit":
+                self.metrics["total_commits"] += 1
+
+            # Check for alerts
+            self.check_alerts()
+
+    def check_alerts(self):
+        """Check metrics and trigger alerts if needed"""
+        with self.lock:
+            now = time.time()
+            if now - self.metrics["last_alert"] < self.alert_cooldown:
+                return
+
+            # Calculate error rate
+            total = self.metrics["total_requests"]
+            if total > 0:
+                error_rate = self.metrics["failed_requests"] / total
+                if error_rate > self.alert_thresholds["error_rate"]:
+                    self.trigger_alert(f"High error rate: {error_rate:.2%}")
+                    return
+
+            # Check reservation TTL
+            if RESERVATION_TTL < self.alert_thresholds["reservation_ttl"]:
+                self.trigger_alert(f"Low reservation TTL: {RESERVATION_TTL} seconds")
+                return
+
+    def trigger_alert(self, message: str):
+        """Trigger an alert (log and optionally send notification)"""
+        with self.lock:
+            self.metrics["last_alert"] = time.time()
+            logger.warning(f"ALERT: {message}")
+
+            # In production, this could send to monitoring system
+            # or notification service (e.g., email, Slack, PagerDuty)
+            try:
+                alert_data = {
+                    "message": message,
+                    "timestamp": int(time.time()),
+                    "metrics": self.metrics
+                }
+                r.xadd("billing:alerts", alert_data)
+                logger.info("Alert logged to Redis")
+            except Exception as e:
+                logger.error(f"Failed to log alert: {e}")
+
+    def get_metrics(self):
+        """Get current metrics"""
+        with self.lock:
+            return {
+                "metrics": self.metrics,
+                "thresholds": self.alert_thresholds,
+                "last_alert": datetime.fromtimestamp(self.metrics["last_alert"]).isoformat() if self.metrics["last_alert"] > 0 else None
+            }
+
+    def check_user_balance(self, user_id: str, balance: Decimal):
+        """Check user balance and alert if low"""
+        if balance < self.alert_thresholds["low_balance"]:
+            self.trigger_alert(f"Low balance for user {user_id}: {balance:.2f} USD")
+
+    def check_usage(self, user_id: str, tokens: int, period: str = "24h"):
+        """Check token usage and alert if high"""
+        if tokens > self.alert_thresholds["high_usage"]:
+            self.trigger_alert(f"High usage for user {user_id}: {tokens} tokens in {period}")
+
+# Initialize monitoring system
+MONITORING = MonitoringSystem()
 
 # =============================================================================
 # Запуск
