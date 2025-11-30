@@ -5,31 +5,76 @@
 
 
 
-import { useEffect, useState } from 'react'
+import { useQuery } from 'react-query'
 import { admin } from '../api'
+import { useState } from 'react'
 
 export default function Logs() {
-  const [logs, setLogs] = useState([])
   const [page, setPage] = useState(1)
-  const [loading, setLoading] = useState(true)
+  const [startDate, setStartDate] = useState('')
+  const [endDate, setEndDate] = useState('')
 
-  useEffect(() => {
-    loadLogs()
-  }, [page])
+  const { data: logs, isLoading, refetch } = useQuery({
+    queryKey: ['logs', page, startDate, endDate],
+    queryFn: () => admin.logs(page, { startDate, endDate }),
+    keepPreviousData: true,
+  })
 
-  const loadLogs = () => {
-    setLoading(true)
-    admin.logs(page).then(r => {
-      setLogs(r.data.logs)
-      setLoading(false)
-    })
+  const exportToCSV = () => {
+    const csvContent = "data:text/csv;charset=utf-8,"
+      + logs?.data?.logs?.map(log => Object.values(log).join(",")).join("\n")
+
+    const encodedUri = encodeURI(csvContent)
+    const link = document.createElement("a")
+    link.setAttribute("href", encodedUri)
+    link.setAttribute("download", "logs.csv")
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
+
+  const applyFilters = () => {
+    setPage(1)
+    refetch()
   }
 
   return (
     <div className="max-w-7xl mx-auto p-8">
-      <h1 className="text-4xl font-bold mb-8">Логи</h1>
+      <h1 className="text-4xl font-bold mb-8 dark:text-white">Логи</h1>
 
-      <div className="bg-white rounded-2xl shadow-xl p-8">
+      <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl p-8">
+        {/* Filters */}
+        <div className="mb-6 flex flex-col md:flex-row md:items-center md:justify-between space-y-4 md:space-y-0">
+          <div className="flex space-x-4">
+            <input
+              type="date"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="p-3 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white"
+            />
+            <input
+              type="date"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="p-3 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white"
+            />
+            <button
+              onClick={applyFilters}
+              className="bg-blue-600 text-white px-6 py-3 rounded-lg"
+            >
+              Применить
+            </button>
+          </div>
+
+          <button
+            onClick={exportToCSV}
+            className="bg-green-600 text-white px-6 py-3 rounded-lg"
+          >
+            Экспорт в CSV
+          </button>
+        </div>
+
+        {/* Pagination */}
         <div className="mb-6">
           <button
             onClick={() => setPage(p => Math.max(1, p - 1))}
@@ -46,7 +91,7 @@ export default function Logs() {
           </button>
         </div>
 
-        {loading ? (
+        {isLoading ? (
           <div className="flex justify-center items-center h-64">Loading...</div>
         ) : (
           <div className="overflow-x-auto">
@@ -62,8 +107,8 @@ export default function Logs() {
                 </tr>
               </thead>
               <tbody>
-                {logs.map(log => (
-                  <tr key={log.id} className="border-t hover:bg-gray-50">
+                {logs?.data?.logs?.map(log => (
+                  <tr key={log.id} className="border-t hover:bg-gray-50 dark:hover:bg-gray-700">
                     <td className="p-4">{new Date(log.timestamp).toLocaleString()}</td>
                     <td className="p-4">{log.user_id}</td>
                     <td className="p-4">{log.model}</td>
