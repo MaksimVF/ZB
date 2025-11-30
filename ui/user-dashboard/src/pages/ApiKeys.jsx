@@ -12,6 +12,7 @@
 
 import { useState, useEffect } from 'react'
 import { apiKeys } from '../api'
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 
 export default function ApiKeys() {
   const [apiKeys, setApiKeys] = useState([])
@@ -24,6 +25,7 @@ export default function ApiKeys() {
   })
   const [selectedKey, setSelectedKey] = useState(null)
   const [usageData, setUsageData] = useState(null)
+  const [timePeriod, setTimePeriod] = useState('30d')
 
   useEffect(() => {
     const load = async () => {
@@ -56,7 +58,7 @@ export default function ApiKeys() {
   }
 
   const loadUsage = async (id) => {
-    const res = await apiKeys.getApiKeyUsage(id)
+    const res = await apiKeys.getApiKeyUsage(id, { period: timePeriod })
     setUsageData(res.data)
     setSelectedKey(id)
   }
@@ -183,14 +185,36 @@ export default function ApiKeys() {
         <div className="mt-8 bg-white p-6 rounded-xl shadow-lg">
           <h2 className="text-2xl font-bold mb-4">Usage for {apiKeys.find(k => k.id === selectedKey)?.name}</h2>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          {/* Time Period Selector */}
+          <div className="mb-6">
+            <label className="block text-gray-700 mb-2">Time Period</label>
+            <select
+              value={timePeriod}
+              onChange={(e) => setTimePeriod(e.target.value)}
+              className="p-3 border border-gray-300 rounded-lg"
+            >
+              <option value="7d">Last 7 days</option>
+              <option value="30d">Last 30 days</option>
+              <option value="90d">Last 90 days</option>
+              <option value="all">All time</option>
+            </select>
+            <button
+              onClick={() => loadUsage(selectedKey)}
+              className="ml-4 bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700"
+            >
+              Update
+            </button>
+          </div>
+
+          {/* Summary Statistics */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
             <div>
               <h3 className="font-bold mb-2">Total Requests</h3>
               <p className="text-3xl">{usageData.total_requests}</p>
             </div>
             <div>
-              <h3 className="font-bold mb-2">Last 30 Days</h3>
-              <p className="text-3xl">{usageData.last_30_days}</p>
+              <h3 className="font-bold mb-2">Total Tokens</h3>
+              <p className="text-3xl">{usageData.total_tokens.toLocaleString()}</p>
             </div>
             <div>
               <h3 className="font-bold mb-2">Cost</h3>
@@ -198,6 +222,52 @@ export default function ApiKeys() {
             </div>
           </div>
 
+          {/* Model Usage */}
+          <div className="mb-8">
+            <h3 className="text-xl font-bold mb-4">Usage by Model</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead className="bg-gray-100">
+                  <tr>
+                    <th className="p-4 text-left">Model</th>
+                    <th className="p-4 text-left">Requests</th>
+                    <th className="p-4 text-left">Tokens Sent</th>
+                    <th className="p-4 text-left">Tokens Received</th>
+                    <th className="p-4 text-left">Cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {usageData.models.map(model => (
+                    <tr key={model.model_id} className="border-t hover:bg-gray-50">
+                      <td className="p-4">{model.model_name}</td>
+                      <td className="p-4">{model.requests}</td>
+                      <td className="p-4">{model.tokens_sent.toLocaleString()}</td>
+                      <td className="p-4">{model.tokens_received.toLocaleString()}</td>
+                      <td className="p-4">${model.cost.toFixed(4)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Usage Chart */}
+          <div className="mb-8">
+            <h3 className="text-xl font-bold mb-4">Usage Over Time</h3>
+            <ResponsiveContainer width="100%" height={300}>
+              <LineChart data={usageData.daily_usage}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="date" />
+                <YAxis />
+                <Tooltip />
+                <Legend />
+                <Line type="monotone" dataKey="requests" name="Requests" stroke="#8884d8" />
+                <Line type="monotone" dataKey="tokens" name="Tokens" stroke="#82ca9d" />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+
+          {/* Permissions */}
           <div className="mt-6">
             <h3 className="font-bold mb-2">Permissions</h3>
             <div className="flex space-x-4">
