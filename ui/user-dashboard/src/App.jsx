@@ -17,6 +17,7 @@ const Usage = lazy(() => import('./pages/Usage'))
 const Settings = lazy(() => import('./pages/Settings'))
 const History = lazy(() => import('./pages/History'))
 const ApiKeys = lazy(() => import('./pages/ApiKeys'))
+const Security = lazy(() => import('./pages/Security'))
 const Login = lazy(() => import('./pages/Login'))
 const Register = lazy(() => import('./pages/Register'))
 
@@ -88,6 +89,11 @@ function App() {
               <Route path="/api-keys" element={
                 <Suspense fallback={<div>Loading...</div>}>
                   <PrivateRoute><ApiKeys /></PrivateRoute>
+                </Suspense>
+              } />
+              <Route path="/security" element={
+                <Suspense fallback={<div>Loading...</div>}>
+                  <PrivateRoute><Security /></PrivateRoute>
                 </Suspense>
               } />
             </Routes>

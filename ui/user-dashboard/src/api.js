@@ -16,7 +16,11 @@ const api = axios.create({
 export const auth = {
   login: (email, password) => api.post('/auth/login', { email, password }),
   register: (data) => api.post('/auth/register', data),
-  me: () => api.get('/user/me')
+  me: () => api.get('/user/me'),
+  get2FAStatus: () => api.get('/auth/2fa/status'),
+  enable2FA: () => api.post('/auth/2fa/enable'),
+  verify2FA: (data) => api.post('/auth/2fa/verify', data),
+  disable2FA: () => api.post('/auth/2fa/disable')
 }
 
 export const billing = {
