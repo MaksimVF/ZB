@@ -27,9 +27,11 @@ export const auth = {
 
 export const billing = {
   balance: () => api.get('/billing/balance'),
-  topup: (amount) => api.post('/billing/create-checkout', { amount_usd: amount }),
+  topup: (amount, options) => api.post('/billing/create-checkout', { amount_usd: amount, ...options }),
   history: () => api.get('/billing/history'),
-  usage: () => api.get('/billing/usage')
+  usage: () => api.get('/billing/usage'),
+  getSubscriptionPlans: () => api.get('/billing/subscription-plans'),
+  subscribe: (planId) => api.post('/billing/subscribe', { plan_id: planId })
 }
 
 export const settings = {
