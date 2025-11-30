@@ -14,8 +14,13 @@ const api = axios.create({
 })
 
 export const auth = {
-  login: (apiKey) => api.post('/auth/login', { api_key: apiKey }),
-  me: () => api.get('/user/me')
+  login: (email, password) => api.post('/auth/login', { email, password }),
+  register: (data) => api.post('/auth/register', data),
+  me: () => api.get('/user/me'),
+  get2FAStatus: () => api.get('/auth/2fa/status'),
+  enable2FA: () => api.post('/auth/2fa/enable'),
+  verify2FA: (data) => api.post('/auth/2fa/verify', data),
+  disable2FA: () => api.post('/auth/2fa/disable')
 }
 
 export const billing = {
@@ -28,6 +33,12 @@ export const billing = {
 export const settings = {
   get: () => api.get('/user/settings'),
   save: (data) => api.post('/user/settings', data)
+}
+
+export const apiKeys = {
+  getApiKeys: () => api.get('/user/api-keys'),
+  createApiKey: (data) => api.post('/user/api-keys', data),
+  deleteApiKey: (id) => api.delete(`/user/api-keys/${id}`)
 }
 
 

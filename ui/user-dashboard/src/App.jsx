@@ -16,7 +16,10 @@ const TopUp = lazy(() => import('./pages/TopUp'))
 const Usage = lazy(() => import('./pages/Usage'))
 const Settings = lazy(() => import('./pages/Settings'))
 const History = lazy(() => import('./pages/History'))
+const ApiKeys = lazy(() => import('./pages/ApiKeys'))
+const Security = lazy(() => import('./pages/Security'))
 const Login = lazy(() => import('./pages/Login'))
+const Register = lazy(() => import('./pages/Register'))
 
 function App() {
   const [darkMode, setDarkMode] = useState(false)
@@ -48,6 +51,11 @@ function App() {
                   <Login />
                 </Suspense>
               } />
+              <Route path="/register" element={
+                <Suspense fallback={<div>Loading...</div>}>
+                  <Register />
+                </Suspense>
+              } />
               <Route path="/" element={
                 <Suspense fallback={<div>Loading...</div>}>
                   <PrivateRoute><Dashboard /></PrivateRoute>
@@ -76,6 +84,16 @@ function App() {
               <Route path="/history" element={
                 <Suspense fallback={<div>Loading...</div>}>
                   <PrivateRoute><History /></PrivateRoute>
+                </Suspense>
+              } />
+              <Route path="/api-keys" element={
+                <Suspense fallback={<div>Loading...</div>}>
+                  <PrivateRoute><ApiKeys /></PrivateRoute>
+                </Suspense>
+              } />
+              <Route path="/security" element={
+                <Suspense fallback={<div>Loading...</div>}>
+                  <PrivateRoute><Security /></PrivateRoute>
                 </Suspense>
               } />
             </Routes>
