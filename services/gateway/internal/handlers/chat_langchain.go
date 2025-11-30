@@ -23,6 +23,7 @@ import (
 	"github.com/rs/zerolog"
 	"llm-gateway-pro/services/gateway/internal/billing"
 	"llm-gateway-pro/services/gateway/internal/providers"
+	"llm-gateway-pro/services/gateway/internal/resilience"
 )
 
 var (
@@ -135,11 +136,23 @@ func LangChainCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Proxy request to provider
-	respBody, err := providers.ProxyRequest(providerConfig, "POST", "/v1/chat/completions", req)
+	// Execute with circuit breaker and retry logic
+	providerName := getProviderName(providerConfig.BaseURL)
+	result, err := resilience.ExecuteWithCircuitBreaker(providerName, func() (interface{}, error) {
+		return executeWithRetry(providerConfig, req, 3, 1*time.Second)
+	})
+
 	if err != nil {
 		logger.Error().Err(err).Str("provider", providerConfig.BaseURL).Msg("Provider request failed")
 		http.Error(w, `{"error":"provider unavailable"}`, 502)
+		langchainCounter.WithLabelValues(req.Model, "error").Inc()
+		return
+	}
+
+	respBody, ok := result.([]byte)
+	if !ok {
+		logger.Error().Msg("Invalid response type from provider")
+		http.Error(w, `{"error":"internal error"}`, 500)
 		langchainCounter.WithLabelValues(req.Model, "error").Inc()
 		return
 	}
@@ -183,6 +196,34 @@ func LangChainCompletion(w http.ResponseWriter, r *http.Request) {
 	logger.Info().Str("model", req.Model).Msg("LangChain request completed successfully")
 	langchainCounter.WithLabelValues(req.Model, "success").Inc()
 	langchainDuration.WithLabelValues(req.Model).Observe(time.Since(start).Seconds())
+}
+
+func executeWithRetry(providerConfig providers.ProviderConfig, req LangChainRequest, maxRetries int, backoff time.Duration) ([]byte, error) {
+	var err error
+	var respBody []byte
+
+	operation := func() error {
+		respBody, err = providers.ProxyRequest(providerConfig, "POST", "/v1/chat/completions", req)
+		return err
+	}
+
+	err = resilience.WithRetry(operation, maxRetries, backoff)
+	return respBody, err
+}
+
+func getProviderName(baseURL string) string {
+	switch {
+	case strings.Contains(baseURL, "openai"):
+		return "openai"
+	case strings.Contains(baseURL, "anthropic"):
+		return "anthropic"
+	case strings.Contains(baseURL, "google"):
+		return "google"
+	case strings.Contains(baseURL, "meta"):
+		return "meta"
+	default:
+		return "unknown"
+	}
 }
 
 func handleStreamingResponse(w http.ResponseWriter, body []byte, logger zerolog.Logger) {
@@ -296,6 +337,47 @@ func RemoveProvider(w http.ResponseWriter, r *http.Request) {
 
 	providers.RemoveProvider(provider)
 	w.WriteHeader(http.StatusOK)
+}
+
+func ListCircuitBreakers(w http.ResponseWriter, r *http.Request) {
+	status := resilience.GetAllCircuitBreakers()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
+}
+
+func GetCircuitBreakerStatus(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	name := vars["name"]
+
+	state, counts, err := resilience.GetCircuitBreakerStatus(name)
+	if err != nil {
+		http.Error(w, `{"error":"circuit breaker not found"}`, 404)
+		return
+	}
+
+	status := map[string]interface{}{
+		"name":   name,
+		"state":  state.String(),
+		"counts": counts,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
+}
+
+func ResetCircuitBreaker(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	name := vars["name"]
+
+	err := resilience.ResetCircuitBreaker(name)
+	if err != nil {
+		http.Error(w, `{"error":"circuit breaker not found"}`, 404)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"reset"}`))
 }
 
 
