@@ -2,59 +2,57 @@
 
 
 
-import { useEffect, useState } from 'react'
+import { useQuery } from 'react-query'
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { admin } from '../api'
 
 export default function Dashboard() {
-  const [stats, setStats] = useState({})
-  const [revenue, setRevenue] = useState([])
-  const [topModels, setTopModels] = useState([])
+  const { data: stats, isLoading: statsLoading } = useQuery({
+    queryKey: ['stats'],
+    queryFn: admin.stats,
+    refetchInterval: 60000, // 1 minute
+  })
 
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const [s, r] = await Promise.all([admin.stats(), admin.revenue()])
-        setStats(s.data)
-        setRevenue(r.data.last_30_days)
-        setTopModels(r.data.top_models)
-      } catch (error) {
-        console.error('Failed to load dashboard data:', error)
-      }
-    }
-    load()
-    const i = setInterval(load, 60_000)
-    return () => clearInterval(i)
-  }, [])
+  const { data: revenueData, isLoading: revenueLoading } = useQuery({
+    queryKey: ['revenue'],
+    queryFn: admin.revenue,
+  })
+
+  if (statsLoading || revenueLoading) {
+    return <div className="flex justify-center items-center h-screen">Loading...</div>
+  }
+
+  const revenue = revenueData?.data?.last_30_days || []
+  const topModels = revenueData?.data?.top_models || []
 
   return (
     <div className="max-w-7xl mx-auto p-8">
-      <h1 className="text-5xl font-bold mb-10 text-gray-800">Админ-панель</h1>
+      <h1 className="text-5xl font-bold mb-10 text-gray-800 dark:text-gray-100">Админ-панель</h1>
 
       {/* Key metrics */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-12">
         <div className="bg-gradient-to-br from-green-500 to-emerald-600 text-white p-8 rounded-2xl">
-          <div className="text-4xl font-bold">${stats.total_revenue_usd?.toFixed(2) || 0}</div>
+          <div className="text-4xl font-bold">${stats?.data?.total_revenue_usd?.toFixed(2) || 0}</div>
           <div className="text-xl opacity-90">Доход всего</div>
         </div>
         <div className="bg-gradient-to-br from-blue-500 to-cyan-600 text-white p-8 rounded-2xl">
-          <div className="text-4xl font-bold">{stats.active_users || 0}</div>
+          <div className="text-4xl font-bold">{stats?.data?.active_users || 0}</div>
           <div className="text-xl opacity-90">Активных пользователей</div>
         </div>
         <div className="bg-gradient-to-br from-purple-500 to-pink-600 text-white p-8 rounded-2xl">
-          <div className="text-4xl font-bold">{stats.requests_today || 0}</div>
+          <div className="text-4xl font-bold">{stats?.data?.requests_today || 0}</div>
           <div className="text-xl opacity-90">Запросов сегодня</div>
         </div>
         <div className="bg-gradient-to-br from-orange-500 to-red-600 text-white p-8 rounded-2xl">
-          <div className="text-4xl font-bold">${stats.revenue_today?.toFixed(2) || 0}</div>
+          <div className="text-4xl font-bold">${stats?.data?.revenue_today?.toFixed(2) || 0}</div>
           <div className="text-xl opacity-90">Доход сегодня</div>
         </div>
       </div>
 
       {/* Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        <div className="bg-white p-8 rounded-2xl shadow-xl">
-          <h2 className="text-3xl font-bold mb-6">Доход за 30 дней</h2>
+        <div className="bg-white dark:bg-gray-800 p-8 rounded-2xl shadow-xl">
+          <h2 className="text-3xl font-bold mb-6 dark:text-white">Доход за 30 дней</h2>
           <ResponsiveContainer width="100%" height={400}>
             <LineChart data={revenue}>
               <XAxis dataKey="date" />
@@ -65,8 +63,8 @@ export default function Dashboard() {
           </ResponsiveContainer>
         </div>
 
-        <div className="bg-white p-8 rounded-2xl shadow-xl">
-          <h2 className="text-3xl font-bold mb-6">Лучшие модели по доходу</h2>
+        <div className="bg-white dark:bg-gray-800 p-8 rounded-2xl shadow-xl">
+          <h2 className="text-3xl font-bold mb-6 dark:text-white">Лучшие модели по доходу</h2>
           <ResponsiveContainer width="100%" height={400}>
             <BarChart data={topModels}>
               <XAxis dataKey="model" angle={-45} textAnchor="end" height={100} />
