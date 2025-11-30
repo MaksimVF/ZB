@@ -35,9 +35,9 @@ export const AuthProvider = ({ children }) => {
     checkAuth()
   }, [])
 
-  const login = async (apiKey) => {
+  const login = async (email, password) => {
     try {
-      const res = await auth.login(apiKey)
+      const res = await auth.login(email, password)
       localStorage.setItem('token', res.data.token)
       setUser(res.data.user)
       return true
