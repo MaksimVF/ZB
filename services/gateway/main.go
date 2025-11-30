@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -17,6 +18,7 @@ import (
 	"llm-gateway-pro/services/gateway/internal/handlers"
 	"llm-gateway-pro/services/gateway/internal/billing"
 	"llm-gateway-pro/services/gateway/internal/providers"
+	"llm-gateway-pro/services/gateway/internal/resilience"
 )
 
 var logger zerolog.Logger
@@ -77,6 +79,44 @@ func main() {
 
 	providers.Init(providerConfig)
 
+	// Initialize circuit breakers
+	circuitBreakerConfigs := []resilience.CircuitBreakerConfig{
+		{
+			Name:          "openai",
+			MaxRequests:    5,
+			Interval:       60 * time.Second,
+			Timeout:        10 * time.Second,
+			ReadyToTrip:    resilience.DefaultReadyToTrip,
+			OnStateChange: resilience.DefaultOnStateChange,
+		},
+		{
+			Name:          "anthropic",
+			MaxRequests:    5,
+			Interval:       60 * time.Second,
+			Timeout:        10 * time.Second,
+			ReadyToTrip:    resilience.DefaultReadyToTrip,
+			OnStateChange: resilience.DefaultOnStateChange,
+		},
+		{
+			Name:          "google",
+			MaxRequests:    5,
+			Interval:       60 * time.Second,
+			Timeout:        10 * time.Second,
+			ReadyToTrip:    resilience.DefaultReadyToTrip,
+			OnStateChange: resilience.DefaultOnStateChange,
+		},
+		{
+			Name:          "meta",
+			MaxRequests:    5,
+			Interval:       60 * time.Second,
+			Timeout:        10 * time.Second,
+			ReadyToTrip:    resilience.DefaultReadyToTrip,
+			OnStateChange: resilience.DefaultOnStateChange,
+		},
+	}
+
+	resilience.InitCircuitBreakers(circuitBreakerConfigs)
+
 	r := mux.NewRouter()
 
 	// LangChain-specific endpoint
@@ -89,6 +129,11 @@ func main() {
 	r.HandleFunc("/v1/providers", handlers.ListProviders).Methods("GET")
 	r.HandleFunc("/v1/providers", handlers.AddProvider).Methods("POST")
 	r.HandleFunc("/v1/providers/{provider}", handlers.RemoveProvider).Methods("DELETE")
+
+	// Circuit breaker endpoints
+	r.HandleFunc("/v1/circuit-breakers", handlers.ListCircuitBreakers).Methods("GET")
+	r.HandleFunc("/v1/circuit-breakers/{name}", handlers.GetCircuitBreakerStatus).Methods("GET")
+	r.HandleFunc("/v1/circuit-breakers/{name}/reset", handlers.ResetCircuitBreaker).Methods("POST")
 
 	// Health check
 	r.HandleFunc("/health", HealthCheck).Methods("GET")
