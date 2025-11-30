@@ -20,7 +20,9 @@ export const auth = {
   get2FAStatus: () => api.get('/auth/2fa/status'),
   enable2FA: () => api.post('/auth/2fa/enable'),
   verify2FA: (data) => api.post('/auth/2fa/verify', data),
-  disable2FA: () => api.post('/auth/2fa/disable')
+  disable2FA: () => api.post('/auth/2fa/disable'),
+  forgotPassword: (data) => api.post('/auth/forgot-password', data),
+  resetPassword: (token, data) => api.post(`/auth/reset-password/${token}`, data)
 }
 
 export const billing = {
@@ -38,7 +40,9 @@ export const settings = {
 export const apiKeys = {
   getApiKeys: () => api.get('/user/api-keys'),
   createApiKey: (data) => api.post('/user/api-keys', data),
-  deleteApiKey: (id) => api.delete(`/user/api-keys/${id}`)
+  deleteApiKey: (id) => api.delete(`/user/api-keys/${id}`),
+  rotateApiKey: (id) => api.post(`/user/api-keys/${id}/rotate`),
+  getApiKeyUsage: (id) => api.get(`/user/api-keys/${id}/usage`)
 }
 
 
