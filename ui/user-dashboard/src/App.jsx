@@ -20,6 +20,7 @@ const ApiKeys = lazy(() => import('./pages/ApiKeys'))
 const Security = lazy(() => import('./pages/Security'))
 const Login = lazy(() => import('./pages/Login'))
 const Register = lazy(() => import('./pages/Register'))
+const ForgotPassword = lazy(() => import('./pages/ForgotPassword'))
 
 function App() {
   const [darkMode, setDarkMode] = useState(false)
@@ -54,6 +55,11 @@ function App() {
               <Route path="/register" element={
                 <Suspense fallback={<div>Loading...</div>}>
                   <Register />
+                </Suspense>
+              } />
+              <Route path="/forgot-password" element={
+                <Suspense fallback={<div>Loading...</div>}>
+                  <ForgotPassword />
                 </Suspense>
               } />
               <Route path="/" element={
