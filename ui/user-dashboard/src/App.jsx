@@ -9,6 +9,7 @@ import { AuthProvider } from './context/AuthContext'
 import PrivateRoute from './components/PrivateRoute'
 import ErrorBoundary from './components/ErrorBoundary'
 import { useState, useEffect } from 'react'
+import CurrencySelector from './components/CurrencySelector'
 
 // Lazy load pages
 const Dashboard = lazy(() => import('./pages/Dashboard'))
@@ -42,6 +43,10 @@ function App() {
       >
         {darkMode ? '🌙' : '☀️'}
       </button>
+
+      <div className="fixed top-4 right-24 z-50">
+        <CurrencySelector />
+      </div>
 
       <ErrorBoundary>
         <AuthProvider>

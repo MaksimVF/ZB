@@ -25,7 +25,9 @@ export const auth = {
   resetPassword: (token, data) => api.post(`/auth/reset-password/${token}`, data),
   getSessions: () => api.get('/auth/sessions'),
   terminateSession: (sessionId) => api.post('/auth/sessions/terminate', { session_id: sessionId }),
-  getActivityLogs: () => api.get('/auth/activity-logs')
+  getActivityLogs: () => api.get('/auth/activity-logs'),
+  getPreferences: () => api.get('/user/preferences'),
+  savePreferences: (data) => api.post('/user/preferences', data)
 }
 
 export const billing = {
