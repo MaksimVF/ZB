@@ -22,7 +22,12 @@ export const auth = {
   verify2FA: (data) => api.post('/auth/2fa/verify', data),
   disable2FA: () => api.post('/auth/2fa/disable'),
   forgotPassword: (data) => api.post('/auth/forgot-password', data),
-  resetPassword: (token, data) => api.post(`/auth/reset-password/${token}`, data)
+  resetPassword: (token, data) => api.post(`/auth/reset-password/${token}`, data),
+  getSessions: () => api.get('/auth/sessions'),
+  terminateSession: (sessionId) => api.post('/auth/sessions/terminate', { session_id: sessionId }),
+  getActivityLogs: () => api.get('/auth/activity-logs'),
+  getPreferences: () => api.get('/user/preferences'),
+  savePreferences: (data) => api.post('/user/preferences', data)
 }
 
 export const billing = {

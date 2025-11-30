@@ -20,14 +20,24 @@ export default function Security() {
   const [verificationCode, setVerificationCode] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [sessions, setSessions] = useState([])
+  const [activityLogs, setActivityLogs] = useState([])
 
   useEffect(() => {
     const load = async () => {
       try {
         const res = await auth.get2FAStatus()
         setTwoFactorEnabled(res.data.enabled)
+
+        // Load sessions
+        const sessionsRes = await auth.getSessions()
+        setSessions(sessionsRes.data)
+
+        // Load activity logs
+        const logsRes = await auth.getActivityLogs()
+        setActivityLogs(logsRes.data)
       } catch (e) {
-        setError('Failed to load 2FA status')
+        setError('Failed to load security data')
       }
       setLoading(false)
     }
@@ -69,14 +79,26 @@ export default function Security() {
     setLoading(false)
   }
 
+  const terminateSession = async (sessionId) => {
+    setLoading(true)
+    try {
+      await auth.terminateSession(sessionId)
+      setSessions(sessions.filter(s => s.id !== sessionId))
+    } catch (e) {
+      setError('Failed to terminate session')
+    }
+    setLoading(false)
+  }
+
   if (loading) {
     return <div className="flex justify-center items-center h-screen">Loading...</div>
   }
 
   return (
-    <div className="max-w-4xl mx-auto p-8">
+    <div className="max-w-6xl mx-auto p-8">
       <h1 className="text-4xl font-bold mb-8">Security Settings</h1>
 
+      {/* 2FA Section */}
       <div className="bg-white p-6 rounded-xl shadow-lg mb-8">
         <h2 className="text-2xl font-bold mb-4">Two-Factor Authentication</h2>
 
@@ -132,10 +154,75 @@ export default function Security() {
         )}
       </div>
 
-      <div className="bg-white p-6 rounded-xl shadow-lg">
+      {/* Active Sessions */}
+      <div className="bg-white p-6 rounded-xl shadow-lg mb-8">
         <h2 className="text-2xl font-bold mb-4">Active Sessions</h2>
-        <p>Manage your active login sessions from different devices.</p>
-        {/* Future: Add session management functionality */}
+
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <thead className="bg-gray-100">
+              <tr>
+                <th className="p-4 text-left">Device</th>
+                <th className="p-4 text-left">Location</th>
+                <th className="p-4 text-left">Last Active</th>
+                <th className="p-4 text-left">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sessions.map(session => (
+                <tr key={session.id} className="border-t hover:bg-gray-50">
+                  <td className="p-4">{session.device_type} - {session.browser}</td>
+                  <td className="p-4">{session.city}, {session.country}</td>
+                  <td className="p-4">{new Date(session.last_active).toLocaleString()}</td>
+                  <td className="p-4">
+                    {session.current ? (
+                      <span className="bg-green-100 text-green-800 px-3 py-1 rounded-full text-sm">Current</span>
+                    ) : (
+                      <button
+                        onClick={() => terminateSession(session.id)}
+                        className="bg-red-600 text-white px-3 py-1 rounded-lg hover:bg-red-700 text-sm"
+                      >
+                        Terminate
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Activity Logs */}
+      <div className="bg-white p-6 rounded-xl shadow-lg">
+        <h2 className="text-2xl font-bold mb-4">Activity Logs</h2>
+
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <thead className="bg-gray-100">
+              <tr>
+                <th className="p-4 text-left">Date</th>
+                <th className="p-4 text-left">Action</th>
+                <th className="p-4 text-left">IP Address</th>
+                <th className="p-4 text-left">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {activityLogs.map(log => (
+                <tr key={log.id} className="border-t hover:bg-gray-50">
+                  <td className="p-4">{new Date(log.timestamp).toLocaleString()}</td>
+                  <td className="p-4">{log.action}</td>
+                  <td className="p-4">{log.ip_address}</td>
+                  <td className="p-4">
+                    <span className={`px-3 py-1 rounded-full text-white text-sm ${log.status === 'success' ? 'bg-green-600' : 'bg-red-600'}`}>
+                      {log.status}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   )

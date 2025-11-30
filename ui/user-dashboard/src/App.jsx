@@ -9,6 +9,7 @@ import { AuthProvider } from './context/AuthContext'
 import PrivateRoute from './components/PrivateRoute'
 import ErrorBoundary from './components/ErrorBoundary'
 import { useState, useEffect } from 'react'
+import CurrencySelector from './components/CurrencySelector'
 
 // Lazy load pages
 const Dashboard = lazy(() => import('./pages/Dashboard'))
@@ -18,6 +19,7 @@ const Settings = lazy(() => import('./pages/Settings'))
 const History = lazy(() => import('./pages/History'))
 const ApiKeys = lazy(() => import('./pages/ApiKeys'))
 const Security = lazy(() => import('./pages/Security'))
+const HelpCenter = lazy(() => import('./pages/HelpCenter'))
 const Login = lazy(() => import('./pages/Login'))
 const Register = lazy(() => import('./pages/Register'))
 const ForgotPassword = lazy(() => import('./pages/ForgotPassword'))
@@ -42,6 +44,10 @@ function App() {
       >
         {darkMode ? '🌙' : '☀️'}
       </button>
+
+      <div className="fixed top-4 right-24 z-50">
+        <CurrencySelector />
+      </div>
 
       <ErrorBoundary>
         <AuthProvider>
@@ -100,6 +106,11 @@ function App() {
               <Route path="/security" element={
                 <Suspense fallback={<div>Loading...</div>}>
                   <PrivateRoute><Security /></PrivateRoute>
+                </Suspense>
+              } />
+              <Route path="/help" element={
+                <Suspense fallback={<div>Loading...</div>}>
+                  <PrivateRoute><HelpCenter /></PrivateRoute>
                 </Suspense>
               } />
             </Routes>
