@@ -25,6 +25,7 @@ import (
     "go.opentelemetry.io/otel"
     "go.opentelemetry.io/otel/attribute"
     "go.opentelemetry.io/otel/trace"
+    "github.com/afex/hystrix-go/hystrix"
 )
 
 var (
@@ -39,6 +40,10 @@ var (
     activeModelConnections = promauto.NewGauge(
         prometheus.GaugeOpts{Name: "model_active_connections", Help: "Currently active model connections"},
     )
+    circuitBreakerErrors = promauto.NewCounterVec(
+        prometheus.CounterOpts{Name: "circuit_breaker_errors_total", Help: "Total circuit breaker errors"},
+        []string{"model", "error_type"},
+    )
 )
 
 // ModelClient — обёртка над gRPC-клиентом к model-proxy
@@ -48,12 +53,15 @@ type ModelClient struct {
     stub model.ModelServiceClient
     activeRequests int32
     connectionPool *sync.Pool
+    maxConnections int
+    connectionCount int32
 }
 
 // NewModelClient создаёт клиент, но ещё не подключается
 func NewModelClient(addr string) *ModelClient {
     return &ModelClient{
         addr: addr,
+        maxConnections: 100, // Default max connections
         connectionPool: &sync.Pool{
             New: func() interface{} {
                 return &grpc.ClientConn{}
@@ -116,6 +124,40 @@ func (m *ModelClient) Init(ctx context.Context) error {
 
     m.conn = conn
     m.stub = model.NewModelServiceClient(conn)
+
+    // Initialize circuit breakers for different models
+    hystrix.ConfigureCommand("model_generate", hystrix.CommandConfig{
+        Timeout:                5000, // 5 seconds
+        MaxConcurrentRequests:  50,
+        ErrorPercentThreshold:  30,
+        SleepWindow:            10000, // 10 seconds
+        RequestVolumeThreshold: 10,
+    })
+
+    hystrix.ConfigureCommand("model_generate_stream", hystrix.CommandConfig{
+        Timeout:                10000, // 10 seconds
+        MaxConcurrentRequests:  30,
+        ErrorPercentThreshold:  25,
+        SleepWindow:            15000, // 15 seconds
+        RequestVolumeThreshold: 5,
+    })
+
+    // Initialize connection pool
+    for i := 0; i < m.maxConnections; i++ {
+        conn, err := grpc.DialContext(ctx, m.addr,
+            grpc.WithTransportCredentials(tlsCreds),
+            grpc.WithBlock(),
+            grpc.WithTimeout(10*time.Second),
+            grpc.WithKeepaliveParams(keepaliveParams),
+        )
+        if err != nil {
+            log.Printf("Failed to create connection for pool: %v", err)
+            continue
+        }
+        m.connectionPool.Put(conn)
+        atomic.AddInt32(&m.connectionCount, 1)
+    }
+
     return nil
 }
 
@@ -123,6 +165,24 @@ func (m *ModelClient) Init(ctx context.Context) error {
 func (m *ModelClient) Close() {
     if m.conn != nil {
         m.conn.Close()
+    }
+
+    // Close all connections in the pool
+    for {
+        conn := m.connectionPool.Get()
+        if conn == nil {
+            break
+        }
+        if grpcConn, ok := conn.(*grpc.ClientConn); ok {
+            grpcConn.Close()
+        }
+    }
+}
+
+// ReturnConnectionToPool возвращает соединение обратно в пул
+func (m *ModelClient) ReturnConnectionToPool(conn *grpc.ClientConn) {
+    if m.connectionPool != nil && conn != nil {
+        m.connectionPool.Put(conn)
     }
 }
 
@@ -166,10 +226,43 @@ func (m *ModelClient) Generate(
         Stream:      false,
     }
 
-    resp, err := m.stub.Generate(ctx, req)
+    // Get connection from pool or create new one
+    var conn *grpc.ClientConn
+    if m.connectionPool != nil {
+        connInterface := m.connectionPool.Get()
+        if connInterface != nil {
+            conn = connInterface.(*grpc.ClientConn)
+            if conn.GetState() != grpc.ConnectivityReady {
+                // Connection not ready, create new one
+                conn.Close()
+                conn = nil
+            }
+        }
+    }
+
+    if conn == nil {
+        // Fallback to default connection
+        conn = m.conn
+    }
+
+    // Execute with circuit breaker
+    var resp *model.GenResponse
+    err = hystrix.Do("model_generate", func() error {
+        var innerErr error
+        client := model.NewModelServiceClient(conn)
+        resp, innerErr = client.Generate(ctx, req)
+        return innerErr
+    }, nil)
+
     if err != nil {
         modelRequestErrors.WithLabelValues(modelName, "generate_error").Inc()
+        circuitBreakerErrors.WithLabelValues(modelName, "generate_circuit_breaker").Inc()
         return "", 0, err
+    }
+
+    // Return connection to pool if it's from the pool
+    if conn != m.conn {
+        m.ReturnConnectionToPool(conn)
     }
 
     return resp.Text, int(resp.TokensUsed), nil
@@ -210,9 +303,37 @@ func (m *ModelClient) GenerateStream(
             Stream:      true,
         }
 
-        clientStream, err := m.stub.GenerateStream(ctx, req)
+        // Get connection from pool or create new one
+        var conn *grpc.ClientConn
+        if m.connectionPool != nil {
+            connInterface := m.connectionPool.Get()
+            if connInterface != nil {
+                conn = connInterface.(*grpc.ClientConn)
+                if conn.GetState() != grpc.ConnectivityReady {
+                    // Connection not ready, create new one
+                    conn.Close()
+                    conn = nil
+                }
+            }
+        }
+
+        if conn == nil {
+            // Fallback to default connection
+            conn = m.conn
+        }
+
+        // Execute with circuit breaker
+        var clientStream model.ModelService_GenerateStreamClient
+        err := hystrix.Do("model_generate_stream", func() error {
+            var innerErr error
+            client := model.NewModelServiceClient(conn)
+            clientStream, innerErr = client.GenerateStream(ctx, req)
+            return innerErr
+        }, nil)
+
         if err != nil {
             modelRequestErrors.WithLabelValues(modelName, "stream_error").Inc()
+            circuitBreakerErrors.WithLabelValues(modelName, "stream_circuit_breaker").Inc()
             errCh <- err
             return
         }
@@ -220,10 +341,18 @@ func (m *ModelClient) GenerateStream(
         for {
             chunk, err := clientStream.Recv()
             if err == io.EOF {
+                // Return connection to pool if it's from the pool
+                if conn != m.conn {
+                    m.ReturnConnectionToPool(conn)
+                }
                 return
             }
             if err != nil {
                 modelRequestErrors.WithLabelValues(modelName, "stream_recv_error").Inc()
+                // Return connection to pool if it's from the pool
+                if conn != m.conn {
+                    m.ReturnConnectionToPool(conn)
+                }
                 errCh <- err
                 return
             }

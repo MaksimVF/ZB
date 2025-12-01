@@ -129,6 +129,8 @@ func (s *HeadServer) Run() error {
         Timeout:                5000, // 5 seconds
         MaxConcurrentRequests:  100,
         ErrorPercentThreshold:   25,
+        SleepWindow:            10000, // 10 seconds recovery window
+        RequestVolumeThreshold: 10,   // Minimum requests before tripping
     })
 
     // Try to initialize model client with better error handling
@@ -166,11 +168,16 @@ func (s *HeadServer) Run() error {
         grpc.Creds(creds),
         grpc.KeepaliveParams(keepaliveParams),
         grpc.KeepaliveEnforcementPolicy(keepalivePolicy),
+        grpc.MaxConcurrentStreams(1000), // Limit concurrent streams
+        grpc.ConnectionTimeout(5*time.Second), // Connection timeout
     )
     gen.RegisterChatServiceServer(srv, s)
 
     // Register health service
     grpc_health_v1.RegisterHealthServer(srv, s)
+
+    // Start health check goroutine
+    go s.runHealthChecks()
 
     lis, err := net.Listen("tcp", s.cfg.GRPCAddr)
     if err != nil {
@@ -185,6 +192,34 @@ func (s *HeadServer) Run() error {
     }
 
     return nil
+}
+
+func (s *HeadServer) runHealthChecks() {
+    ticker := time.NewTicker(10 * time.Second)
+    defer ticker.Stop()
+
+    for {
+        select {
+        case <-ticker.C:
+            // Check model client health
+            if s.model != nil && s.model.conn != nil {
+                // Check connection state
+                state := s.model.conn.GetState()
+                if state != grpc.ConnectivityReady {
+                    log.Printf("Model client connection state: %s", state)
+                    s.SetHealthStatus("NOT_SERVING")
+                } else {
+                    s.SetHealthStatus("SERVING")
+                }
+            }
+
+            // Check active requests
+            active := atomic.LoadInt32(&s.activeRequests)
+            if active > int32(s.maxRequests)*90/100 {
+                log.Printf("High load: %d active requests (limit: %d)", active, s.maxRequests)
+            }
+        }
+    }
 }
 
 // Health check implementation
