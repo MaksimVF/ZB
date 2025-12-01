@@ -6,6 +6,7 @@ require (
     github.com/golang-jwt/jwt/v5 v5.2.0
     github.com/grpc-ecosystem/grpc-gateway/v2 v2.16.0
     github.com/sony/gobreaker v2.0.0+incompatible
+    github.com/stretchr/testify v1.8.4
     go.opentelemetry.io/otel v1.22.0
     go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.22.0
     go.opentelemetry.io/otel/sdk/resource v1.22.0
