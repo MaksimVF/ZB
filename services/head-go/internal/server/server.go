@@ -19,6 +19,7 @@ import (
     "github.com/yourorg/head/internal/auth"
     "github.com/yourorg/head/internal/config"
     "github.com/yourorg/head/internal/docs"
+    "github.com/yourorg/head/internal/embedding"
     "github.com/yourorg/head/internal/models"
     modelclient "github.com/yourorg/head/internal/providers"
     "github.com/yourorg/head/internal/metrics"
@@ -59,20 +60,24 @@ var (
 
 type HeadServer struct {
     gen.UnimplementedChatServiceServer // встраиваем, чтобы не писать заглушки
+    gen.UnimplementedEmbeddingServiceServer // встраиваем, чтобы не писать заглушки
     cfg        *config.Config
     model      *modelclient.ModelClient
     auth       *auth.Authenticator
     webhook    *webhook.WebhookClient
     registry   *models.ModelRegistry
+    embedding  *embedding.EmbeddingService
 }
 
 func New(cfg *config.Config) *HeadServer {
+    modelClient := modelclient.NewModelClient(cfg.ModelProxyAddr)
     return &HeadServer{
-        cfg:      cfg,
-        model:    modelclient.NewModelClient(cfg.ModelProxyAddr),
-        auth:     auth.NewAuthenticator(cfg.AuthConfig),
-        webhook:  webhook.NewWebhookClient(cfg.WebhookConfig),
-        registry: cfg.ModelRegistry,
+        cfg:       cfg,
+        model:     modelClient,
+        auth:      auth.NewAuthenticator(cfg.AuthConfig),
+        webhook:   webhook.NewWebhookClient(cfg.WebhookConfig),
+        registry:  cfg.ModelRegistry,
+        embedding: embedding.NewEmbeddingService(cfg, modelClient),
     }
 }
 
@@ -367,6 +372,16 @@ func (s *HeadServer) ChatCompletion(ctx context.Context, req *gen.ChatRequest) (
             TokensUsed: int32(tokens),
         }, nil
     }
+}
+
+// CreateEmbedding creates an embedding for the given text
+func (s *HeadServer) CreateEmbedding(ctx context.Context, req *gen.EmbeddingRequest) (*gen.EmbeddingResponse, error) {
+    return s.embedding.CreateEmbedding(ctx, req)
+}
+
+// CreateEmbeddingBatch creates embeddings for a batch of texts
+func (s *HeadServer) CreateEmbeddingBatch(ctx context.Context, req *gen.EmbeddingBatchRequest) (*gen.EmbeddingBatchResponse, error) {
+    return s.embedding.CreateEmbeddingBatch(ctx, req)
 }
 
 // Стриминговый запрос — настоящий SSE-совместимый стриминг

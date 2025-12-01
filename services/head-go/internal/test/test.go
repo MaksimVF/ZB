@@ -140,6 +140,58 @@ func (s *TestSuite) TestChatCompletionStream() {
     assert.Greater(s.T(), tokensUsed, int32(0))
 }
 
+// TestEmbedding tests the embedding functionality
+func (s *TestSuite) TestEmbedding() {
+    // Enable embedding feature
+    s.cfg.FeaturesConfig.SetEnabled("embedding", true)
+
+    ctx, cancel := context.WithTimeout(context.Background(), s.testTimeout)
+    defer cancel()
+
+    req := &gen.EmbeddingRequest{
+        RequestId: "test-embedding-request",
+        Model:     "text-embedding-ada-002",
+        Text:      "Hello, world!",
+    }
+
+    resp, err := s.client.CreateEmbedding(ctx, req)
+    require.NoError(s.T(), err)
+    require.NotNil(s.T(), resp)
+
+    assert.Equal(s.T(), req.RequestId, resp.RequestId)
+    assert.Equal(s.T(), req.Model, resp.Model)
+    assert.Greater(s.T(), resp.Dimensions, int32(0))
+    assert.Greater(s.T(), len(resp.Embedding), 0)
+}
+
+// TestEmbeddingBatch tests the batch embedding functionality
+func (s *TestSuite) TestEmbeddingBatch() {
+    // Enable embedding feature
+    s.cfg.FeaturesConfig.SetEnabled("embedding", true)
+
+    ctx, cancel := context.WithTimeout(context.Background(), s.testTimeout)
+    defer cancel()
+
+    req := &gen.EmbeddingBatchRequest{
+        RequestId: "test-embedding-batch-request",
+        Model:     "text-embedding-ada-002",
+        Texts:     []string{"Hello, world!", "Goodbye, world!"},
+    }
+
+    resp, err := s.client.CreateEmbeddingBatch(ctx, req)
+    require.NoError(s.T(), err)
+    require.NotNil(s.T(), resp)
+
+    assert.Equal(s.T(), req.RequestId, resp.RequestId)
+    assert.Equal(s.T(), req.Model, resp.Model)
+    assert.Equal(s.T(), len(req.Texts), len(resp.Embeddings))
+
+    for _, embedding := range resp.Embeddings {
+        assert.Greater(s.T(), embedding.Dimensions, int32(0))
+        assert.Greater(s.T(), len(embedding.Vector), 0)
+    }
+}
+
 // TestAuthentication tests authentication
 func (s *TestSuite) TestAuthentication() {
     // Enable authentication

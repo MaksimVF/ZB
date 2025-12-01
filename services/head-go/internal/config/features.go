@@ -85,6 +85,7 @@ func DefaultFeatures() *FeaturesConfig {
     features.AddFeature("webhook", "Enable webhook notifications", true)
     features.AddFeature("model_registry", "Enable model registry and A/B testing", true)
     features.AddFeature("ab_testing", "Enable A/B testing for models", true)
+    features.AddFeature("embedding", "Enable embedding functionality", true)
 
     return features
 }
