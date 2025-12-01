@@ -1,345 +1,367 @@
 package providers
 
 import (
-"context"
-"crypto/tls"
-"crypto/x509"
-"io"
-"io/ioutil"
-"log"
-"sync"
-"time"
+    "context"
+    "crypto/tls"
+    "crypto/x509"
+    "io"
+    "io/ioutil"
+    "log"
+    "sync"
+    "sync/atomic"
+    "time"
 
-"github.com/sony/gobreaker"
-"go.opentelemetry.io/otel"
-"go.opentelemetry.io/otel/codes"
-"go.opentelemetry.io/otel/trace"
-"google.golang.org/grpc"
-"google.golang.org/grpc/credentials"
-"google.golang.org/grpc/keepalive"
+    "github.com/afex/hystrix-go/hystrix"
+    "github.com/prometheus/client_golang/prometheus"
+    "github.com/prometheus/client_golang/prometheus/promauto"
+    "go.opentelemetry.io/otel"
+    "go.opentelemetry.io/otel/attribute"
+    "go.opentelemetry.io/otel/codes"
+    "go.opentelemetry.io/otel/trace"
+    "google.golang.org/grpc"
+    "google.golang.org/grpc/credentials"
+    "google.golang.org/grpc/keepalive"
 
-model "github.com/yourorg/head/gen_model" // сюда попадают model.proto
+    model "github.com/yourorg/head/gen_model" // сюда попадают model.proto
+)
+
+var (
+    modelRequestLatency = promauto.NewHistogramVec(
+        prometheus.HistogramOpts{Name: "model_request_latency_seconds", Help: "Model request latency"},
+        []string{"model"},
+    )
+    modelRequestErrors = promauto.NewCounterVec(
+        prometheus.CounterOpts{Name: "model_request_errors_total", Help: "Total model request errors"},
+        []string{"model", "error_type"},
+    )
+    activeModelConnections = promauto.NewGauge(
+        prometheus.GaugeOpts{Name: "model_active_connections", Help: "Currently active model connections"},
+    )
+    circuitBreakerErrors = promauto.NewCounterVec(
+        prometheus.CounterOpts{Name: "circuit_breaker_errors_total", Help: "Total circuit breaker errors"},
+        []string{"model", "error_type"},
+    )
 )
 
 // ModelClient — обёртка над gRPC-клиентом к model-proxy
 type ModelClient struct {
-addr            string
-connPool        []*grpc.ClientConn
-currentConn     int
-stub            model.ModelServiceClient
-circuitBreaker  *gobreaker.CircuitBreaker
-retryConfig     RetryConfig
-mu              sync.Mutex
-}
-
-// RetryConfig holds retry configuration
-type RetryConfig struct {
-MaxRetries    int
-InitialBackoff time.Duration
-MaxBackoff    time.Duration
+    addr string
+    conn *grpc.ClientConn
+    stub model.ModelServiceClient
+    activeRequests int32
+    connectionPool *sync.Pool
+    maxConnections int
+    connectionCount int32
 }
 
 // NewModelClient создаёт клиент, но ещё не подключается
 func NewModelClient(addr string) *ModelClient {
-return &ModelClient{
-addr: addr,
-retryConfig: RetryConfig{
-MaxRetries:    3,
-InitialBackoff: 100 * time.Millisecond,
-MaxBackoff:    2 * time.Second,
-},
-circuitBreaker: gobreaker.NewCircuitBreaker(gobreaker.Settings{
-Name:        "model-proxy",
-MaxRequests:  1,
-Interval:    10 * time.Second,
-Timeout:     30 * time.Second,
-ReadyToTrip: func(counts gobreaker.Counts) bool {
-failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
-return counts.Requests >= 3 && failureRatio >= 0.6
-},
-}),
-}
+    return &ModelClient{
+        addr: addr,
+        maxConnections: 100, // Default max connections
+        connectionPool: &sync.Pool{
+            New: func() interface{} {
+                return &grpc.ClientConn{}
+            },
+        },
+    }
 }
 
 // loadTLSCredentials загружает сертификаты для mTLS
 func loadTLSCredentials() (credentials.TransportCredentials, error) {
-// Сертификат и ключ клиента (head)
-cert, err := tls.LoadX509KeyPair("/certs/head.pem", "/certs/head-key.pem")
-if err != nil {
-return nil, err
+    // Сертификат и ключ клиента (head)
+    cert, err := tls.LoadX509KeyPair("/certs/head.pem", "/certs/head-key.pem")
+    if err != nil {
+        return nil, err
+    }
+
+    // CA для проверки сервера model-proxy
+    caCert, err := ioutil.ReadFile("/certs/ca.pem")
+    if err != nil {
+        return nil, err
+    }
+    caCertPool := x509.NewCertPool()
+    if !caCertPool.AppendCertsFromPEM(caCert) {
+        return nil, err
+    }
+
+    // Настраиваем TLS с взаимной аутентификацией
+    config := &tls.Config{
+        ServerName:   "model-proxy", // Должно совпадать с CN в сертификате model-proxy
+        Certificates: []tls.Certificate{cert},
+        RootCAs:      caCertPool,
+    }
+
+    return credentials.NewTLS(config), nil
 }
 
-// CA для проверки сервера model-proxy
-caCert, err := ioutil.ReadFile("/certs/ca.pem")
-if err != nil {
-return nil, err
-}
-caCertPool := x509.NewCertPool()
-if !caCertPool.AppendCertsFromPEM(caCert) {
-return nil, err
-}
-
-// Настраиваем TLS с взаимной аутентификацией
-config := &tls.Config{
-ServerName:   "model-proxy", // Должно совпадать с CN в сертификате model-proxy
-Certificates: []tls.Certificate{cert},
-RootCAs:      caCertPool,
-}
-
-return credentials.NewTLS(config), nil
-}
-
-// Init initializes the model client with connection pooling and circuit breakers
+// Init(ctx context.Context) error {
 func (m *ModelClient) Init(ctx context.Context) error {
-tlsCreds, err := loadTLSCredentials()
-if err != nil {
-return err
+    tlsCreds, err := loadTLSCredentials()
+    if err != nil {
+        return err
+    }
+
+    // Configure keepalive for better connection management
+    keepaliveParams := keepalive.ClientParameters{
+        Time:                10 * time.Second, // ping every 10 seconds
+        Timeout:            2 * time.Second,  // wait 2 seconds for pong
+        PermitWithoutStream: true,
+    }
+
+    conn, err := grpc.DialContext(ctx, m.addr,
+        grpc.WithTransportCredentials(tlsCreds),
+        grpc.WithBlock(),
+        grpc.WithTimeout(10*time.Second),
+        grpc.WithKeepaliveParams(keepaliveParams),
+    )
+    if err != nil {
+        return err
+    }
+
+    m.conn = conn
+    m.stub = model.NewModelServiceClient(conn)
+
+    // Initialize circuit breakers for different models
+    hystrix.ConfigureCommand("model_generate", hystrix.CommandConfig{
+        Timeout:                5000, // 5 seconds
+        MaxConcurrentRequests:  50,
+        ErrorPercentThreshold:  30,
+        SleepWindow:            10000, // 10 seconds
+        RequestVolumeThreshold: 10,
+    })
+
+    hystrix.ConfigureCommand("model_generate_stream", hystrix.CommandConfig{
+        Timeout:                10000, // 10 seconds
+        MaxConcurrentRequests:  30,
+        ErrorPercentThreshold:  25,
+        SleepWindow:            15000, // 15 seconds
+        RequestVolumeThreshold: 5,
+    })
+
+    // Initialize connection pool
+    for i := 0; i < m.maxConnections; i++ {
+        conn, err := grpc.DialContext(ctx, m.addr,
+            grpc.WithTransportCredentials(tlsCreds),
+            grpc.WithBlock(),
+            grpc.WithTimeout(10*time.Second),
+            grpc.WithKeepaliveParams(keepaliveParams),
+        )
+        if err != nil {
+            log.Printf("Failed to create connection for pool: %v", err)
+            continue
+        }
+        m.connectionPool.Put(conn)
+        atomic.AddInt32(&m.connectionCount, 1)
+    }
+
+    return nil
 }
 
-// Create connection pool (2 connections for redundancy)
-connPoolSize := 2
-m.connPool = make([]*grpc.ClientConn, connPoolSize)
-
-for i := 0; i < connPoolSize; i++ {
-conn, err := grpc.DialContext(ctx, m.addr,
-grpc.WithTransportCredentials(tlsCreds),
-grpc.WithBlock(),
-grpc.WithTimeout(10*time.Second),
-grpc.WithKeepaliveParams(keepalive.ClientParameters{
-Time:                10 * time.Second, // send pings every 10 seconds if there is no activity
-Timeout:             2 * time.Second, // wait 2 seconds for pong response
-PermitWithoutStream: true,
-}),
-)
-if err != nil {
-return err
-}
-m.connPool[i] = conn
-}
-
-// Use the first connection for the stub
-m.stub = model.NewModelServiceClient(m.connPool[0])
-return nil
-}
-
-// getNextConnection returns the next connection in the pool with round-robin
-func (m *ModelClient) getNextConnection() *grpc.ClientConn {
-m.mu.Lock()
-defer m.mu.Unlock()
-
-conn := m.connPool[m.currentConn]
-m.currentConn = (m.currentConn + 1) % len(m.connPool)
-return conn
+// ReturnConnectionToPool возвращает соединение обратно в пул
+func (m *ModelClient) ReturnConnectionToPool(conn *grpc.ClientConn) {
+    if m.connectionPool != nil && conn != nil {
+        m.connectionPool.Put(conn)
+    }
 }
 
 // Close закрывает все соединения
 func (m *ModelClient) Close() {
-m.mu.Lock()
-defer m.mu.Unlock()
+    if m.conn != nil {
+        m.conn.Close()
+    }
 
-for _, conn := range m.connPool {
-if conn != nil {
-conn.Close()
-}
-}
-}
-
-// withRetry executes a function with retry logic and exponential backoff
-func (m *ModelClient) withRetry(ctx context.Context, operation string, fn func() error) error {
-var lastErr error
-backoff := m.retryConfig.InitialBackoff
-
-for attempt := 0; attempt <= m.retryConfig.MaxRetries; attempt++ {
-// Check if context is cancelled
-select {
-case <-ctx.Done():
-return ctx.Err()
-default:
-}
-
-// Execute the operation
-err := fn()
-if err == nil {
-return nil
-}
-
-lastErr = err
-log.Printf("Attempt %d failed for %s: %v", attempt+1, operation, err)
-
-// If this is the last attempt, break
-if attempt == m.retryConfig.MaxRetries {
-break
-}
-
-// Exponential backoff with jitter
-time.Sleep(backoff)
-backoff = backoff * 2
-if backoff > m.retryConfig.MaxBackoff {
-backoff = m.retryConfig.MaxBackoff
-}
-}
-
-return lastErr
-}
-
-// withCircuitBreaker executes a function with circuit breaker protection
-func (m *ModelClient) withCircuitBreaker(ctx context.Context, operation string, fn func() (interface{}, error)) (interface{}, error) {
-result, err := m.circuitBreaker.Execute(func() (interface{}, error) {
-// Start a span for the circuit breaker operation
-tracer := otel.GetTracerProvider().Tracer("head-go")
-ctx, span := tracer.Start(ctx, "CircuitBreaker_"+operation)
-defer span.End()
-
-// Execute the function
-res, err := fn()
-if err != nil {
-span.SetStatus(codes.Error, err.Error())
-span.RecordError(err)
-return nil, err
-}
-
-return res, nil
-})
-
-if err != nil {
-log.Printf("Circuit breaker error for %s: %v", operation, err)
-return nil, err
-}
-
-return result, nil
+    // Close all connections in the pool
+    for {
+        conn := m.connectionPool.Get()
+        if conn == nil {
+            break
+        }
+        if grpcConn, ok := conn.(*grpc.ClientConn); ok {
+            grpcConn.Close()
+        }
+    }
 }
 
 // Generate — обычный (не стриминговый) вызов к модели с ретраями и circuit breaker
 func (m *ModelClient) Generate(
-ctx context.Context,
-modelName string,
-messages []string,
-temperature float32,
-maxTokens int32,
+    ctx context.Context,
+    modelName string,
+    messages []string,
+    temperature float32,
+    maxTokens int32,
 ) (text string, tokens int, err error) {
-// Start a span for the Generate operation
-tracer := otel.GetTracerProvider().Tracer("head-go")
-ctx, span := tracer.Start(ctx, "ModelClient.Generate")
-defer span.End()
+    // Start a span for the Generate operation
+    tracer := otel.GetTracerProvider().Tracer("head-go")
+    ctx, span := tracer.Start(ctx, "ModelClient.Generate")
+    defer span.End()
 
-span.SetAttributes(
-trace.StringAttribute("model", modelName),
-trace.IntAttribute("max_tokens", int(maxTokens)),
-trace.Float64Attribute("temperature", float64(temperature)),
-)
+    span.SetAttributes(
+        trace.StringAttribute("model", modelName),
+        trace.IntAttribute("max_tokens", int(maxTokens)),
+        trace.Float64Attribute("temperature", float64(temperature)),
+    )
 
-req := &model.GenRequest{
-RequestId:   "",
-Model:       modelName,
-Messages:    messages,
-Temperature: temperature,
-MaxTokens:   maxTokens,
-Stream:      false,
-}
+    // Increment active request count
+    atomic.AddInt32(&m.activeRequests, 1)
+    defer atomic.AddInt32(&m.activeRequests, -1)
 
-// Execute with circuit breaker and retry logic
-result, err := m.withCircuitBreaker(ctx, "Generate", func() (interface{}, error) {
-var resp *model.GenResponse
+    // Update active connections metric
+    activeModelConnections.Set(float64(atomic.LoadInt32(&m.activeRequests)))
 
-err := m.withRetry(ctx, "Generate", func() error {
-// Get next connection from pool
-conn := m.getNextConnection()
-client := model.NewModelServiceClient(conn)
+    start := time.Now()
+    defer func() {
+        modelRequestLatency.WithLabelValues(modelName).Observe(time.Since(start).Seconds())
+    }()
 
-var err error
-resp, err = client.Generate(ctx, req)
-return err
-})
+    req := &model.GenRequest{
+        RequestId:   "",
+        Model:       modelName,
+        Messages:    messages,
+        Temperature: temperature,
+        MaxTokens:   maxTokens,
+        Stream:      false,
+    }
 
-if err != nil {
-return nil, err
-}
+    // Get connection from pool or create new one
+    var conn *grpc.ClientConn
+    if m.connectionPool != nil {
+        connInterface := m.connectionPool.Get()
+        if connInterface != nil {
+            conn = connInterface.(*grpc.ClientConn)
+            if conn.GetState() != grpc.ConnectivityReady {
+                // Connection not ready, create new one
+                conn.Close()
+                conn = nil
+            }
+        }
+    }
 
-return resp, nil
-})
+    if conn == nil {
+        // Fallback to default connection
+        conn = m.conn
+    }
 
-if err != nil {
-span.SetStatus(codes.Error, err.Error())
-span.RecordError(err)
-return "", 0, err
-}
+    // Execute with circuit breaker
+    var resp *model.GenResponse
+    err = hystrix.Do("model_generate", func() error {
+        var innerErr error
+        client := model.NewModelServiceClient(conn)
+        resp, innerErr = client.Generate(ctx, req)
+        return innerErr
+    }, nil)
 
-resp := result.(*model.GenResponse)
-return resp.Text, int(resp.TokensUsed), nil
+    if err != nil {
+        modelRequestErrors.WithLabelValues(modelName, "generate_error").Inc()
+        circuitBreakerErrors.WithLabelValues(modelName, "generate_circuit_breaker").Inc()
+        return "", 0, err
+    }
+
+    // Return connection to pool if it's from the pool
+    if conn != m.conn {
+        m.ReturnConnectionToPool(conn)
+    }
+
+    return resp.Text, int(resp.TokensUsed), nil
 }
 
 // GenerateStream — настоящий стриминговый вызов Возвращает канал, по которому приходят чанки
 func (m *ModelClient) GenerateStream(
-ctx context.Context,
-modelName string,
-messages []string,
-temperature float32,
-maxTokens int32,
+    ctx context.Context,
+    modelName string,
+    messages []string,
+    temperature float32,
+    maxTokens int32,
 ) (<-chan *model.GenResponse, <-chan error) {
-// Start a span for the GenerateStream operation
-tracer := otel.GetTracerProvider().Tracer("head-go")
-ctx, span := tracer.Start(ctx, "ModelClient.GenerateStream")
-defer span.End()
+    // Start a span for the GenerateStream operation
+    tracer := otel.GetTracerProvider().Tracer("head-go")
+    ctx, span := tracer.Start(ctx, "ModelClient.GenerateStream")
+    defer span.End()
 
-span.SetAttributes(
-trace.StringAttribute("model", modelName),
-trace.IntAttribute("max_tokens", int(maxTokens)),
-trace.Float64Attribute("temperature", float64(temperature)),
-)
+    span.SetAttributes(
+        trace.StringAttribute("model", modelName),
+        trace.IntAttribute("max_tokens", int(maxTokens)),
+        trace.Float64Attribute("temperature", float64(temperature)),
+    )
 
-streamCh := make(chan *model.GenResponse, 10)
-errCh := make(chan error, 1)
+    streamCh := make(chan *model.GenResponse, 10)
+    errCh := make(chan error, 1)
 
-go func() {
-defer close(streamCh)
-defer close(errCh)
+    go func() {
+        defer close(streamCh)
+        defer close(errCh)
 
-req := &model.GenRequest{
-RequestId:   "",
-Model:       modelName,
-Messages:    messages,
-Temperature: temperature,
-MaxTokens:   maxTokens,
-Stream:      true,
-}
+        // Start tracing span
+        tracer := otel.Tracer("model-client")
+        ctx, span := tracer.Start(ctx, "GenerateStream",
+            trace.WithAttributes(
+                attribute.String("model", modelName),
+                attribute.Int("messages", len(messages)),
+            ),
+        )
+        defer span.End()
 
-// Execute with circuit breaker and retry logic
-_, err := m.withCircuitBreaker(ctx, "GenerateStream", func() (interface{}, error) {
-var clientStream model.ModelService_GenerateStreamClient
+        req := &model.GenRequest{
+            RequestId:   "",
+            Model:       modelName,
+            Messages:    messages,
+            Temperature: temperature,
+            MaxTokens:   maxTokens,
+            Stream:      true,
+        }
 
-err := m.withRetry(ctx, "GenerateStream", func() error {
-// Get next connection from pool
-conn := m.getNextConnection()
-client := model.NewModelServiceClient(conn)
+        // Get connection from pool or create new one
+        var conn *grpc.ClientConn
+        if m.connectionPool != nil {
+            connInterface := m.connectionPool.Get()
+            if connInterface != nil {
+                conn = connInterface.(*grpc.ClientConn)
+                if conn.GetState() != grpc.ConnectivityReady {
+                    // Connection not ready, create new one
+                    conn.Close()
+                    conn = nil
+                }
+            }
+        }
 
-var err error
-clientStream, err = client.GenerateStream(ctx, req)
-return err
-})
+        if conn == nil {
+            // Fallback to default connection
+            conn = m.conn
+        }
 
-if err != nil {
-return nil, err
-}
+        // Execute with circuit breaker
+        var clientStream model.ModelService_GenerateStreamClient
+        err := hystrix.Do("model_generate_stream", func() error {
+            var innerErr error
+            client := model.NewModelServiceClient(conn)
+            clientStream, innerErr = client.GenerateStream(ctx, req)
+            return innerErr
+        }, nil)
 
-// Process the stream
-for {
-chunk, err := clientStream.Recv()
-if err == io.EOF {
-return nil, nil
-}
-if err != nil {
-return nil, err
-}
-streamCh <- chunk
-}
-})
+        if err != nil {
+            modelRequestErrors.WithLabelValues(modelName, "stream_error").Inc()
+            circuitBreakerErrors.WithLabelValues(modelName, "stream_circuit_breaker").Inc()
+            errCh <- err
+            return
+        }
 
-if err != nil {
-span.SetStatus(codes.Error, err.Error())
-span.RecordError(err)
-errCh <- err
-}
-}()
+        for {
+            chunk, err := clientStream.Recv()
+            if err == io.EOF {
+                // Return connection to pool if it's from the pool
+                if conn != m.conn {
+                    m.ReturnConnectionToPool(conn)
+                }
+                return
+            }
+            if err != nil {
+                modelRequestErrors.WithLabelValues(modelName, "stream_recv_error").Inc()
+                errCh <- err
+                return
+            }
+            streamCh <- chunk
+        }
+    }()
 
-return streamCh, errCh
+    return streamCh, errCh
 }

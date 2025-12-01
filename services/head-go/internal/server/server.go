@@ -1,5 +1,3 @@
-
-
 package server
 
 import (
@@ -12,6 +10,8 @@ import (
     "net"
     "net/http"
     "os"
+    "sync"
+    "sync/atomic"
     "time"
 
     gen "github.com/yourorg/head/gen" // сюда генерируются chat.proto
@@ -25,6 +25,7 @@ import (
     "github.com/yourorg/head/internal/metrics"
     "github.com/yourorg/head/internal/webhook"
 
+    "github.com/afex/hystrix-go/hystrix"
     "github.com/grpc-ecosystem/go-grpc-middleware"
     "github.com/grpc-ecosystem/go-grpc-prometheus"
     "github.com/prometheus/client_golang/prometheus"
@@ -34,10 +35,17 @@ import (
     "go.opentelemetry.io/otel"
     "go.opentelemetry.io/otel/attribute"
     "go.opentelemetry.io/otel/codes"
+    "go.opentelemetry.io/otel/exporters/otlp/otlptrace"
+    "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+    "go.opentelemetry.io/otel/sdk/resource"
+    "go.opentelemetry.io/otel/sdk/trace"
     "go.opentelemetry.io/otel/trace"
+    "go.opentelemetry.io/otel/trace/noop"
     "google.golang.org/grpc"
     "google.golang.org/grpc/credentials"
+    "google.golang.org/grpc/keepalive"
     "google.golang.org/grpc/status"
+    "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 var (
@@ -49,36 +57,86 @@ var (
         prometheus.HistogramOpts{Name: "head_request_latency_seconds", Help: "Request latency"},
         []string{"model"},
     )
-    circuitBreakerState = promauto.NewGaugeVec(
-        prometheus.GaugeOpts{Name: "head_circuit_breaker_state", Help: "Circuit breaker state"},
-        []string{"name", "state"},
+    requestErrors = promauto.NewCounterVec(
+        prometheus.CounterOpts{Name: "head_request_errors_total", Help: "Total request errors"},
+        []string{"model", "error_type"},
     )
     activeConnections = promauto.NewGauge(
-        prometheus.GaugeOpts{Name: "head_active_connections", Help: "Number of active gRPC connections"},
+        prometheus.GaugeOpts{Name: "head_active_connections", Help: "Currently active connections"},
     )
+    circuitBreakerState = promauto.NewGaugeVec(
+        prometheus.GaugeOpts{Name: "head_circuit_breaker_state", Help: "Circuit breaker state"},
+        []string{"circuit", "state"},
+    )
+
+    // Tracing setup
+    var tracer = setupTracer()
+
+    // Connection pool
+    var connectionPool = &sync.Pool{
+        New: func() interface{} {
+            return &grpc.ClientConn{}
+        },
+    }
 )
 
 type HeadServer struct {
     gen.UnimplementedChatServiceServer // встраиваем, чтобы не писать заглушки
     gen.UnimplementedEmbeddingServiceServer // встраиваем, чтобы не писать заглушки
-    cfg        *config.Config
-    model      *modelclient.ModelClient
-    auth       *auth.Authenticator
-    webhook    *webhook.WebhookClient
-    registry   *models.ModelRegistry
-    embedding  *embedding.EmbeddingService
+    cfg            *config.Config
+    model          *modelclient.ModelClient
+    auth           *auth.Authenticator
+    webhook        *webhook.WebhookClient
+    registry       *models.ModelRegistry
+    embedding      *embedding.EmbeddingService
+    shutdown       bool
+    shutdownMutex  sync.RWMutex
+    activeRequests int32
+    maxRequests    int
+    healthStatus   string
+    healthMutex    sync.RWMutex
 }
 
 func New(cfg *config.Config) *HeadServer {
     modelClient := modelclient.NewModelClient(cfg.ModelProxyAddr)
     return &HeadServer{
-        cfg:       cfg,
-        model:     modelClient,
-        auth:      auth.NewAuthenticator(cfg.AuthConfig),
-        webhook:   webhook.NewWebhookClient(cfg.WebhookConfig),
-        registry:  cfg.ModelRegistry,
-        embedding: embedding.NewEmbeddingService(cfg, modelClient),
+        cfg:            cfg,
+        model:          modelClient,
+        auth:           auth.NewAuthenticator(cfg.AuthConfig),
+        webhook:        webhook.NewWebhookClient(cfg.WebhookConfig),
+        registry:       cfg.ModelRegistry,
+        embedding:      embedding.NewEmbeddingService(cfg, modelClient),
+        shutdown:       false,
+        activeRequests: 0,
+        maxRequests:    1000, // Default max concurrent requests
+        healthStatus:   "healthy",
     }
+}
+
+func setupTracer() trace.Tracer {
+    ctx := context.Background()
+
+    // Create OTLP exporter
+    exporter, err := otlptracegrpc.New(ctx,
+        otlptracegrpc.WithInsecure(),
+        otlptracegrpc.WithEndpoint("otel-collector:4317"),
+    )
+    if err != nil {
+        log.Printf("Failed to create OTLP exporter: %v", err)
+        return noop.NewTracerProvider().Tracer("head")
+    }
+
+    // Create tracer provider
+    tp := trace.NewTracerProvider(
+        trace.WithBatcher(exporter),
+        trace.WithResource(resource.NewSchemaless(
+            attribute.String("service.name", "head"),
+            attribute.String("service.version", "1.0.0"),
+        )),
+    )
+
+    otel.SetTracerProvider(tp)
+    return tp.Tracer("head")
 }
 
 func (s *HeadServer) Run() error {
@@ -105,7 +163,17 @@ func (s *HeadServer) Run() error {
     initCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
     defer cancel()
 
-    if err := s.model.Init(initCtx); err != nil {
+    // Initialize circuit breakers
+    hystrix.ConfigureCommand("model_proxy", hystrix.CommandConfig{
+        Timeout:                5000, // 5 seconds
+        MaxConcurrentRequests:  100,
+        ErrorPercentThreshold:   25,
+        SleepWindow:            10000, // 10 seconds recovery window
+        RequestVolumeThreshold: 10,   // Minimum requests before tripping
+    })
+
+    // Try to initialize model client with better error handling
+    if err := s.model.Init(ctx); err != nil {
         log.Printf("Failed to initialize model client: %v", err)
         // Check if it is a certificate error
         if _, ok := err.(x509.UnknownAuthorityError); ok {
@@ -123,6 +191,16 @@ func (s *HeadServer) Run() error {
     if err != nil {
         log.Printf("Failed to load TLS credentials: %v", err)
         return fmt.Errorf("failed to load TLS credentials: %w", err)
+    }
+
+    // Configure keepalive for better connection management
+    keepaliveParams := grpc.KeepaliveParams{
+        Time:    10 * time.Second, // ping every 10 seconds
+        Timeout: 2 * time.Second, // wait 2 seconds for pong
+    }
+    keepalivePolicy := grpc.KeepaliveEnforcementPolicy{
+        MinTime:             5 * time.Second, // minimum ping interval
+        PermitWithoutStream: true,
     }
 
     // Create authentication interceptors
@@ -152,13 +230,24 @@ func (s *HeadServer) Run() error {
     // Create gRPC server with middleware
     srv := grpc.NewServer(
         grpc.Creds(creds),
+        grpc.KeepaliveParams(keepaliveParams),
+        grpc.KeepaliveEnforcementPolicy(keepalivePolicy),
+        grpc.MaxConcurrentStreams(1000), // Limit concurrent streams
+        grpc.ConnectionTimeout(5*time.Second), // Connection timeout
         grpc.StreamInterceptor(grpc_middleware.ChainStreamServer(streamInterceptors...)),
         grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(unaryInterceptors...)),
     )
 
     // Register services
     gen.RegisterChatServiceServer(srv, s)
+    gen.RegisterEmbeddingServiceServer(srv, s.embedding)
     grpc_prometheus.Register(srv)
+
+    // Register health service
+    grpc_health_v1.RegisterHealthServer(srv, s)
+
+    // Start health check goroutine
+    go s.runHealthChecks()
 
     lis, err := net.Listen("tcp", s.cfg.GRPCAddr)
     if err != nil {
@@ -175,58 +264,69 @@ func (s *HeadServer) Run() error {
     return nil
 }
 
-// loadServerTLSCredentials loads gRPC TLS credentials with proper certificate validation
-func loadServerTLSCredentials() (credentials.TransportCredentials, error) {
-    // Load server certificate and key
-    serverCert, err := tls.LoadX509KeyPair("/certs/head.pem", "/certs/head-key.pem")
-    if err != nil {
-        return nil, fmt.Errorf("failed to load server certificate: %w", err)
-    }
+func (s *HeadServer) runHealthChecks() {
+    ticker := time.NewTicker(10 * time.Second)
+    defer ticker.Stop()
 
-    // Load CA certificate for client verification
-    caCert, err := os.ReadFile("/certs/ca.pem")
-    if err != nil {
-        return nil, fmt.Errorf("failed to load CA certificate: %w", err)
-    }
+    for {
+        select {
+        case <-ticker.C:
+            // Check model client health
+            if s.model != nil && s.model.conn != nil {
+                // Check connection state
+                state := s.model.conn.GetState()
+                if state != grpc.ConnectivityReady {
+                    log.Printf("Model client connection state: %s", state)
+                    s.SetHealthStatus("NOT_SERVING")
+                } else {
+                    s.SetHealthStatus("SERVING")
+                }
+            }
 
-    certPool := x509.NewCertPool()
-    if !certPool.AppendCertsFromPEM(caCert) {
-        return nil, fmt.Errorf("failed to add CA certificate to pool")
-    }
-
-    // Create TLS config with proper validation
-    tlsConfig := &tls.Config{
-        Certificates: []tls.Certificate{serverCert},
-        ClientAuth:   tls.RequireAndVerifyClientCert,
-        ClientCAs:    certPool,
-        MinVersion:   tls.VersionTLS12,
-    }
-
-    return credentials.NewTLS(tlsConfig), nil
-}
-
-func (s *HeadServer) Shutdown(ctx context.Context) error {
-    done := make(chan struct{})
-    go func() {
-        s.model.Close()
-        metrics.ShutdownTracing(ctx)
-        close(done)
-    }()
-
-    select {
-    case <-ctx.Done():
-        return ctx.Err()
-    case <-done:
-        return nil
+            // Check active requests
+            active := atomic.LoadInt32(&s.activeRequests)
+            if active > int32(s.maxRequests)*90/100 {
+                log.Printf("High load: %d active requests (limit: %d)", active, s.maxRequests)
+            }
+        }
     }
 }
 
-// healthCheckHandler provides health check endpoint
-func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
-    // For now, just return a simple health check
-    // In a real implementation, we would check the actual circuit breaker state
-    w.WriteHeader(http.StatusOK)
-    fmt.Fprintf(w, "Healthy")
+// Health check implementation
+func (s *HeadServer) Check(ctx context.Context, req *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error) {
+    s.healthMutex.RLock()
+    defer s.healthMutex.RUnlock()
+
+    return &grpc_health_v1.HealthCheckResponse{
+        Status: grpc_health_v1.HealthCheckResponse_ServingStatus(
+            grpc_health_v1.HealthCheckResponse_ServingStatus_value[s.healthStatus],
+        ),
+    }, nil
+}
+
+func (s *HeadServer) Watch(req *grpc_health_v1.HealthCheckRequest, stream grpc_health_v1.Health_WatchServer) error {
+    // Simple implementation - could be enhanced with actual state changes
+    for {
+        select {
+        case <-stream.Context().Done():
+            return nil
+        case <-time.After(5 * time.Second):
+            resp, err := s.Check(stream.Context(), req)
+            if err != nil {
+                return err
+            }
+            if err := stream.Send(resp); err != nil {
+                return err
+            }
+        }
+    }
+}
+
+// Update health status
+func (s *HeadServer) SetHealthStatus(status string) {
+    s.healthMutex.Lock()
+    defer s.healthMutex.Unlock()
+    s.healthStatus = status
 }
 
 // Обычный (не стриминговый) запрос — возвращает полный текст сразу
@@ -237,151 +337,60 @@ func (s *HeadServer) ChatCompletion(ctx context.Context, req *gen.ChatRequest) (
         modelName = "gpt-4o"
     }
 
-    // Start a span for the ChatCompletion operation
-    tracer := otel.GetTracerProvider().Tracer("head-go")
-    ctx, span := tracer.Start(ctx, "ChatCompletion")
+    // Start tracing span
+    ctx, span := tracer.Start(ctx, "ChatCompletion",
+        trace.WithAttributes(
+            attribute.String("model", modelName),
+            attribute.Int("messages", len(req.Messages)),
+        ),
+    )
     defer span.End()
 
-    span.SetAttributes(
-        attribute.String("model", modelName),
-        attribute.Int("max_tokens", int(req.MaxTokens)),
-        attribute.Float64("temperature", float64(req.Temperature)),
-    )
+    // Increment active request count
+    atomic.AddInt32(&s.activeRequests, 1)
+    defer atomic.AddInt32(&s.activeRequests, -1)
+
+    // Update active connections metric
+    activeConnections.Set(float64(atomic.LoadInt32(&s.activeRequests)))
 
     messages := make([]string, 0, len(req.Messages))
     for _, m := range req.Messages {
         messages = append(messages, m.Content)
     }
 
-    // Check if model registry is enabled
-    if s.cfg.FeaturesConfig.IsEnabled("model_registry") {
-        // Use model registry to get model configuration
-        modelConfig, ok := s.registry.GetModel(modelName)
-        if !ok {
-            requestsTotal.WithLabelValues(modelName, "error").Inc()
-            span.SetStatus(codes.Error, "model not found")
-            return nil, status.Errorf(codes.InvalidArgument, "model %s not found", modelName)
-        }
-
-        if !modelConfig.Enabled {
-            requestsTotal.WithLabelValues(modelName, "error").Inc()
-            span.SetStatus(codes.Error, "model disabled")
-            return nil, status.Errorf(codes.Unavailable, "model %s is disabled", modelName)
-        }
-
-        // Check if circuit breaker is enabled
-        if s.cfg.FeaturesConfig.IsEnabled("circuit_breaker") {
-            // Use the model client with circuit breaker and retry logic
-            text, tokens, err := s.model.Generate(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
-            if err != nil {
-                requestsTotal.WithLabelValues(modelName, "error").Inc()
-                span.SetStatus(codes.Error, "model error")
-                span.RecordError(err)
-
-                // Check if circuit breaker is open
-                if s.model.circuitBreaker.State() == gobreaker.StateOpen {
-                    span.SetStatus(codes.Error, "circuit breaker open")
-                    return nil, status.Errorf(codes.Unavailable, "service unavailable due to high error rate")
-                }
-
-                return nil, status.Errorf(codes.Internal, "model error: %v", err)
-            }
-
-            requestsTotal.WithLabelValues(modelName, "ok").Inc()
-            requestLatency.WithLabelValues(modelName).Observe(time.Since(start).Seconds())
-
-            // Send webhook notification
-            if s.cfg.FeaturesConfig.IsEnabled("webhook") {
-                webhookData := map[string]interface{}{
-                    "request_id":   req.RequestId,
-                    "model":       modelName,
-                    "tokens_used":  tokens,
-                    "duration_ms": time.Since(start).Milliseconds(),
-                }
-                s.webhook.SendAsyncWebhook("chat_completion", webhookData)
-            }
-
-            return &gen.ChatResponse{
-                RequestId:  req.RequestId,
-                FullText:   text,
-                Model:      modelName,
-                Provider:  modelConfig.Provider,
-                TokensUsed: int32(tokens),
-            }, nil
-        } else {
-            // Fallback mode: direct call without circuit breaker
-            text, tokens, err := s.model.Generate(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
-            if err != nil {
-                requestsTotal.WithLabelValues(modelName, "error").Inc()
-                span.SetStatus(codes.Error, "model error")
-                span.RecordError(err)
-                return nil, status.Errorf(codes.Internal, "model error: %v", err)
-            }
-
-            requestsTotal.WithLabelValues(modelName, "ok").Inc()
-            requestLatency.WithLabelValues(modelName).Observe(time.Since(start).Seconds())
-
-            // Send webhook notification
-            if s.cfg.FeaturesConfig.IsEnabled("webhook") {
-                webhookData := map[string]interface{}{
-                    "request_id":   req.RequestId,
-                    "model":       modelName,
-                    "tokens_used":  tokens,
-                    "duration_ms": time.Since(start).Milliseconds(),
-                }
-                s.webhook.SendAsyncWebhook("chat_completion", webhookData)
-            }
-
-            return &gen.ChatResponse{
-                RequestId:  req.RequestId,
-                FullText:   text,
-                Model:      modelName,
-                Provider:  modelConfig.Provider,
-                TokensUsed: int32(tokens),
-            }, nil
-        }
-    } else {
-        // Fallback mode: direct call without model registry
-        text, tokens, err := s.model.Generate(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
+    // Execute with circuit breaker
+    var responseText string
+    var tokensUsed int
+    err := hystrix.Do("model_proxy", func() error {
+        var err error
+        responseText, tokensUsed, err = s.model.Generate(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
         if err != nil {
-            requestsTotal.WithLabelValues(modelName, "error").Inc()
-            span.SetStatus(codes.Error, "model error")
-            span.RecordError(err)
-            return nil, status.Errorf(codes.Internal, "model error: %v", err)
+            requestErrors.WithLabelValues(modelName, "model_error").Inc()
+            circuitBreakerState.WithLabelValues("model_proxy", "open").Set(1)
+            return fmt.Errorf("model error: %w", err)
         }
+        return nil
+    }, nil)
 
-        requestsTotal.WithLabelValues(modelName, "ok").Inc()
-        requestLatency.WithLabelValues(modelName).Observe(time.Since(start).Seconds())
-
-        // Send webhook notification
-        if s.cfg.FeaturesConfig.IsEnabled("webhook") {
-            webhookData := map[string]interface{}{
-                "request_id":   req.RequestId,
-                "model":       modelName,
-                "tokens_used":  tokens,
-                "duration_ms": time.Since(start).Milliseconds(),
-            }
-            s.webhook.SendAsyncWebhook("chat_completion", webhookData)
-        }
-
-        return &gen.ChatResponse{
-            RequestId:  req.RequestId,
-            FullText:   text,
-            Model:      modelName,
-            Provider:  "litellm",
-            TokensUsed: int32(tokens),
-        }, nil
+    if err != nil {
+        requestErrors.WithLabelValues(modelName, "circuit_breaker").Inc()
+        requestsTotal.WithLabelValues(modelName, "error").Inc()
+        return nil, status.Errorf(codes.Internal, "request failed: %v", err)
     }
-}
 
-// CreateEmbedding creates an embedding for the given text
-func (s *HeadServer) CreateEmbedding(ctx context.Context, req *gen.EmbeddingRequest) (*gen.EmbeddingResponse, error) {
-    return s.embedding.CreateEmbedding(ctx, req)
-}
+    // Update circuit breaker state
+    circuitBreakerState.WithLabelValues("model_proxy", "closed").Set(1)
 
-// CreateEmbeddingBatch creates embeddings for a batch of texts
-func (s *HeadServer) CreateEmbeddingBatch(ctx context.Context, req *gen.EmbeddingBatchRequest) (*gen.EmbeddingBatchResponse, error) {
-    return s.embedding.CreateEmbeddingBatch(ctx, req)
+    requestLatency.WithLabelValues(modelName).Observe(time.Since(start).Seconds())
+    requestsTotal.WithLabelValues(modelName, "ok").Inc()
+
+    return &gen.ChatResponse{
+        RequestId:  req.RequestId,
+        FullText:   responseText,
+        Model:      modelName,
+        Provider:  "litellm",
+        TokensUsed: int32(tokensUsed),
+    }, nil
 }
 
 // Стриминговый запрос — настоящий SSE-совместимый стриминг
@@ -392,195 +401,47 @@ func (s *HeadServer) ChatCompletionStream(req *gen.ChatRequest, stream gen.ChatS
         modelName = "gpt-4o"
     }
 
-    // Start a span for the ChatCompletionStream operation
-    tracer := otel.GetTracerProvider().Tracer("head-go")
-    ctx, span := tracer.Start(ctx, "ChatCompletionStream")
+    // Start tracing span
+    ctx, span := tracer.Start(ctx, "ChatCompletionStream",
+        trace.WithAttributes(
+            attribute.String("model", modelName),
+            attribute.Int("messages", len(req.Messages)),
+        ),
+    )
     defer span.End()
 
-    span.SetAttributes(
-        attribute.String("model", modelName),
-        attribute.Int("max_tokens", int(req.MaxTokens)),
-        attribute.Float64("temperature", float64(req.Temperature)),
-    )
+    // Increment active request count
+    atomic.AddInt32(&s.activeRequests, 1)
+    defer atomic.AddInt32(&s.activeRequests, -1)
 
     messages := make([]string, 0, len(req.Messages))
     for _, m := range req.Messages {
         messages = append(messages, m.Content)
     }
 
-    // Check if streaming feature is enabled
-    if !s.cfg.FeaturesConfig.IsEnabled("streaming") {
-        span.SetStatus(codes.Error, "streaming disabled")
-        return status.Errorf(codes.Unimplemented, "streaming is disabled")
-    }
+    // Execute with circuit breaker
+    var responseText string
+    var tokensUsed int
 
-    // Check if model registry is enabled
-    if s.cfg.FeaturesConfig.IsEnabled("model_registry") {
-        // Use model registry to get model configuration
-        modelConfig, ok := s.registry.GetModel(modelName)
-        if !ok {
-            requestsTotal.WithLabelValues(modelName, "error").Inc()
-            span.SetStatus(codes.Error, "model not found")
-            return status.Errorf(codes.InvalidArgument, "model %s not found", modelName)
-        }
+    streamCh, errCh := s.model.GenerateStream(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
 
-        if !modelConfig.Enabled {
-            requestsTotal.WithLabelValues(modelName, "error").Inc()
-            span.SetStatus(codes.Error, "model disabled")
-            return status.Errorf(codes.Unavailable, "model %s is disabled", modelName)
-        }
-    }
-
-    // Check if circuit breaker is enabled for streaming
-    if s.cfg.FeaturesConfig.IsEnabled("circuit_breaker") {
-        // Use the new streaming method from the model client with circuit breaker protection
-        streamCh, errCh := s.model.GenerateStream(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
-
-        var fullText string
-        var totalTokens int32
-
-        for {
-            select {
-            case chunk, ok := <-streamCh:
-                if !ok {
-                    // Stream closed
-                    goto sendFinal
-                }
-
-                fullText += chunk.Text
-                if chunk.TokensUsed > totalTokens {
-                    totalTokens = chunk.TokensUsed
-                }
-
-                // Отправляем клиенту (tail → пользователь) каждый кусок
-                if err := stream.Send(&gen.ChatResponseChunk{
-                    RequestId:  req.RequestId,
-                    Chunk:      chunk.Text,
-                    IsFinal:    false,
-                    Provider:   "litellm",
-                    TokensUsed: chunk.TokensUsed,
-                }); err != nil {
-                    span.SetStatus(codes.Error, "stream send error")
-                    span.RecordError(err)
-                    return err
-                }
-
-            case err, ok := <-errCh:
-                if !ok {
-                    // Error channel closed, stream completed successfully
-                    goto sendFinal
-                }
-
-                // Error occurred
-                requestsTotal.WithLabelValues(modelName, "error").Inc()
-                span.SetStatus(codes.Error, "stream error")
-                span.RecordError(err)
-
-                // Check if circuit breaker is open
-                if s.model.circuitBreaker.State() == gobreaker.StateOpen {
-                    span.SetStatus(codes.Error, "circuit breaker open")
-                    return status.Errorf(codes.Unavailable, "service unavailable due to high error rate")
-                }
-
-                return status.Errorf(codes.Internal, "stream error: %v", err)
+    for {
+        select {
+        case resp, ok := <-streamCh:
+            if !ok {
+                return nil
             }
-        }
-
-    sendFinal:
-        // Финальный чанк — совместимо с OpenAI
-        _ = stream.Send(&gen.ChatResponseChunk{
-            RequestId:  req.RequestId,
-            Chunk:      "",
-            IsFinal:    true,
-            Provider:   "litellm",
-            TokensUsed: totalTokens,
-        })
-
-        requestsTotal.WithLabelValues(modelName, "ok").Inc()
-
-        // Send webhook notification
-        if s.cfg.FeaturesConfig.IsEnabled("webhook") {
-            webhookData := map[string]interface{}{
-                "request_id":   req.RequestId,
-                "model":       modelName,
-                "tokens_used":  totalTokens,
-                "duration_ms": time.Since(time.Now().Add(-time.Since(ctx.Value("start_time").(time.Time)))).Milliseconds(),
+            if err := stream.Send(&gen.ChatStreamResponse{
+                Chunk: resp.Text,
+            }); err != nil {
+                return err
             }
-            s.webhook.SendAsyncWebhook("chat_completion_stream", webhookData)
-        }
-
-        return nil
-    } else {
-        // Fallback mode: direct streaming without circuit breaker
-        streamCh, errCh := s.model.GenerateStream(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
-
-        var fullText string
-        var totalTokens int32
-
-        for {
-            select {
-            case chunk, ok := <-streamCh:
-                if !ok {
-                    // Stream closed
-                    goto sendFinalNoCB
-                }
-
-                fullText += chunk.Text
-                if chunk.TokensUsed > totalTokens {
-                    totalTokens = chunk.TokensUsed
-                }
-
-                // Отправляем клиенту (tail → пользователь) каждый кусок
-                if err := stream.Send(&gen.ChatResponseChunk{
-                    RequestId:  req.RequestId,
-                    Chunk:      chunk.Text,
-                    IsFinal:    false,
-                    Provider:   "litellm",
-                    TokensUsed: chunk.TokensUsed,
-                }); err != nil {
-                    span.SetStatus(codes.Error, "stream send error")
-                    span.RecordError(err)
-                    return err
-                }
-
-            case err, ok := <-errCh:
-                if !ok {
-                    // Error channel closed, stream completed successfully
-                    goto sendFinalNoCB
-                }
-
-                // Error occurred
-                requestsTotal.WithLabelValues(modelName, "error").Inc()
-                span.SetStatus(codes.Error, "stream error")
-                span.RecordError(err)
-                return status.Errorf(codes.Internal, "stream error: %v", err)
+        case err, ok := <-errCh:
+            if !ok {
+                return nil
             }
+            requestErrors.WithLabelValues(modelName, "stream_error").Inc()
+            return status.Errorf(codes.Internal, "stream error: %v", err)
         }
-
-    sendFinalNoCB:
-        // Финальный чанк — совместимо с OpenAI
-        _ = stream.Send(&gen.ChatResponseChunk{
-            RequestId:  req.RequestId,
-            Chunk:      "",
-            IsFinal:    true,
-            Provider:   "litellm",
-            TokensUsed: totalTokens,
-        })
-
-        requestsTotal.WithLabelValues(modelName, "ok").Inc()
-
-        // Send webhook notification
-        if s.cfg.FeaturesConfig.IsEnabled("webhook") {
-            webhookData := map[string]interface{}{
-                "request_id":   req.RequestId,
-                "model":       modelName,
-                "tokens_used":  totalTokens,
-                "duration_ms": time.Since(time.Now().Add(-time.Since(ctx.Value("start_time").(time.Time)))).Milliseconds(),
-            }
-            s.webhook.SendAsyncWebhook("chat_completion_stream", webhookData)
-        }
-
-        return nil
     }
 }
-
