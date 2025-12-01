@@ -1,0 +1,16 @@
+
+
+
+
+---
+# Ansible role dependencies
+- src: geerlingguy.docker
+  version: "6.0.0"
+
+- src: geerlingguy.pip
+  version: "2.1.0"
+
+# Additional roles can be added here
+# - src: some.other.role
+#   version: "1.0.0"
+

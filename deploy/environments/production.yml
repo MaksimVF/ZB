@@ -1,0 +1,62 @@
+
+
+
+
+
+
+---
+# Production environment configuration
+docker_network: llm-network-prod
+project_root: /opt/llm-system-prod
+
+# Service versions for production
+service_versions:
+  head: 1.0.0
+  model-proxy: 1.0.0
+  tail: 1.0.0
+  auth-service: 1.0.0
+  billing: 1.0.0
+  gateway: 1.0.0
+  rate-limiter: 1.0.0
+  secrets-service: 1.0.0
+  admin-dashboard: 1.0.0
+  user-dashboard: 1.0.0
+
+# Resource limits for production
+resource_limits:
+  head:
+    memory: "2g"
+    cpu: "1.0"
+  model-proxy:
+    memory: "4g"
+    cpu: "2.0"
+  tail:
+    memory: "2g"
+    cpu: "1.0"
+
+# Production settings
+monitoring_enabled: true
+logging_level: info
+tls_enabled: true
+
+# High availability settings
+replicas:
+  head: 2
+  tail: 3
+  admin-dashboard: 2
+  user-dashboard: 3
+
+# Auto-scaling configuration
+auto_scaling:
+  enabled: true
+  head:
+    min_replicas: 2
+    max_replicas: 5
+    cpu_threshold: 70
+  tail:
+    min_replicas: 3
+    max_replicas: 8
+    cpu_threshold: 65
+
+
+

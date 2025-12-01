@@ -1,0 +1,41 @@
+
+
+
+
+
+---
+# Development environment configuration
+docker_network: llm-network-dev
+project_root: /opt/llm-system-dev
+
+# Service versions for development
+service_versions:
+  head: dev
+  model-proxy: dev
+  tail: dev
+  auth-service: dev
+  billing: dev
+  gateway: dev
+  rate-limiter: dev
+  secrets-service: dev
+  admin-dashboard: dev
+  user-dashboard: dev
+
+# Resource limits for development
+resource_limits:
+  head:
+    memory: "512m"
+    cpu: "0.25"
+  model-proxy:
+    memory: "1g"
+    cpu: "0.5"
+  tail:
+    memory: "512m"
+    cpu: "0.25"
+
+# Debug settings
+logging_level: debug
+tls_enabled: false
+
+
+
