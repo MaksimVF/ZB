@@ -34,18 +34,32 @@ var (
 	cacheMutex        = &sync.RWMutex{}
 	logger            = zerolog.New(os.Stdout).With().Timestamp().Str("service", "litellm-proxy").Logger()
 	grpcClients        = make(map[string]*grpc.ClientConn)
+	requestCache       = make(map[string]cacheEntry)
+	cacheTTL           = 5 * time.Minute
+	healthCheckInterval = 30 * time.Second
 )
 
+type cacheEntry struct {
+	response []byte
+	expires   time.Time
+}
+
 type ProviderConfig struct {
-	BaseURL    string
-	APIKey     string
-	ModelNames []string
-	GRPCAddress string // New field for gRPC address
-	UseGRPC    bool     // Flag to use gRPC instead of HTTP
+	BaseURL        string
+	APIKey         string
+	ModelNames     []string
+	GRPCAddress     string // New field for gRPC address
+	UseGRPC        bool     // Flag to use gRPC instead of HTTP
+	MaxConcurrency  int      // Max concurrent requests
+	HealthCheckURL string  // Health check endpoint
+	IsHealthy       bool    // Health status
+	LastChecked     time.Time
+	Weight          int      // Load balancing weight
 }
 
 type LiteLLMConfig struct {
 	Providers map[string]ProviderConfig
+	CacheTTL  time.Duration
 }
 
 func Init(config LiteLLMConfig) {
@@ -53,6 +67,10 @@ func Init(config LiteLLMConfig) {
 	defer cacheMutex.Unlock()
 
 	providerCache = config.Providers
+	if config.CacheTTL > 0 {
+		cacheTTL = config.CacheTTL
+	}
+
 	logger.Info().Msgf("Initialized LiteLLM with %d providers", len(providerCache))
 
 	// Initialize gRPC clients for providers that use gRPC
@@ -68,6 +86,50 @@ func Init(config LiteLLMConfig) {
 			grpcClients[provider] = conn
 			logger.Info().Str("provider", provider).Str("address", config.GRPCAddress).Msg("Connected to gRPC server")
 		}
+
+		// Set initial health status
+		providerCache[provider].IsHealthy = true
+		providerCache[provider].LastChecked = time.Now()
+	}
+
+	// Start health check goroutine
+	go healthCheckRoutine()
+}
+
+func healthCheckRoutine() {
+	ticker := time.NewTicker(healthCheckInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		checkProviderHealth()
+	}
+}
+
+func checkProviderHealth() {
+	cacheMutex.Lock()
+	defer cacheMutex.Unlock()
+
+	for provider, config := range providerCache {
+		if config.HealthCheckURL == "" {
+			continue
+		}
+
+		// Check if health check is needed
+		if time.Since(config.LastChecked) < healthCheckInterval {
+			continue
+		}
+
+		// Perform health check
+		resp, err := http.Head(config.HealthCheckURL)
+		if err != nil || resp.StatusCode >= 500 {
+			providerCache[provider].IsHealthy = false
+			logger.Warn().Str("provider", provider).Msg("Health check failed")
+		} else {
+			providerCache[provider].IsHealthy = true
+			logger.Info().Str("provider", provider).Msg("Health check passed")
+		}
+
+		providerCache[provider].LastChecked = time.Now()
 	}
 }
 
@@ -75,7 +137,24 @@ func GetProviderForModel(model string) (ProviderConfig, error) {
 	cacheMutex.RLock()
 	defer cacheMutex.RUnlock()
 
+	// Filter to healthy providers first
+	var healthyProviders []ProviderConfig
 	for provider, config := range providerCache {
+		if config.IsHealthy {
+			healthyProviders = append(healthyProviders, config)
+		}
+	}
+
+	// If no healthy providers, try all
+	if len(healthyProviders) == 0 {
+		healthyProviders = make([]ProviderConfig, 0, len(providerCache))
+		for _, config := range providerCache {
+			healthyProviders = append(healthyProviders, config)
+		}
+	}
+
+	// Find provider for model with load balancing
+	for _, config := range healthyProviders {
 		for _, modelName := range config.ModelNames {
 			if strings.EqualFold(model, modelName) {
 				return config, nil
@@ -87,11 +166,45 @@ func GetProviderForModel(model string) (ProviderConfig, error) {
 }
 
 func ProxyRequest(providerConfig ProviderConfig, method, path string, body interface{}) ([]byte, error) {
-	// Use gRPC if configured, otherwise fall back to HTTP
-	if providerConfig.UseGRPC {
-		return proxyGRPCRequest(providerConfig, body)
+	// Check cache first
+	cacheKey := fmt.Sprintf("%s:%s:%v", providerConfig.BaseURL, path, body)
+	cacheMutex.RLock()
+	cached, found := requestCache[cacheKey]
+	cacheMutex.RUnlock()
+
+	if found && time.Now().Before(cached.expires) {
+		return cached.response, nil
 	}
-	return proxyHTTPRequest(providerConfig, method, path, body)
+
+	// Use gRPC if configured, otherwise fall back to HTTP
+	var response []byte
+	var err error
+	if providerConfig.UseGRPC {
+		response, err = proxyGRPCRequest(providerConfig, body)
+	} else {
+		response, err = proxyHTTPRequest(providerConfig, method, path, body)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Cache the response if cacheable
+	if isCacheable(method, path, body) {
+		cacheMutex.Lock()
+		requestCache[cacheKey] = cacheEntry{
+			response: response,
+			expires:   time.Now().Add(cacheTTL),
+		}
+		cacheMutex.Unlock()
+	}
+
+	return response, nil
+}
+
+func isCacheable(method, path string, body interface{}) bool {
+	// Only cache GET requests for now
+	return method == "GET" || method == ""
 }
 
 func proxyHTTPRequest(providerConfig ProviderConfig, method, path string, body interface{}) ([]byte, error) {
@@ -228,6 +341,10 @@ func AddProvider(provider string, config ProviderConfig) {
 		grpcClients[provider] = conn
 		logger.Info().Str("provider", provider).Str("address", config.GRPCAddress).Msg("Connected to gRPC server")
 	}
+
+	// Set initial health status
+	providerCache[provider].IsHealthy = true
+	providerCache[provider].LastChecked = time.Now()
 }
 
 func RemoveProvider(provider string) {
@@ -264,6 +381,25 @@ func CloseAllConnections() {
 		conn.Close()
 		delete(grpcClients, provider)
 		logger.Info().Str("provider", provider).Msg("Closed gRPC connection")
+	}
+}
+
+func ClearCache() {
+	cacheMutex.Lock()
+	defer cacheMutex.Unlock()
+
+	requestCache = make(map[string]cacheEntry)
+	logger.Info().Msg("Cleared request cache")
+}
+
+func GetCacheStats() map[string]interface{} {
+	cacheMutex.RLock()
+	defer cacheMutex.RUnlock()
+
+	return map[string]interface{}{
+		"cache_size":     len(requestCache),
+		"cache_ttl":      cacheTTL.String(),
+		"oldest_entry":   time.Since(time.Now().Add(-cacheTTL)).String(),
 	}
 }
 
