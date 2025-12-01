@@ -1,0 +1,64 @@
+
+
+
+
+
+---
+# Rollback playbook
+- name: Rollback deployment
+  hosts: all-servers
+  become: true
+  vars_files:
+    - "group_vars/all.yml"
+
+  tasks:
+    - name: Stop all containers
+      docker_container:
+        name: "{{ item }}"
+        state: stopped
+      with_items:
+        - model-proxy
+        - head
+        - tail
+        - auth-service
+        - billing
+        - gateway
+        - rate-limiter
+        - secrets-service
+        - admin-dashboard
+        - user-dashboard
+      ignore_errors: yes
+
+    - name: Remove all containers
+      docker_container:
+        name: "{{ item }}"
+        state: absent
+      with_items:
+        - model-proxy
+        - head
+        - tail
+        - auth-service
+        - billing
+        - gateway
+        - rate-limiter
+        - secrets-service
+        - admin-dashboard
+        - user-dashboard
+      ignore_errors: yes
+
+    - name: Remove docker network
+      docker_network:
+        name: "{{ docker_network }}"
+        state: absent
+      ignore_errors: yes
+
+    - name: Clean up project directory
+      file:
+        path: "{{ project_root }}"
+        state: absent
+
+    - name: Report rollback status
+      debug:
+        msg: "Rollback completed on {{ inventory_hostname }}"
+
+

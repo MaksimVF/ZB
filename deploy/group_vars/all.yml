@@ -1,0 +1,55 @@
+
+
+
+
+---
+# Global configuration
+docker_network: llm-network
+project_root: /opt/llm-system
+
+# Docker registry settings (if using a private registry)
+docker_registry: ""
+docker_username: ""
+docker_password: ""
+
+# Service versions (for versioned deployments)
+service_versions:
+  head: latest
+  model-proxy: latest
+  tail: latest
+  auth-service: latest
+  billing: latest
+  gateway: latest
+  rate-limiter: latest
+  secrets-service: latest
+  admin-dashboard: latest
+  user-dashboard: latest
+
+# Monitoring and logging configuration
+monitoring_enabled: true
+logging_level: info
+
+# Security settings
+tls_enabled: true
+certs_path: /certs
+
+# Performance tuning
+resource_limits:
+  head:
+    memory: "1g"
+    cpu: "0.5"
+  model-proxy:
+    memory: "2g"
+    cpu: "1.0"
+  tail:
+    memory: "1g"
+    cpu: "0.5"
+
+# Database and cache configurations
+redis_host: redis
+redis_port: 6379
+cache_host: cache
+cache_port: 6379
+
+
+
