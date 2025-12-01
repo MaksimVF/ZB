@@ -16,7 +16,9 @@ import (
 
     gen "github.com/yourorg/head/gen" // сюда генерируются chat.proto
     model "github.com/yourorg/head/gen_model" // сюда генерируются model.proto
+    "github.com/yourorg/head/internal/auth"
     "github.com/yourorg/head/internal/config"
+    "github.com/yourorg/head/internal/docs"
     modelclient "github.com/yourorg/head/internal/providers"
     "github.com/yourorg/head/internal/metrics"
 
@@ -55,14 +57,16 @@ var (
 
 type HeadServer struct {
     gen.UnimplementedChatServiceServer // встраиваем, чтобы не писать заглушки
-    cfg   *config.Config
-    model *modelclient.ModelClient
+    cfg        *config.Config
+    model      *modelclient.ModelClient
+    auth       *auth.Authenticator
 }
 
 func New(cfg *config.Config) *HeadServer {
     return &HeadServer{
         cfg:   cfg,
         model: modelclient.NewModelClient(cfg.ModelProxyAddr),
+        auth:  auth.NewAuthenticator(cfg.AuthConfig),
     }
 }
 
@@ -75,10 +79,13 @@ func (s *HeadServer) Run() error {
 
     // Start metrics server
     go func() {
-        http.Handle("/metrics", promhttp.Handler())
-        http.HandleFunc("/health", healthCheckHandler)
-        log.Printf("Metrics and health server listening on :%d", s.cfg.MetricsPort)
-        if err := http.ListenAndServe(fmt.Sprintf(":%d", s.cfg.MetricsPort), nil); err != nil {
+        mux := http.NewServeMux()
+        mux.Handle("/metrics", promhttp.Handler())
+        mux.HandleFunc("/health", healthCheckHandler)
+        mux.Handle("/docs/", http.StripPrefix("/docs", docs.DocumentationHandler()))
+
+        log.Printf("Metrics, health, and documentation server listening on :%d", s.cfg.MetricsPort)
+        if err := http.ListenAndServe(fmt.Sprintf(":%d", s.cfg.MetricsPort), mux); err != nil {
             log.Printf("Metrics server failed: %v", err)
         }
     }()
@@ -107,17 +114,35 @@ func (s *HeadServer) Run() error {
         return fmt.Errorf("failed to load TLS credentials: %w", err)
     }
 
-    // Create gRPC server with monitoring and tracing middleware
+    // Create authentication interceptors
+    var unaryInterceptors []grpc.UnaryServerInterceptor
+    var streamInterceptors []grpc.StreamServerInterceptor
+
+    // Add monitoring and tracing middleware
+    unaryInterceptors = append(unaryInterceptors,
+        grpc_prometheus.UnaryServerInterceptor,
+        otelgrpc.UnaryServerInterceptor(),
+    )
+
+    streamInterceptors = append(streamInterceptors,
+        grpc_prometheus.StreamServerInterceptor,
+        otelgrpc.StreamServerInterceptor(),
+    )
+
+    // Add authentication if enabled
+    if s.cfg.FeaturesConfig.IsEnabled("authentication") {
+        log.Printf("Authentication enabled")
+        unaryInterceptors = append(unaryInterceptors, s.auth.UnaryServerInterceptor())
+        streamInterceptors = append(streamInterceptors, s.auth.StreamServerInterceptor())
+    } else {
+        log.Printf("Authentication disabled")
+    }
+
+    // Create gRPC server with middleware
     srv := grpc.NewServer(
         grpc.Creds(creds),
-        grpc.StreamInterceptor(grpc_middleware.ChainStreamServer(
-            grpc_prometheus.StreamServerInterceptor,
-            otelgrpc.StreamServerInterceptor(),
-        )),
-        grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(
-            grpc_prometheus.UnaryServerInterceptor,
-            otelgrpc.UnaryServerInterceptor(),
-        )),
+        grpc.StreamInterceptor(grpc_middleware.ChainStreamServer(streamInterceptors...)),
+        grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(unaryInterceptors...)),
     )
 
     // Register services
@@ -217,24 +242,55 @@ func (s *HeadServer) ChatCompletion(ctx context.Context, req *gen.ChatRequest) (
         messages = append(messages, m.Content)
     }
 
-    text, tokens, err := s.model.Generate(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
-    if err != nil {
-        requestsTotal.WithLabelValues(modelName, "error").Inc()
-        span.SetStatus(codes.Error, "model error")
-        span.RecordError(err)
-        return nil, status.Errorf(codes.Internal, "model error: %v", err)
+    // Check if circuit breaker is enabled
+    if s.cfg.FeaturesConfig.IsEnabled("circuit_breaker") {
+        // Use the model client with circuit breaker and retry logic
+        text, tokens, err := s.model.Generate(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
+        if err != nil {
+            requestsTotal.WithLabelValues(modelName, "error").Inc()
+            span.SetStatus(codes.Error, "model error")
+            span.RecordError(err)
+
+            // Check if circuit breaker is open
+            if s.model.circuitBreaker.State() == gobreaker.StateOpen {
+                span.SetStatus(codes.Error, "circuit breaker open")
+                return nil, status.Errorf(codes.Unavailable, "service unavailable due to high error rate")
+            }
+
+            return nil, status.Errorf(codes.Internal, "model error: %v", err)
+        }
+
+        requestsTotal.WithLabelValues(modelName, "ok").Inc()
+        requestLatency.WithLabelValues(modelName).Observe(time.Since(start).Seconds())
+
+        return &gen.ChatResponse{
+            RequestId:  req.RequestId,
+            FullText:   text,
+            Model:      modelName,
+            Provider:  "litellm",
+            TokensUsed: int32(tokens),
+        }, nil
+    } else {
+        // Fallback mode: direct call without circuit breaker
+        text, tokens, err := s.model.Generate(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
+        if err != nil {
+            requestsTotal.WithLabelValues(modelName, "error").Inc()
+            span.SetStatus(codes.Error, "model error")
+            span.RecordError(err)
+            return nil, status.Errorf(codes.Internal, "model error: %v", err)
+        }
+
+        requestsTotal.WithLabelValues(modelName, "ok").Inc()
+        requestLatency.WithLabelValues(modelName).Observe(time.Since(start).Seconds())
+
+        return &gen.ChatResponse{
+            RequestId:  req.RequestId,
+            FullText:   text,
+            Model:      modelName,
+            Provider:  "litellm",
+            TokensUsed: int32(tokens),
+        }, nil
     }
-
-    requestsTotal.WithLabelValues(modelName, "ok").Inc()
-    requestLatency.WithLabelValues(modelName).Observe(time.Since(start).Seconds())
-
-    return &gen.ChatResponse{
-        RequestId:  req.RequestId,
-        FullText:   text,
-        Model:      modelName,
-        Provider:  "litellm",
-        TokensUsed: int32(tokens),
-    }, nil
 }
 
 // Стриминговый запрос — настоящий SSE-совместимый стриминг
@@ -261,63 +317,138 @@ func (s *HeadServer) ChatCompletionStream(req *gen.ChatRequest, stream gen.ChatS
         messages = append(messages, m.Content)
     }
 
-    // Use the new streaming method from the model client
-    streamCh, errCh := s.model.GenerateStream(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
-
-    var fullText string
-    var totalTokens int32
-
-    for {
-        select {
-        case chunk, ok := <-streamCh:
-            if !ok {
-                // Stream closed
-                goto sendFinal
-            }
-
-            fullText += chunk.Text
-            if chunk.TokensUsed > totalTokens {
-                totalTokens = chunk.TokensUsed
-            }
-
-            // Отправляем клиенту (tail → пользователь) каждый кусок
-            if err := stream.Send(&gen.ChatResponseChunk{
-                RequestId:  req.RequestId,
-                Chunk:      chunk.Text,
-                IsFinal:    false,
-                Provider:   "litellm",
-                TokensUsed: chunk.TokensUsed,
-            }); err != nil {
-                span.SetStatus(codes.Error, "stream send error")
-                span.RecordError(err)
-                return err
-            }
-
-        case err, ok := <-errCh:
-            if !ok {
-                // Error channel closed, stream completed successfully
-                goto sendFinal
-            }
-
-            // Error occurred
-            requestsTotal.WithLabelValues(modelName, "error").Inc()
-            span.SetStatus(codes.Error, "stream error")
-            span.RecordError(err)
-            return status.Errorf(codes.Internal, "stream error: %v", err)
-        }
+    // Check if streaming feature is enabled
+    if !s.cfg.FeaturesConfig.IsEnabled("streaming") {
+        span.SetStatus(codes.Error, "streaming disabled")
+        return status.Errorf(codes.Unimplemented, "streaming is disabled")
     }
 
-sendFinal:
-    // Финальный чанк — совместимо с OpenAI
-    _ = stream.Send(&gen.ChatResponseChunk{
-        RequestId:  req.RequestId,
-        Chunk:      "",
-        IsFinal:    true,
-        Provider:   "litellm",
-        TokensUsed: totalTokens,
-    })
+    // Check if circuit breaker is enabled for streaming
+    if s.cfg.FeaturesConfig.IsEnabled("circuit_breaker") {
+        // Use the new streaming method from the model client with circuit breaker protection
+        streamCh, errCh := s.model.GenerateStream(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
 
-    requestsTotal.WithLabelValues(modelName, "ok").Inc()
-    return nil
+        var fullText string
+        var totalTokens int32
+
+        for {
+            select {
+            case chunk, ok := <-streamCh:
+                if !ok {
+                    // Stream closed
+                    goto sendFinal
+                }
+
+                fullText += chunk.Text
+                if chunk.TokensUsed > totalTokens {
+                    totalTokens = chunk.TokensUsed
+                }
+
+                // Отправляем клиенту (tail → пользователь) каждый кусок
+                if err := stream.Send(&gen.ChatResponseChunk{
+                    RequestId:  req.RequestId,
+                    Chunk:      chunk.Text,
+                    IsFinal:    false,
+                    Provider:   "litellm",
+                    TokensUsed: chunk.TokensUsed,
+                }); err != nil {
+                    span.SetStatus(codes.Error, "stream send error")
+                    span.RecordError(err)
+                    return err
+                }
+
+            case err, ok := <-errCh:
+                if !ok {
+                    // Error channel closed, stream completed successfully
+                    goto sendFinal
+                }
+
+                // Error occurred
+                requestsTotal.WithLabelValues(modelName, "error").Inc()
+                span.SetStatus(codes.Error, "stream error")
+                span.RecordError(err)
+
+                // Check if circuit breaker is open
+                if s.model.circuitBreaker.State() == gobreaker.StateOpen {
+                    span.SetStatus(codes.Error, "circuit breaker open")
+                    return status.Errorf(codes.Unavailable, "service unavailable due to high error rate")
+                }
+
+                return status.Errorf(codes.Internal, "stream error: %v", err)
+            }
+        }
+
+    sendFinal:
+        // Финальный чанк — совместимо с OpenAI
+        _ = stream.Send(&gen.ChatResponseChunk{
+            RequestId:  req.RequestId,
+            Chunk:      "",
+            IsFinal:    true,
+            Provider:   "litellm",
+            TokensUsed: totalTokens,
+        })
+
+        requestsTotal.WithLabelValues(modelName, "ok").Inc()
+        return nil
+    } else {
+        // Fallback mode: direct streaming without circuit breaker
+        streamCh, errCh := s.model.GenerateStream(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
+
+        var fullText string
+        var totalTokens int32
+
+        for {
+            select {
+            case chunk, ok := <-streamCh:
+                if !ok {
+                    // Stream closed
+                    goto sendFinalNoCB
+                }
+
+                fullText += chunk.Text
+                if chunk.TokensUsed > totalTokens {
+                    totalTokens = chunk.TokensUsed
+                }
+
+                // Отправляем клиенту (tail → пользователь) каждый кусок
+                if err := stream.Send(&gen.ChatResponseChunk{
+                    RequestId:  req.RequestId,
+                    Chunk:      chunk.Text,
+                    IsFinal:    false,
+                    Provider:   "litellm",
+                    TokensUsed: chunk.TokensUsed,
+                }); err != nil {
+                    span.SetStatus(codes.Error, "stream send error")
+                    span.RecordError(err)
+                    return err
+                }
+
+            case err, ok := <-errCh:
+                if !ok {
+                    // Error channel closed, stream completed successfully
+                    goto sendFinalNoCB
+                }
+
+                // Error occurred
+                requestsTotal.WithLabelValues(modelName, "error").Inc()
+                span.SetStatus(codes.Error, "stream error")
+                span.RecordError(err)
+                return status.Errorf(codes.Internal, "stream error: %v", err)
+            }
+        }
+
+    sendFinalNoCB:
+        // Финальный чанк — совместимо с OpenAI
+        _ = stream.Send(&gen.ChatResponseChunk{
+            RequestId:  req.RequestId,
+            Chunk:      "",
+            IsFinal:    true,
+            Provider:   "litellm",
+            TokensUsed: totalTokens,
+        })
+
+        requestsTotal.WithLabelValues(modelName, "ok").Inc()
+        return nil
+    }
 }
 
