@@ -19,8 +19,10 @@ import (
     "github.com/yourorg/head/internal/auth"
     "github.com/yourorg/head/internal/config"
     "github.com/yourorg/head/internal/docs"
+    "github.com/yourorg/head/internal/models"
     modelclient "github.com/yourorg/head/internal/providers"
     "github.com/yourorg/head/internal/metrics"
+    "github.com/yourorg/head/internal/webhook"
 
     "github.com/grpc-ecosystem/go-grpc-middleware"
     "github.com/grpc-ecosystem/go-grpc-prometheus"
@@ -60,13 +62,17 @@ type HeadServer struct {
     cfg        *config.Config
     model      *modelclient.ModelClient
     auth       *auth.Authenticator
+    webhook    *webhook.WebhookClient
+    registry   *models.ModelRegistry
 }
 
 func New(cfg *config.Config) *HeadServer {
     return &HeadServer{
-        cfg:   cfg,
-        model: modelclient.NewModelClient(cfg.ModelProxyAddr),
-        auth:  auth.NewAuthenticator(cfg.AuthConfig),
+        cfg:      cfg,
+        model:    modelclient.NewModelClient(cfg.ModelProxyAddr),
+        auth:     auth.NewAuthenticator(cfg.AuthConfig),
+        webhook:  webhook.NewWebhookClient(cfg.WebhookConfig),
+        registry: cfg.ModelRegistry,
     }
 }
 
@@ -242,36 +248,95 @@ func (s *HeadServer) ChatCompletion(ctx context.Context, req *gen.ChatRequest) (
         messages = append(messages, m.Content)
     }
 
-    // Check if circuit breaker is enabled
-    if s.cfg.FeaturesConfig.IsEnabled("circuit_breaker") {
-        // Use the model client with circuit breaker and retry logic
-        text, tokens, err := s.model.Generate(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
-        if err != nil {
+    // Check if model registry is enabled
+    if s.cfg.FeaturesConfig.IsEnabled("model_registry") {
+        // Use model registry to get model configuration
+        modelConfig, ok := s.registry.GetModel(modelName)
+        if !ok {
             requestsTotal.WithLabelValues(modelName, "error").Inc()
-            span.SetStatus(codes.Error, "model error")
-            span.RecordError(err)
+            span.SetStatus(codes.Error, "model not found")
+            return nil, status.Errorf(codes.InvalidArgument, "model %s not found", modelName)
+        }
 
-            // Check if circuit breaker is open
-            if s.model.circuitBreaker.State() == gobreaker.StateOpen {
-                span.SetStatus(codes.Error, "circuit breaker open")
-                return nil, status.Errorf(codes.Unavailable, "service unavailable due to high error rate")
+        if !modelConfig.Enabled {
+            requestsTotal.WithLabelValues(modelName, "error").Inc()
+            span.SetStatus(codes.Error, "model disabled")
+            return nil, status.Errorf(codes.Unavailable, "model %s is disabled", modelName)
+        }
+
+        // Check if circuit breaker is enabled
+        if s.cfg.FeaturesConfig.IsEnabled("circuit_breaker") {
+            // Use the model client with circuit breaker and retry logic
+            text, tokens, err := s.model.Generate(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
+            if err != nil {
+                requestsTotal.WithLabelValues(modelName, "error").Inc()
+                span.SetStatus(codes.Error, "model error")
+                span.RecordError(err)
+
+                // Check if circuit breaker is open
+                if s.model.circuitBreaker.State() == gobreaker.StateOpen {
+                    span.SetStatus(codes.Error, "circuit breaker open")
+                    return nil, status.Errorf(codes.Unavailable, "service unavailable due to high error rate")
+                }
+
+                return nil, status.Errorf(codes.Internal, "model error: %v", err)
             }
 
-            return nil, status.Errorf(codes.Internal, "model error: %v", err)
+            requestsTotal.WithLabelValues(modelName, "ok").Inc()
+            requestLatency.WithLabelValues(modelName).Observe(time.Since(start).Seconds())
+
+            // Send webhook notification
+            if s.cfg.FeaturesConfig.IsEnabled("webhook") {
+                webhookData := map[string]interface{}{
+                    "request_id":   req.RequestId,
+                    "model":       modelName,
+                    "tokens_used":  tokens,
+                    "duration_ms": time.Since(start).Milliseconds(),
+                }
+                s.webhook.SendAsyncWebhook("chat_completion", webhookData)
+            }
+
+            return &gen.ChatResponse{
+                RequestId:  req.RequestId,
+                FullText:   text,
+                Model:      modelName,
+                Provider:  modelConfig.Provider,
+                TokensUsed: int32(tokens),
+            }, nil
+        } else {
+            // Fallback mode: direct call without circuit breaker
+            text, tokens, err := s.model.Generate(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
+            if err != nil {
+                requestsTotal.WithLabelValues(modelName, "error").Inc()
+                span.SetStatus(codes.Error, "model error")
+                span.RecordError(err)
+                return nil, status.Errorf(codes.Internal, "model error: %v", err)
+            }
+
+            requestsTotal.WithLabelValues(modelName, "ok").Inc()
+            requestLatency.WithLabelValues(modelName).Observe(time.Since(start).Seconds())
+
+            // Send webhook notification
+            if s.cfg.FeaturesConfig.IsEnabled("webhook") {
+                webhookData := map[string]interface{}{
+                    "request_id":   req.RequestId,
+                    "model":       modelName,
+                    "tokens_used":  tokens,
+                    "duration_ms": time.Since(start).Milliseconds(),
+                }
+                s.webhook.SendAsyncWebhook("chat_completion", webhookData)
+            }
+
+            return &gen.ChatResponse{
+                RequestId:  req.RequestId,
+                FullText:   text,
+                Model:      modelName,
+                Provider:  modelConfig.Provider,
+                TokensUsed: int32(tokens),
+            }, nil
         }
-
-        requestsTotal.WithLabelValues(modelName, "ok").Inc()
-        requestLatency.WithLabelValues(modelName).Observe(time.Since(start).Seconds())
-
-        return &gen.ChatResponse{
-            RequestId:  req.RequestId,
-            FullText:   text,
-            Model:      modelName,
-            Provider:  "litellm",
-            TokensUsed: int32(tokens),
-        }, nil
     } else {
-        // Fallback mode: direct call without circuit breaker
+        // Fallback mode: direct call without model registry
         text, tokens, err := s.model.Generate(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
         if err != nil {
             requestsTotal.WithLabelValues(modelName, "error").Inc()
@@ -282,6 +347,17 @@ func (s *HeadServer) ChatCompletion(ctx context.Context, req *gen.ChatRequest) (
 
         requestsTotal.WithLabelValues(modelName, "ok").Inc()
         requestLatency.WithLabelValues(modelName).Observe(time.Since(start).Seconds())
+
+        // Send webhook notification
+        if s.cfg.FeaturesConfig.IsEnabled("webhook") {
+            webhookData := map[string]interface{}{
+                "request_id":   req.RequestId,
+                "model":       modelName,
+                "tokens_used":  tokens,
+                "duration_ms": time.Since(start).Milliseconds(),
+            }
+            s.webhook.SendAsyncWebhook("chat_completion", webhookData)
+        }
 
         return &gen.ChatResponse{
             RequestId:  req.RequestId,
@@ -321,6 +397,23 @@ func (s *HeadServer) ChatCompletionStream(req *gen.ChatRequest, stream gen.ChatS
     if !s.cfg.FeaturesConfig.IsEnabled("streaming") {
         span.SetStatus(codes.Error, "streaming disabled")
         return status.Errorf(codes.Unimplemented, "streaming is disabled")
+    }
+
+    // Check if model registry is enabled
+    if s.cfg.FeaturesConfig.IsEnabled("model_registry") {
+        // Use model registry to get model configuration
+        modelConfig, ok := s.registry.GetModel(modelName)
+        if !ok {
+            requestsTotal.WithLabelValues(modelName, "error").Inc()
+            span.SetStatus(codes.Error, "model not found")
+            return status.Errorf(codes.InvalidArgument, "model %s not found", modelName)
+        }
+
+        if !modelConfig.Enabled {
+            requestsTotal.WithLabelValues(modelName, "error").Inc()
+            span.SetStatus(codes.Error, "model disabled")
+            return status.Errorf(codes.Unavailable, "model %s is disabled", modelName)
+        }
     }
 
     // Check if circuit breaker is enabled for streaming
@@ -389,6 +482,18 @@ func (s *HeadServer) ChatCompletionStream(req *gen.ChatRequest, stream gen.ChatS
         })
 
         requestsTotal.WithLabelValues(modelName, "ok").Inc()
+
+        // Send webhook notification
+        if s.cfg.FeaturesConfig.IsEnabled("webhook") {
+            webhookData := map[string]interface{}{
+                "request_id":   req.RequestId,
+                "model":       modelName,
+                "tokens_used":  totalTokens,
+                "duration_ms": time.Since(time.Now().Add(-time.Since(ctx.Value("start_time").(time.Time)))).Milliseconds(),
+            }
+            s.webhook.SendAsyncWebhook("chat_completion_stream", webhookData)
+        }
+
         return nil
     } else {
         // Fallback mode: direct streaming without circuit breaker
@@ -448,6 +553,18 @@ func (s *HeadServer) ChatCompletionStream(req *gen.ChatRequest, stream gen.ChatS
         })
 
         requestsTotal.WithLabelValues(modelName, "ok").Inc()
+
+        // Send webhook notification
+        if s.cfg.FeaturesConfig.IsEnabled("webhook") {
+            webhookData := map[string]interface{}{
+                "request_id":   req.RequestId,
+                "model":       modelName,
+                "tokens_used":  totalTokens,
+                "duration_ms": time.Since(time.Now().Add(-time.Since(ctx.Value("start_time").(time.Time)))).Milliseconds(),
+            }
+            s.webhook.SendAsyncWebhook("chat_completion_stream", webhookData)
+        }
+
         return nil
     }
 }

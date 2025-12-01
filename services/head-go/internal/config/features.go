@@ -82,6 +82,9 @@ func DefaultFeatures() *FeaturesConfig {
     features.AddFeature("circuit_breaker", "Enable circuit breaker protection", true)
     features.AddFeature("retry_logic", "Enable retry logic for failed requests", true)
     features.AddFeature("authentication", "Enable token-based authentication", true)
+    features.AddFeature("webhook", "Enable webhook notifications", true)
+    features.AddFeature("model_registry", "Enable model registry and A/B testing", true)
+    features.AddFeature("ab_testing", "Enable A/B testing for models", true)
 
     return features
 }
