@@ -4,6 +4,7 @@ import (
     "context"
     "crypto/tls"
     "crypto/x509"
+    "fmt"
     "io"
     "io/ioutil"
     "log"
@@ -163,6 +164,79 @@ func (m *ModelClient) ReturnConnectionToPool(conn *grpc.ClientConn) {
     if m.connectionPool != nil && conn != nil {
         m.connectionPool.Put(conn)
     }
+}
+
+// BatchGenerate — пакетная обработка запросов к модели
+func (m *ModelClient) BatchGenerate(
+    ctx context.Context,
+    requests []*model.GenRequest,
+) (*model.BatchGenResponse, error) {
+    // Start a span for the BatchGenerate operation
+    tracer := otel.GetTracerProvider().Tracer("head-go")
+    ctx, span := tracer.Start(ctx, "ModelClient.BatchGenerate")
+    defer span.End()
+
+    span.SetAttributes(
+        trace.StringAttribute("requests_count", fmt.Sprintf("%d", len(requests))),
+    )
+
+    // Increment active request count
+    atomic.AddInt32(&m.activeRequests, 1)
+    defer atomic.AddInt32(&m.activeRequests, -1)
+
+    // Update active connections metric
+    activeModelConnections.Set(float64(atomic.LoadInt32(&m.activeRequests)))
+
+    start := time.Now()
+    defer func() {
+        modelRequestLatency.WithLabelValues("batch").Observe(time.Since(start).Seconds())
+    }()
+
+    // Create BatchGenRequest
+    batchReq := &model.BatchGenRequest{
+        Requests: requests,
+    }
+
+    // Get connection from pool or create new one
+    var conn *grpc.ClientConn
+    if m.connectionPool != nil {
+        connInterface := m.connectionPool.Get()
+        if connInterface != nil {
+            conn = connInterface.(*grpc.ClientConn)
+            if conn.GetState() != grpc.ConnectivityReady {
+                // Connection not ready, create new one
+                conn.Close()
+                conn = nil
+            }
+        }
+    }
+
+    if conn == nil {
+        // Fallback to default connection
+        conn = m.conn
+    }
+
+    // Execute with circuit breaker
+    var resp *model.BatchGenResponse
+    err := hystrix.Do("model_generate", func() error {
+        var innerErr error
+        client := model.NewModelServiceClient(conn)
+        resp, innerErr = client.BatchGenerate(ctx, batchReq)
+        return innerErr
+    }, nil)
+
+    if err != nil {
+        modelRequestErrors.WithLabelValues("batch", "batch_generate_error").Inc()
+        circuitBreakerErrors.WithLabelValues("batch", "batch_circuit_breaker").Inc()
+        return nil, err
+    }
+
+    // Return connection to pool if it's from the pool
+    if conn != m.conn {
+        m.ReturnConnectionToPool(conn)
+    }
+
+    return resp, nil
 }
 
 // Close закрывает все соединения

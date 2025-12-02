@@ -39,6 +39,8 @@ ui1 ansible_host=10.0.3.30
 ui2 ansible_host=10.0.3.31
 ```
 
+Note: The batch processing functionality is now integrated directly into the head-go and model-proxy services, eliminating the need for a separate batch-processor service.
+
 ### 3.2 Configure Environment
 Edit `environments/production.yml` with production settings:
 ```yaml

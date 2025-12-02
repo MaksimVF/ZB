@@ -79,6 +79,43 @@ class ModelServicer:
             tokens_used=tokens_used
         )
 
+    def BatchGenerate(self, request, context):
+        """Process multiple generation requests in a single batch"""
+        responses = []
+
+        for single_request in request.requests:
+            # Process each request individually but within the same batch
+            msgs = list(single_request.messages) if single_request and hasattr(single_request, "messages") else []
+            text = " ".join(msgs) if msgs else "empty"
+
+            if LITELLM:
+                prov = single_request.model or "local"
+                try:
+                    res = call_litellm(f"{prov}/{single_request.model}", msgs, single_request.temperature, single_request.max_tokens)
+                    text = ""
+                    if isinstance(res, dict):
+                        if "choices" in res and len(res["choices"])>0:
+                            for c in res["choices"]:
+                                text += c.get("message",{}).get("content","") or c.get("text","")
+                        else:
+                            text = res.get("text", str(res))
+                    else:
+                        text = str(res)
+                except Exception as e:
+                    logger.exception("error")
+                    text = "error: "+str(e)
+
+            # Create and return proper GenResponse for this request
+            tokens_used = max(1, len(text) // 4)  # Simple token estimation
+            response = model_pb2.GenResponse(
+                request_id=single_request.request_id if single_request and hasattr(single_request, "request_id") else "",
+                text=text,
+                tokens_used=tokens_used
+            )
+            responses.append(response)
+
+        return model_pb2.BatchGenResponse(responses=responses)
+
     def GenerateStream(self, request, context):
         """Streaming version of Generate that yields multiple responses"""
         msgs = list(request.messages) if request and hasattr(request, "messages") else []
