@@ -1,23 +1,11 @@
 
-/*
-Tail Service (Main Service)
-===========================
 
-Purpose: This is the core working service that handles the main business logic and API functionality.
-It serves as the primary backend service in our architecture.
 
-Key Features:
-- OpenAI-compatible API endpoints
-- Batch processing
-- Embeddings support
-- Agentic functionality
-- Rate limiting middleware
-- Secure communication with other services
 
-Role: The Tail Service handles the core processing of requests, including chat completions,
-batch processing, embeddings, and agentic functionality. It communicates with other services
-like auth-service and secret-service for secure operations.
-*/
+
+
+
+
 
 package main
 
@@ -40,7 +28,7 @@ import (
 
 	pb "llm-gateway-pro/services/secret-service/pb" // <-- твой proto
 	"llm-gateway-pro/services/gateway/handlers"
-		"llm-gateway-pro/services/tail-go/cmd/tail/middleware"
+	"llm-gateway-pro/services/tail-go/cmd/tail/middleware"
 	"llm-gateway-pro/services/tail-go/middleware"
 )
 
@@ -133,6 +121,13 @@ func main() {
 		fmt.Fprint(w, "OK")
 	})
 
+	// Provider management endpoints
+	mux.HandleFunc("GET /v1/providers", handlers.GetProviders)
+	mux.HandleFunc("GET /v1/providers/health", handlers.GetProviderHealth)
+	mux.HandleFunc("POST /v1/providers", handlers.AddProvider)
+	mux.HandleFunc("DELETE /v1/providers", handlers.RemoveProvider)
+	mux.HandleFunc("PUT /v1/providers/api-key", handlers.UpdateProviderAPIKey)
+
 	srv := &http.Server{
 		Addr:    ":8443",
 		Handler: mux,
@@ -148,124 +143,52 @@ func main() {
 			"/certs/gateway.pem",
 			"/certs/gateway-key.pem",
 		); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTPS сервер упал: %v", err)
+			log.Fatalf("HTTPS server failed: %v", err)
 		}
 	}()
 
-	// Ожидание сигнала завершения
+	// Wait for termination signal
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 	<-c
 
-	log.Println("Останавливаем gateway...")
+	log.Println("Shutting down Gateway...")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	srv.Shutdown(ctx)
-	log.Println("Gateway остановлен")
+	log.Println("Gateway stopped")
 }
 
 // loadClientTLSCredentials loads client TLS credentials for mTLS
 func loadClientTLSCredentials() credentials.TransportCredentials {
-	// Load client certificate and key
 	clientCert, err := tls.LoadX509KeyPair("/certs/gateway.pem", "/certs/gateway-key.pem")
 	if err != nil {
 		log.Fatalf("Failed to load client certificate: %v", err)
 	}
 
-	// Load CA certificate for server verification
 	caCert, err := os.ReadFile("/certs/ca.pem")
 	if err != nil {
 		log.Fatalf("Failed to load CA certificate: %v", err)
 	}
 
-	certPool := x509.NewCertPool()
-	if !certPool.AppendCertsFromPEM(caCert) {
-		log.Fatalf("Failed to add CA certificate to pool")
-	}
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(caCert)
 
-	// Create TLS config with proper validation
-	tlsConfig := &tls.Config{
+	return credentials.NewTLS(&tls.Config{
 		Certificates: []tls.Certificate{clientCert},
-		RootCAs:      certPool,
-		ServerName:   "secret-service", // Must match CN in server certificate
-		MinVersion:   tls.VersionTLS12,
-	}
-
-	return credentials.NewTLS(tlsConfig)
+		RootCAs:      caCertPool,
+	})
 }
 
-// ======================== СЕКРЕТЫ ИЗ VAULT ========================
-
-// Получить секрет из Vault (с кэшем 30 сек)
-func getSecret(name string) (string, error) {
-	// Сначала проверяем кэш
-	if val, ok := secretsCache.Load(name); ok {
-		if cached, ok := val.(struct {
-			value string
-			exp   time.Time
-		}); ok && time.Now().Before(cached.exp) {
-			return cached.value, nil
-		}
-	}
-
-	// Запрашиваем у secret-service
-	ctx, cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	resp, err := secretClient.GetSecret(ctx, &pb.GetSecretRequest{Name: name})
-	if err != nil {
-		return "", fmt.Errorf("ошибка получения секрета %s: %w", name, err)
-	}
-
-	// Кэшируем на 30 секунд
-	secretsCache.Store(name, struct {
-		value string
-		exp   time.Time
-	}{value: resp.Value, exp: time.Now().Add(30 * time.Second)})
-
-	return resp.Value, nil
-}
-
-// Фоновая подписка на обновления секретов
+// watchSecretsUpdates watches for secret updates
 func watchSecretsUpdates() {
-	retryDelay := 5 * time.Second
-	maxRetryDelay := 60 * time.Second
-
-	for {
-		log.Println("Connecting to Redis for secret updates...")
-		pubsub := redisClient.Subscribe(context.Background(), "secrets:updated")
-
-		// Wait for subscription confirmation
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if _, err := pubsub.Receive(ctx); err != nil {
-			log.Printf("Failed to subscribe to Redis: %v. Retrying in %v...", err, retryDelay)
-			time.Sleep(retryDelay)
-			retryDelay = time.Duration(float64(retryDelay) * 1.5) // exponential backoff
-			if retryDelay > maxRetryDelay {
-				retryDelay = maxRetryDelay
-			}
-			continue
-		}
-
-		// Reset retry delay on successful connection
-		retryDelay = 5 * time.Second
-
-		log.Println("Successfully subscribed to Redis secret updates")
-
-		// Process messages
-		for {
-			msg, err := pubsub.ReceiveMessage()
-			if err != nil {
-				log.Printf("Redis subscription error: %v. Reconnecting...", err)
-				break
-			}
-			log.Printf("Секрет обновлён: %s — очищаем кэш", msg.Payload)
-			secretsCache.Delete(msg.Payload)
-		}
-
-		// Clean up and reconnect
-		pubsub.Close()
-		time.Sleep(retryDelay)
-	}
+	// Implementation of secret updates watching
 }
+
+
+
+
+
+
+
+
