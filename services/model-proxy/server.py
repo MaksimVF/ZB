@@ -28,8 +28,11 @@ logger = logging.getLogger("model-proxy")
 def get_provider_keys_from_secrets():
     """Fetch provider API keys from secrets service"""
     try:
-        # This would be replaced with actual gRPC call to secrets-service
+        # Implement actual gRPC call to secrets-service
         # For now, we'll use environment variable as fallback
+        # In production, this should be replaced with:
+        # 1. gRPC client to secrets-service
+        # 2. Fetch secrets using proper authentication
         return json.loads(os.getenv("PROVIDER_KEYS", "{}"))
     except Exception as e:
         logger.error(f"Failed to fetch provider keys from secrets service: {e}")
