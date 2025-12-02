@@ -36,25 +36,36 @@
   - `/v1/embeddings` - Embeddings API
   - `/v1/agentic` - Agentic functionality
 
+## Core Services
+
+### 3. Agentic Service (`services/agentic-service`)
+- **Purpose**: Dedicated service for advanced agentic operations
+- **Key Features**:
+  - Advanced agentic endpoint with parallel tool calls
+  - Tool result caching for performance optimization
+  - Premium model access for agentic operations
+  - Specialized billing and monitoring capabilities
+  - Secure communication with other services
+
 ## Supporting Services
 
-### 3. Auth Service (`services/auth-service`)
+### 4. Auth Service (`services/auth-service`)
 - **Purpose**: Authentication and authorization
 - **Key Features**: User management, token validation, access control
 
-### 4. Billing Service (`services/billing`)
+### 5. Billing Service (`services/billing`)
 - **Purpose**: Billing and usage tracking
 - **Key Features**: Usage monitoring, invoicing, payment processing
 
-### 5. Secrets Service (`services/secrets-service`)
+### 6. Secrets Service (`services/secrets-service`)
 - **Purpose**: Secure secret management
 - **Key Features**: API key storage, secret rotation, secure access
 
-### 6. Model Proxy (`services/model-proxy`)
+### 7. Model Proxy (`services/model-proxy`)
 - **Purpose**: Model communication proxy
 - **Key Features**: Request routing, load balancing, model abstraction
 
-### 7. Rate Limiter (`services/rate-limiter`)
+### 8. Rate Limiter (`services/rate-limiter`)
 - **Purpose**: Request rate limiting
 - **Key Features**: Traffic control, abuse prevention, fair usage
 
@@ -66,16 +77,20 @@
               [Auth Service] ←→ [Secrets Service]
                     ↓       ↑
                 [Billing Service]
+
+[Gateway Service] → [Agentic Service] → [LLM Providers]
+                    ↓       ↑
+                [Billing Service]
 ```
 
 ## Key Differences
 
-| Aspect          | Gateway Service | Tail Service |
-|----------------|----------------|--------------|
-| **Focus**      | Agent/LLM API Gateway | Core business logic |
-| **Endpoints**  | LangChain-specific, provider management | Chat, batch, embeddings, agentic |
-| **Integration** | LiteLLM, multi-provider routing | Secure service communication |
-| **Monitoring** | Prometheus metrics, health checks | Redis health checks, gRPC monitoring |
+| Aspect          | Gateway Service | Tail Service | Agentic Service |
+|----------------|----------------|--------------|-----------------|
+| **Focus**      | Agent/LLM API Gateway | Core business logic | Advanced agentic operations |
+| **Endpoints**  | LangChain-specific, provider management, agentic proxy | Chat, batch, embeddings | Advanced agentic processing |
+| **Integration** | LiteLLM, multi-provider routing | Secure service communication | Premium models, tool caching |
+| **Monitoring** | Prometheus metrics, health checks | Redis health checks, gRPC monitoring | Specialized billing, performance metrics |
 
 ## Naming Convention
 

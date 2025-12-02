@@ -88,6 +88,22 @@ services:
     depends_on:
       - head
       - secret-service
+      - agentic-service
+
+  # Agentic Service
+  # ---------------
+  # Dedicated service for advanced agentic operations with specialized billing
+  agentic-service:
+    build: ./services/agentic-service
+    ports:
+      - "8081:8081"
+    networks:
+      - client_network
+      - server_network
+    volumes:
+      - ./certs:/certs:ro
+    depends_on:
+      - secret-service
 
   secret-service:
     build: ./services/secrets-service

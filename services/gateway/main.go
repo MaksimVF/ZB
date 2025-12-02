@@ -188,6 +188,9 @@ func main() {
 	// Standard OpenAI-compatible endpoint
 	r.HandleFunc("/v1/chat/completions", handlers.ChatCompletion).Methods("POST")
 
+	// Agentic endpoint - proxy to agentic service
+	r.HandleFunc("/v1/agentic", handlers.ProxyAgenticRequest).Methods("POST")
+
 	// Provider management endpoints
 	r.HandleFunc("/v1/providers", handlers.ListProviders).Methods("GET")
 	r.HandleFunc("/v1/providers", handlers.AddProvider).Methods("POST")
