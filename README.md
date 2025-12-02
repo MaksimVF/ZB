@@ -26,3 +26,4 @@ Notes:
 - The Go services expect generated pb files in services/*/gen/.
 - The model-proxy is a minimal echo server; replace with litellm integration if desired.
 - Add mTLS and real provider implementations before production.
+- Batch processing is now implemented natively using the BatchGenerate method in model-proxy and head-go services, eliminating the need for a separate batch-processor service.

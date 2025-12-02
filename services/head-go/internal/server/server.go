@@ -329,6 +329,72 @@ func (s *HeadServer) SetHealthStatus(status string) {
     s.healthStatus = status
 }
 
+// Batch processing method
+func (s *HeadServer) BatchGenerate(ctx context.Context, req *model.BatchGenRequest) (*model.BatchGenResponse, error) {
+    start := time.Now()
+    var responses []*model.GenResponse
+
+    // Start tracing span
+    ctx, span := tracer.Start(ctx, "BatchGenerate",
+        trace.WithAttributes(
+            attribute.Int("requests", len(req.Requests)),
+        ),
+    )
+    defer span.End()
+
+    // Increment active request count
+    atomic.AddInt32(&s.activeRequests, 1)
+    defer atomic.AddInt32(&s.activeRequests, -1)
+
+    // Update active connections metric
+    activeConnections.Set(float64(atomic.LoadInt32(&s.activeRequests)))
+
+    // Process each request in the batch
+    for _, singleReq := range req.Requests {
+        // Execute with circuit breaker
+        var responseText string
+        var tokensUsed int
+        err := hystrix.Do("model_proxy", func() error {
+            var err error
+            responseText, tokensUsed, err = s.model.Generate(ctx, singleReq.Model, singleReq.Messages, singleReq.Temperature, singleReq.MaxTokens)
+            if err != nil {
+                requestErrors.WithLabelValues(singleReq.Model, "model_error").Inc()
+                circuitBreakerState.WithLabelValues("model_proxy", "open").Set(1)
+                return fmt.Errorf("model error: %w", err)
+            }
+            return nil
+        }, nil)
+
+        if err != nil {
+            requestErrors.WithLabelValues(singleReq.Model, "circuit_breaker").Inc()
+            // Add error response for this request
+            responses = append(responses, &model.GenResponse{
+                RequestId: singleReq.RequestId,
+                Text:      fmt.Sprintf("Error: %v", err),
+                TokensUsed: 0,
+            })
+            continue
+        }
+
+        // Update circuit breaker state
+        circuitBreakerState.WithLabelValues("model_proxy", "closed").Set(1)
+
+        // Add successful response
+        responses = append(responses, &model.GenResponse{
+            RequestId: singleReq.RequestId,
+            Text:      responseText,
+            TokensUsed: int32(tokensUsed),
+        })
+    }
+
+    requestLatency.WithLabelValues("batch").Observe(time.Since(start).Seconds())
+    requestsTotal.WithLabelValues("batch", "ok").Inc()
+
+    return &model.BatchGenResponse{
+        Responses: responses,
+    }, nil
+}
+
 // Обычный (не стриминговый) запрос — возвращает полный текст сразу
 func (s *HeadServer) ChatCompletion(ctx context.Context, req *gen.ChatRequest) (*gen.ChatResponse, error) {
     start := time.Now()
