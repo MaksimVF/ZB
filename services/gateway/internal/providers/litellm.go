@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"strings"
@@ -110,8 +111,23 @@ func checkProviderHealth() {
 	defer cacheMutex.Unlock()
 
 	for provider, config := range providerCache {
-		if config.HealthCheckURL == "" {
-			continue
+		// Set default health check URL if not provided
+		healthCheckURL := config.HealthCheckURL
+		if healthCheckURL == "" {
+			// Default health check endpoints for common providers
+			switch {
+			case strings.Contains(provider, "openai"):
+				healthCheckURL = config.BaseURL + "/v1/models"
+			case strings.Contains(provider, "anthropic"):
+				healthCheckURL = config.BaseURL + "/health"
+			case strings.Contains(provider, "google"):
+				healthCheckURL = config.BaseURL + "/v1/health"
+			case strings.Contains(provider, "meta"):
+				healthCheckURL = config.BaseURL + "/status"
+			default:
+				// For custom providers, try a simple ping
+				healthCheckURL = config.BaseURL + "/ping"
+			}
 		}
 
 		// Check if health check is needed
@@ -120,13 +136,38 @@ func checkProviderHealth() {
 		}
 
 		// Perform health check
-		resp, err := http.Head(config.HealthCheckURL)
-		if err != nil || resp.StatusCode >= 500 {
+		client := &http.Client{Timeout: 5 * time.Second}
+		req, err := http.NewRequest("GET", healthCheckURL, nil)
+		if err != nil {
 			providerCache[provider].IsHealthy = false
-			logger.Warn().Str("provider", provider).Msg("Health check failed")
+			logger.Warn().Str("provider", provider).Err(err).Msg("Health check request creation failed")
+			providerCache[provider].LastChecked = time.Now()
+			continue
+		}
+
+		// Add auth header if API key is available
+		if config.APIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+config.APIKey)
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			providerCache[provider].IsHealthy = false
+			logger.Warn().Str("provider", provider).Str("url", healthCheckURL).Err(err).Msg("Health check request failed")
 		} else {
-			providerCache[provider].IsHealthy = true
-			logger.Info().Str("provider", provider).Msg("Health check passed")
+			defer resp.Body.Close()
+
+			// Check response status
+			if resp.StatusCode >= 500 {
+				providerCache[provider].IsHealthy = false
+				logger.Warn().Str("provider", provider).Str("url", healthCheckURL).Int("status", resp.StatusCode).Msg("Health check returned server error")
+			} else if resp.StatusCode >= 400 {
+				providerCache[provider].IsHealthy = false
+				logger.Warn().Str("provider", provider).Str("url", healthCheckURL).Int("status", resp.StatusCode).Msg("Health check returned client error")
+			} else {
+				providerCache[provider].IsHealthy = true
+				logger.Info().Str("provider", provider).Str("url", healthCheckURL).Int("status", resp.StatusCode).Msg("Health check passed")
+			}
 		}
 
 		providerCache[provider].LastChecked = time.Now()
@@ -154,15 +195,50 @@ func GetProviderForModel(model string) (ProviderConfig, error) {
 	}
 
 	// Find provider for model with load balancing
+	var matchingProviders []ProviderConfig
 	for _, config := range healthyProviders {
 		for _, modelName := range config.ModelNames {
 			if strings.EqualFold(model, modelName) {
-				return config, nil
+				matchingProviders = append(matchingProviders, config)
 			}
 		}
 	}
 
-	return ProviderConfig{}, errors.New("no provider found for model")
+	// If no matching providers found, return error
+	if len(matchingProviders) == 0 {
+		return ProviderConfig{}, errors.New("no provider found for model")
+	}
+
+	// If multiple providers support the model, choose based on weight (load balancing)
+	if len(matchingProviders) == 1 {
+		return matchingProviders[0], nil
+	}
+
+	// Calculate total weight
+	totalWeight := 0
+	for _, provider := range matchingProviders {
+		if provider.Weight == 0 {
+			provider.Weight = 1 // Default weight if not set
+		}
+		totalWeight += provider.Weight
+	}
+
+	// Random selection based on weights
+	// Initialize random seed once
+	rand.Seed(time.Now().UnixNano())
+	randomValue := rand.Intn(totalWeight)
+
+	// Select provider based on weight
+	currentWeight := 0
+	for _, provider := range matchingProviders {
+		currentWeight += provider.Weight
+		if randomValue < currentWeight {
+			return provider, nil
+		}
+	}
+
+	// Fallback: return the first provider if something goes wrong with weight calculation
+	return matchingProviders[0], nil
 }
 
 func ProxyRequest(providerConfig ProviderConfig, method, path string, body interface{}) ([]byte, error) {
