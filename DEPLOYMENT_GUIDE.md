@@ -15,7 +15,7 @@ This guide provides comprehensive instructions for deploying the LLM microservic
 The system is deployed across three server groups:
 
 1. **Head Services**: `head-go`, `model-proxy`
-2. **Tail Services**: `tail-go`, `auth-service`, `billing`, `gateway`, `rate-limiter`, `secrets-service`
+2. **Tail Services**: `tail-go`, `auth-service`, `billing`, `agentic-gateway`, `rate-limiter`, `secrets-service`
 3. **UI Services**: `admin-dashboard`, `user-dashboard`
 
 ## Deployment Automation

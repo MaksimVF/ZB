@@ -22,7 +22,7 @@
         - tail
         - auth-service
         - billing
-        - gateway
+        - agentic-gateway
         - rate-limiter
         - secrets-service
         - admin-dashboard
@@ -39,7 +39,7 @@
         - tail
         - auth-service
         - billing
-        - gateway
+        - agentic-gateway
         - rate-limiter
         - secrets-service
         - admin-dashboard

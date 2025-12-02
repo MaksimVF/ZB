@@ -16,7 +16,7 @@ service_versions:
   tail: 1.0.0
   auth-service: 1.0.0
   billing: 1.0.0
-  gateway: 1.0.0
+  agentic-gateway: 1.0.0
   rate-limiter: 1.0.0
   secrets-service: 1.0.0
   admin-dashboard: 1.0.0

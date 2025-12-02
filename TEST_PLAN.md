@@ -33,7 +33,7 @@ Verify that the system architecture now complies with the requirements:
 
 #### Test 2.1: API Keys from Secrets Service
 - **Setup**: Configure secrets in secrets-service
-- **Action**: Check gateway logs for API key retrieval
+- **Action**: Check agentic-gateway logs for API key retrieval
 - **Expected**:
   - Gateway should fetch API keys from secrets-service
   - No hardcoded API keys in environment variables
@@ -43,7 +43,7 @@ Verify that the system architecture now complies with the requirements:
 - **Action**: Add/update secrets through UI
 - **Expected**:
   - Secrets should be stored in secrets-service
-  - Changes should be reflected in gateway behavior
+  - Changes should be reflected in agentic-gateway behavior
 
 ### 3. Network Separation Verification
 
@@ -51,7 +51,7 @@ Verify that the system architecture now complies with the requirements:
 - **Setup**: Check docker network configuration
 - **Action**: Verify service network assignments
 - **Expected**:
-  - Client, tail, gateway in client_network
+  - Client, tail, agentic-gateway in client_network
   - Head, model-proxy, secrets-service in server_network
   - Gateway in both networks for communication
 
@@ -79,7 +79,7 @@ curl -X POST http://localhost:8000/v1/chat/completions -H "Content-Type: applica
 curl -X POST http://localhost:8080/v1/chat/completions -H "Content-Type: application/json" -d '{"messages": [{"role": "user", "content": "Hello"}]}'
 
 # Check logs for secret retrieval
-docker logs gateway-service
+docker logs agentic-gateway-service
 docker logs model-proxy-service
 ```
 

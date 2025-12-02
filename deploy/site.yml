@@ -247,11 +247,11 @@
               timeout: 10s
               retries: 3
 
-    - name: Build and deploy gateway service
+    - name: Build and deploy agentic-gateway service
       block:
-        - name: Build gateway image
+        - name: Build agentic-gateway image
           docker_image:
-            name: gateway
+            name: agentic-gateway
             build:
               path: "{{ project_root }}/services/agentic-gateway"
               pull: yes
@@ -259,10 +259,10 @@
             force_source: yes
             state: present
 
-        - name: Deploy gateway container
+        - name: Deploy agentic-gateway container
           docker_container:
-            name: gateway
-            image: gateway
+            name: agentic-gateway
+            image: agentic-gateway
             state: started
             restart_policy: always
             networks:
@@ -410,7 +410,7 @@
         - tail
         - auth-service
         - billing
-        - gateway
+        - agentic-gateway
         - rate-limiter
         - secrets-service
         - admin-dashboard

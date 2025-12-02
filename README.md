@@ -26,7 +26,7 @@ The system now supports two request flows:
 - Services fetch secrets via gRPC with mTLS
 
 ### ✅ Network Separation
-- Client network: tail, gateway, rate-limiter, UI
+- Client network: tail, agentic-gateway, rate-limiter, UI
 - Server network: head, model-proxy, secrets-service, redis
 
 ### ✅ Compliance

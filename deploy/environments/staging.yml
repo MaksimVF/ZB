@@ -16,7 +16,7 @@ service_versions:
   tail: staging
   auth-service: staging
   billing: staging
-  gateway: staging
+  agentic-gateway: staging
   rate-limiter: staging
   secrets-service: staging
   admin-dashboard: staging

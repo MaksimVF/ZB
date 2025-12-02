@@ -19,7 +19,7 @@ service_versions:
   tail: latest
   auth-service: latest
   billing: latest
-  gateway: latest
+  agentic-gateway: latest
   rate-limiter: latest
   secrets-service: latest
   admin-dashboard: latest

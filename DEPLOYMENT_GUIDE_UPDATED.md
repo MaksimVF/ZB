@@ -82,7 +82,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 
 ## Monitoring and Logging
 
-- **Gateway Logs**: `docker logs gateway-service`
+- **Gateway Logs**: `docker logs agentic-gateway-service`
 - **Model Proxy Logs**: `docker logs model-proxy-service`
 - **Secrets Service Logs**: `docker logs secret-service`
 
@@ -106,6 +106,6 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 
 3. **API Key Issues**:
    - Verify keys are properly stored in secrets-service
-   - Check gateway logs for secret retrieval status
+   - Check agentic-gateway logs for secret retrieval status
 
 

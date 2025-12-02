@@ -15,7 +15,7 @@ service_versions:
   tail: dev
   auth-service: dev
   billing: dev
-  gateway: dev
+  agentic-gateway: dev
   rate-limiter: dev
   secrets-service: dev
   admin-dashboard: dev

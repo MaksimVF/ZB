@@ -67,7 +67,7 @@ services:
     volumes:
       - ./certs:/certs:ro
 
-  gateway:
+  agentic-gateway:
     build: ./services/agentic-gateway
     ports:
       - "8080:8080"
