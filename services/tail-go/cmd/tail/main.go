@@ -1,4 +1,24 @@
 
+/*
+Tail Service (Main Service)
+===========================
+
+Purpose: This is the core working service that handles the main business logic and API functionality.
+It serves as the primary backend service in our architecture.
+
+Key Features:
+- OpenAI-compatible API endpoints
+- Batch processing
+- Embeddings support
+- Agentic functionality
+- Rate limiting middleware
+- Secure communication with other services
+
+Role: The Tail Service handles the core processing of requests, including chat completions,
+batch processing, embeddings, and agentic functionality. It communicates with other services
+like auth-service and secret-service for secure operations.
+*/
+
 package main
 
 import (

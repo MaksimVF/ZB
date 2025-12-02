@@ -30,6 +30,10 @@ services:
     networks:
       - server_network
       - client_network
+  # Tail Service (Main Service)
+  # --------------------------
+  # This is the core working service that handles the main business logic and API functionality.
+  # It serves as the primary backend service in our architecture.
   tail:
     build: ./services/tail-go
     ports: ["8000:8000"]
@@ -67,6 +71,11 @@ services:
     volumes:
       - ./certs:/certs:ro
 
+  # Gateway Service (Agent Gateway)
+  # ----------------------------
+  # This service provides a unified gateway for LLM APIs with special support for
+  # LangChain integration and agent-related functionality. It serves as the agent-focused
+  # API gateway in our architecture.
   gateway:
     build: ./services/gateway
     ports:

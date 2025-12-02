@@ -3,8 +3,8 @@
 ## Structure
 - **proto/**: Protocol buffer definitions
 - **services/head-go/**: Head service (Go) - Processes requests and forwards to model proxy
-- **services/tail-go/**: Tail service (Go) - REST→gRPC proxy for client requests
-- **services/gateway/**: Gateway service (Go) - Alternative entry point with provider management
+- **services/tail-go/**: Tail service (Go) - Main working service with core business logic
+- **services/gateway/**: Gateway service (Go) - Agent-focused API gateway with provider management
 - **services/model-proxy/**: Model proxy (Python) - Handles LLM provider integration
 - **services/secrets-service/**: Secrets management (Go) - Secure API key storage
 - **ui/admin-dashboard/**: Admin UI (React) - Secret management and monitoring
@@ -15,8 +15,10 @@
 
 The system now supports two request flows:
 
-1. **Client → Tail → Head → Model Proxy → LLM Provider**
-2. **Client → Gateway → Head → Model Proxy → LLM Provider**
+1. **Client → Tail (Main Service) → Head → Model Proxy → LLM Provider**
+2. **Client → Gateway (Agent Gateway) → Head → Model Proxy → LLM Provider**
+
+**For detailed service architecture, see [SERVICE_ARCHITECTURE.md](SERVICE_ARCHITECTURE.md)**
 
 ## Key Features
 
