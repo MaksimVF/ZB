@@ -160,6 +160,31 @@ Prometheus metrics include:
 - **Secure**: Proper authentication and error handling
 - **Flexible**: Easily add or remove providers without code changes
 
+## Security Features
+
+The gateway service includes several security features:
+
+1. **mTLS Authentication**: All services communicate using mutual TLS
+2. **Rate Limiting**: Prevents abuse of the API
+3. **Circuit Breakers**: Protects against cascading failures
+4. **Request Validation**: Ensures proper request formats
+5. **Content Filtering**: Filters malicious content and SQL injection attempts
+6. **Audit Logging**: Logs sensitive operations for compliance
+7. **Data Isolation**: Ensures data separation between clients
+8. **User-Configurable Security**: Users can enable/disable security features via API
+
+## Security Configuration
+
+Users can configure security settings via the API:
+
+- **GET /v1/security/config**: Get current security configuration
+- **PUT /v1/security/config**: Update security configuration
+
+Configuration options:
+- `content_filtering_enabled`: Enable/disable content filtering
+- `audit_logging_enabled`: Enable/disable audit logging
+- `data_isolation_enabled`: Enable/disable data isolation
+
 ## Contributing
 
 1. Fork the repository

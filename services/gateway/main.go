@@ -182,6 +182,11 @@ func main() {
 
 	r := mux.NewRouter()
 
+	// Apply security middlewares
+	r.Use(middleware.ContentFilteringMiddleware)
+	r.Use(middleware.AuditLoggingMiddleware)
+	r.Use(middleware.DataIsolationMiddleware)
+
 	// LangChain-specific endpoint
 	r.HandleFunc("/v1/langchain/chat/completions", handlers.LangChainCompletion).Methods("POST")
 
@@ -195,6 +200,10 @@ func main() {
 	r.HandleFunc("/v1/providers", handlers.ListProviders).Methods("GET")
 	r.HandleFunc("/v1/providers", handlers.AddProvider).Methods("POST")
 	r.HandleFunc("/v1/providers/{provider}", handlers.RemoveProvider).Methods("DELETE")
+
+	// Security configuration endpoints
+	r.HandleFunc("/v1/security/config", handlers.GetSecurityConfig).Methods("GET")
+	r.HandleFunc("/v1/security/config", handlers.UpdateSecurityConfig).Methods("PUT")
 
 	// Circuit breaker endpoints
 	r.HandleFunc("/v1/circuit-breakers", handlers.ListCircuitBreakers).Methods("GET")
