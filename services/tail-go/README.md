@@ -54,6 +54,15 @@ The Tail Service includes comprehensive security features:
 3. **Data Isolation**: Ensures client data separation and access controls
 4. **User-Configurable Security**: Security features can be enabled/disabled per client
 
+## LiteLLM Integration
+
+The Tail Service includes LiteLLM integration for multi-LLM support:
+
+1. **Dynamic Provider Selection**: Automatically selects the appropriate provider based on model
+2. **Provider Management API**: Endpoints for managing LLM providers
+3. **Health Monitoring**: Provider health checks and failover capabilities
+4. **Multi-Model Support**: Seamless integration with OpenAI, Anthropic, Google, and Groq models
+
 ## Relationship to Gateway Service
 
 While the Gateway Service focuses on agent-related API gateway functionality and provider management, the Tail Service handles the core business logic and processing. The Gateway Service may route requests to the Tail Service for processing.

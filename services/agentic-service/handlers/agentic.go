@@ -1,6 +1,12 @@
 
 
 
+
+
+
+
+
+
 package handlers
 
 import (
@@ -25,6 +31,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 	"llm-gateway-pro/services/agentic-service/internal/secrets"
+	"llm-gateway-pro/services/agentic-service/internal"
 	"llm-gateway-pro/services/head-go/gen"
 )
 
@@ -129,15 +136,9 @@ func AgenticHandler(w http.ResponseWriter, r *http.Request) {
 		}{Type: "json_object"}
 	}
 
-	// Only top reasoning models allowed
-	allowed := map[string]string{
-		"gpt-4o-2024-11-20": "openai",
-		"claude-3-5-sonnet-20241022": "anthropic",
-		"o1-preview": "openai",
-		"o1-mini":    "openai",
-	}
-	provider, ok := allowed[req.Model]
-	if !ok {
+	// Only top reasoning models allowed - use LiteLLM for provider selection
+	provider, err := internal.GetProviderForModel(req.Model)
+	if err != nil {
 		http.Error(w, `{"error":"model not allowed for agentic endpoint"}`, 400)
 		return
 	}
@@ -253,8 +254,17 @@ func extractToolCalls(resp map[string]interface{}) []ToolCall {
 }
 
 func hashToolCall(tc *ToolCall) string {
-	h := sha256.Sum256([]byte(tc.Function["name"].(string) + tc.Function["arguments"].(string)))
-	return hex.EncodeToString(h[:])
+	// Create a hash of the tool call for caching
+	data, _ := json.Marshal(tc)
+	hash := sha256.Sum256(data)
+	return hex.EncodeToString(hash[:])
 }
+
+
+
+
+
+
+
 
 
