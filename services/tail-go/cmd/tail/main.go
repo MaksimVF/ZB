@@ -41,6 +41,7 @@ import (
 	pb "llm-gateway-pro/services/secret-service/pb" // <-- твой proto
 	"llm-gateway-pro/services/gateway/handlers"
 		"llm-gateway-pro/services/tail-go/cmd/tail/middleware"
+	"llm-gateway-pro/services/tail-go/middleware"
 )
 
 // Глобальные клиенты
@@ -91,10 +92,22 @@ func main() {
 	mux := http.NewServeMux()
 
 	// Публичные эндпоинты
-	mux.HandleFunc("POST /v1/chat/completions", middleware.RateLimiter(handlers.ChatCompletion))
-	mux.HandleFunc("POST /v1/completions", middleware.RateLimiter(handlers.ChatCompletion))
-	mux.HandleFunc("POST /v1/batch", middleware.RateLimiter(handlers.BatchSubmit))
-	mux.HandleFunc("POST /v1/embeddings", middleware.RateLimiter(handlers.Embeddings))
+	mux.HandleFunc("POST /v1/chat/completions", middleware.RateLimiter(
+		middleware.ContentFilteringMiddleware(
+			middleware.AuditLoggingMiddleware(
+				middleware.DataIsolationMiddleware(handlers.ChatCompletion)))))
+	mux.HandleFunc("POST /v1/completions", middleware.RateLimiter(
+		middleware.ContentFilteringMiddleware(
+			middleware.AuditLoggingMiddleware(
+				middleware.DataIsolationMiddleware(handlers.ChatCompletion)))))
+	mux.HandleFunc("POST /v1/batch", middleware.RateLimiter(
+		middleware.ContentFilteringMiddleware(
+			middleware.AuditLoggingMiddleware(
+				middleware.DataIsolationMiddleware(handlers.BatchSubmit)))))
+	mux.HandleFunc("POST /v1/embeddings", middleware.RateLimiter(
+		middleware.ContentFilteringMiddleware(
+			middleware.AuditLoggingMiddleware(
+				middleware.DataIsolationMiddleware(handlers.Embeddings)))))
 
 	// Health check
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {

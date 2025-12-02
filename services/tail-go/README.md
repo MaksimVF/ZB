@@ -42,8 +42,17 @@ The Tail Service sits at the core of our system, handling the main business logi
 1. **HTTP Server**: Handles incoming API requests
 2. **gRPC Clients**: Secure communication with auth-service and secret-service
 3. **Redis Client**: Caching and rate limiting
-4. **Middleware**: Rate limiting and authentication
+4. **Middleware**: Rate limiting, authentication, and security features
 5. **Handlers**: Business logic for different API endpoints
+
+## Security Features
+
+The Tail Service includes comprehensive security features:
+
+1. **Content Filtering**: Filters malicious content, SQL injection, and XSS attempts
+2. **Audit Logging**: Logs sensitive operations to file and Redis
+3. **Data Isolation**: Ensures client data separation and access controls
+4. **User-Configurable Security**: Security features can be enabled/disabled per client
 
 ## Relationship to Gateway Service
 
