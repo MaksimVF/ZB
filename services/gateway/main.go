@@ -1,5 +1,24 @@
 
 
+/*
+Gateway Service (Agent Gateway)
+==============================
+
+Purpose: This service provides a unified gateway for LLM APIs with special support for
+LangChain integration and agent-related functionality. It serves as the agent-focused
+API gateway in our architecture.
+
+Key Features:
+- OpenAI-compatible API
+- LangChain-specific endpoint with usage tracking
+- Multi-provider support (OpenAI, Anthropic, Google, Meta, etc.)
+- Comprehensive monitoring and health checks
+- LiteLLM integration for dynamic provider routing
+
+Role: The Gateway Service is the entry point for agent-related API calls and LLM provider management.
+It routes requests to the appropriate services and handles provider-specific logic.
+*/
+
 package main
 
 import (
