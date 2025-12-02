@@ -4,7 +4,7 @@
 const express = require('express');
 const axios = require('axios');
 const app = express();
-const port = 59272;
+const port = 5173;
 
 app.use(express.static('dist'));
 app.use(express.json());
@@ -15,22 +15,6 @@ app.get('/api/metrics', (req, res) => {
     totalRequests: 1000,
     activeUsers: 150,
     responseTime: '200ms'
-  });
-});
-
-app.get('/api/billing', (req, res) => {
-  res.json({
-    totalRevenue: '$5000',
-    pendingPayments: '$250',
-    nextBillingCycle: '2025-12-01'
-  });
-});
-
-app.get('/api/queues', (req, res) => {
-  res.json({
-    activeQueues: 3,
-    pendingJobs: 12,
-    completedJobs: 450
   });
 });
 

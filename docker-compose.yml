@@ -2,32 +2,51 @@
 version: "3.8"
 
 networks:
-  default:
-    name: llm-network
+  client_network:
+    name: client-network
+  server_network:
+    name: server-network
 
 services:
   redis:
     image: redis:7
     ports: ["6379:6379"]
+    networks:
+      - server_network
   cache:
     image: ghcr.io/redis/redis:7
     command: ["redis-server"]
+    networks:
+      - server_network
   model-proxy:
     build: ./services/model-proxy
     ports: ["8100:8100", "50061:50061", "50062:50062"]
+    networks:
+      - server_network
   head:
     build: ./services/head-go
     ports: ["50055:50055","9001:9001"]
     depends_on: ["model-proxy","cache"]
+    networks:
+      - server_network
+      - client_network
   tail:
     build: ./services/tail-go
     ports: ["8000:8000"]
     depends_on: ["head", "rate-limiter"]
     volumes:
       - ./certs:/certs:ro
+    networks:
+      - client_network
   ui:
-    build: ./ui
+    build: ./ui/admin-dashboard
     ports: ["3000:5173"]
+    networks:
+      - client_network
+    environment:
+      - ADMIN_KEY=superadmin2025
+    depends_on:
+      - secret-service
 
   rate-limiter:
     build:
@@ -36,6 +55,29 @@ services:
     ports:
       - "50051:50051"
     networks:
-      - default
+      - client_network
+    volumes:
+      - ./certs:/certs:ro
+
+  gateway:
+    build: ./services/gateway
+    ports:
+      - "8080:8080"
+    networks:
+      - client_network
+      - server_network
+    volumes:
+      - ./certs:/certs:ro
+    depends_on:
+      - head
+      - secret-service
+
+  secret-service:
+    build: ./services/secrets-service
+    ports:
+      - "50053:50053"
+      - "8082:8082"
+    networks:
+      - server_network
     volumes:
       - ./certs:/certs:ro

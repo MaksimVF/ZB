@@ -24,7 +24,18 @@ except Exception:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("model-proxy")
 
-PROVIDER_KEYS = json.loads(os.getenv("PROVIDER_KEYS", "{}"))
+# Get provider keys from secrets service
+def get_provider_keys_from_secrets():
+    """Fetch provider API keys from secrets service"""
+    try:
+        # This would be replaced with actual gRPC call to secrets-service
+        # For now, we'll use environment variable as fallback
+        return json.loads(os.getenv("PROVIDER_KEYS", "{}"))
+    except Exception as e:
+        logger.error(f"Failed to fetch provider keys from secrets service: {e}")
+        return {}
+
+PROVIDER_KEYS = get_provider_keys_from_secrets()
 
 def call_litellm(provider_model, messages, temperature, max_tokens):
     provider = provider_model.split("/")[0]
