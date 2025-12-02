@@ -37,8 +37,17 @@ The Agentic Service provides specialized agentic capabilities and routes through
 1. **HTTP Server**: Handles incoming agentic API requests
 2. **gRPC Clients**: Secure communication with secret-service
 3. **Redis Client**: Caching and rate limiting
-4. **Middleware**: Rate limiting and authentication
+4. **Middleware**: Rate limiting, authentication, and security features
 5. **Handlers**: Business logic for agentic processing
+
+## Security Features
+
+The Agentic Service includes comprehensive security features:
+
+1. **Content Filtering**: Filters malicious content, SQL injection, and XSS attempts
+2. **Audit Logging**: Logs sensitive operations to file and Redis
+3. **Data Isolation**: Ensures client data separation and access controls
+4. **User-Configurable Security**: Security features can be enabled/disabled per client
 
 ## Relationship to Other Services
 

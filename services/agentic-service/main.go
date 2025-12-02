@@ -79,7 +79,10 @@ func main() {
 	r := mux.NewRouter()
 
 	// Agentic endpoint
-	r.HandleFunc("/v1/agentic", middleware.RateLimiter(handlers.AgenticHandler)).Methods("POST")
+	r.Handle("/v1/agentic", middleware.RateLimiter(
+		middleware.ContentFilteringMiddleware(
+			middleware.AuditLoggingMiddleware(
+				middleware.DataIsolationMiddleware(handlers.AgenticHandler))))).Methods("POST")
 
 	// Health check
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
