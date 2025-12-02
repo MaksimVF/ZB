@@ -1,9 +1,5 @@
 
 
-
-
-
-
 package main
 
 import (
@@ -96,6 +92,16 @@ func main() {
 				APIKey:     getSecretFromService("llm/meta/api_key"),
 				ModelNames: []string{"llama-3", "llama-2", "llama-1"},
 			},
+			"mistral": {
+				BaseURL:    "https://api.mistral.ai",
+				APIKey:     getSecretFromService("llm/mistral/api_key"),
+				ModelNames: []string{"mistral-large", "mistral-medium", "mistral-small"},
+			},
+			"cohere": {
+				BaseURL:    "https://api.cohere.ai",
+				APIKey:     getSecretFromService("llm/cohere/api_key"),
+				ModelNames: []string{"command-r", "command-light", "command-nightly"},
+			},
 		},
 	}
 
@@ -135,6 +141,22 @@ func main() {
 			ReadyToTrip:    resilience.DefaultReadyToTrip,
 			OnStateChange: resilience.DefaultOnStateChange,
 		},
+		{
+			Name:          "mistral",
+			MaxRequests:    5,
+			Interval:       60 * time.Second,
+			Timeout:        10 * time.Second,
+			ReadyToTrip:    resilience.DefaultReadyToTrip,
+			OnStateChange: resilience.DefaultOnStateChange,
+		},
+		{
+			Name:          "cohere",
+			MaxRequests:    5,
+			Interval:       60 * time.Second,
+			Timeout:        10 * time.Second,
+			ReadyToTrip:    resilience.DefaultReadyToTrip,
+			OnStateChange: resilience.DefaultOnStateChange,
+		},
 	}
 
 	resilience.InitCircuitBreakers(circuitBreakerConfigs)
@@ -158,81 +180,60 @@ func main() {
 	r.HandleFunc("/v1/circuit-breakers/{name}/reset", handlers.ResetCircuitBreaker).Methods("POST")
 
 	// Health check
-	r.HandleFunc("/health", HealthCheck).Methods("GET")
+	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
 
 	// Metrics endpoint
 	r.Handle("/metrics", promhttp.Handler())
 
-	logger.Info().Msg("Gateway service starting on :8080")
-	log.Fatal(http.ListenAndServe(":8080", r))
+	// Start HTTP server
+	server := &http.Server{
+		Addr:    ":8080",
+		Handler: r,
+	}
+
+	logger.Info().Msg("Starting gateway service on :8080")
+	if err := server.ListenAndServe(); err != nil {
+		logger.Fatal().Err(err).Msg("Failed to start server")
+	}
 }
 
-func HealthCheck(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"healthy"}`))
-}
-
-// loadClientTLSCredentials loads client TLS credentials for mTLS
 func loadClientTLSCredentials() credentials.TransportCredentials {
-	// Load client certificate and key
-	clientCert, err := tls.LoadX509KeyPair("/certs/gateway.pem", "/certs/gateway-key.pem")
-	if err != nil {
-		log.Fatalf("Failed to load client certificate: %v", err)
-	}
+	// Load client certificates
+	clientCert := []byte(os.Getenv("CLIENT_CERT"))
+	clientKey := []byte(os.Getenv("CLIENT_KEY"))
+	caCert := []byte(os.Getenv("CA_CERT"))
 
-	// Load CA certificate for server verification
-	caCert, err := os.ReadFile("/certs/ca.pem")
-	if err != nil {
-		log.Fatalf("Failed to load CA certificate: %v", err)
-	}
-
+	// Create a certificate pool from the certificate authority
 	certPool := x509.NewCertPool()
 	if !certPool.AppendCertsFromPEM(caCert) {
-		log.Fatalf("Failed to add CA certificate to pool")
+		log.Fatalf("Failed to add CA certificate")
 	}
 
-	// Create TLS config with proper validation
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{clientCert},
+	// Create the TLS credentials
+	cert, err := tls.X509KeyPair(clientCert, clientKey)
+	if err != nil {
+		log.Fatalf("Failed to load client certificates: %v", err)
+	}
+
+	return credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{cert},
 		RootCAs:      certPool,
-		ServerName:   "secret-service", // Must match CN in server certificate
-		MinVersion:   tls.VersionTLS12,
-	}
-
-	return credentials.NewTLS(tlsConfig)
-}
-
-// getSecretFromService retrieves a secret from the secrets-service
-func getSecretFromService(secretName string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	resp, err := secretClient.GetSecret(ctx, &pb.GetSecretRequest{Name: secretName})
-	if err != nil {
-		logger.Error().Err(err).Str("secret_name", secretName).Msg("Failed to get secret from secrets-service")
-		return ""
-	}
-
-	return resp.Value
-}
-
-// getUserSecretFromService retrieves a user-specific secret from the secrets-service
-func getUserSecretFromService(userId, secretName string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	resp, err := secretClient.GetUserSecret(ctx, &pb.GetUserSecretRequest{
-		UserId:     userId,
-		SecretName: secretName,
 	})
+}
+
+func getSecretFromService(key string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := secretClient.GetSecret(ctx, &pb.GetSecretRequest{Key: key})
 	if err != nil {
-		logger.Error().Err(err).Str("user_id", userId).Str("secret_name", secretName).Msg("Failed to get user secret from secrets-service")
+		logger.Error().Str("key", key).Err(err).Msg("Failed to get secret from secret-service")
 		return ""
 	}
 
 	return resp.Value
 }
-
-
 

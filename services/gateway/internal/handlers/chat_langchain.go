@@ -326,8 +326,69 @@ func trackLangChainUsage(userID, model string, tokens int) {
 func ListProviders(w http.ResponseWriter, r *http.Request) {
 	providers := providers.GetAllProviders()
 
+	// Format response with health status and additional info
+	providerList := make([]map[string]interface{}, 0, len(providers))
+	healthyCount := 0
+	unhealthyCount := 0
+
+	for providerName, config := range providers {
+		providerInfo := map[string]interface{}{
+			"name":           providerName,
+			"base_url":       config.BaseURL,
+			"model_names":     config.ModelNames,
+			"is_healthy":      config.IsHealthy,
+			"last_checked":    config.LastChecked.Format(time.RFC3339),
+			"weight":          config.Weight,
+			"max_concurrency": config.MaxConcurrency,
+			"uses_grpc":       config.UseGRPC,
+			"failover_status": "available", // Default status
+		}
+
+		// Add gRPC address if using gRPC
+		if config.UseGRPC {
+			providerInfo["grpc_address"] = config.GRPCAddress
+		}
+
+		// Update failover status based on health
+		if !config.IsHealthy {
+			providerInfo["failover_status"] = "unavailable"
+			unhealthyCount++
+		} else {
+			healthyCount++
+		}
+
+		// Add circuit breaker status if available
+		cbStatus := resilience.GetCircuitBreakerStatus(providerName)
+		if cbStatus != nil {
+			providerInfo["circuit_breaker"] = map[string]interface{}{
+				"state":      cbStatus.State.String(),
+				"requests":   cbStatus.Requests,
+				"failures":   cbStatus.Failures,
+				"last_error":  cbStatus.LastError,
+				"last_trip":   cbStatus.LastTrip.Format(time.RFC3339),
+			}
+
+			// Update failover status based on circuit breaker
+			if cbStatus.State == resilience.StateOpen {
+				providerInfo["failover_status"] = "failed_over"
+			} else if cbStatus.State == resilience.StateHalfOpen {
+				providerInfo["failover_status"] = "recovering"
+			}
+		}
+
+		providerList = append(providerList, providerInfo)
+	}
+
+	response := map[string]interface{}{
+		"providers": providerList,
+		"total":     len(providerList),
+		"healthy":   healthyCount,
+		"unhealthy": unhealthyCount,
+		"failover":  len(providerList) - healthyCount, // Providers that are either unhealthy or in failover state
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(providers)
+	json.NewEncoder(w).Encode(response)
 }
 
 func AddProvider(w http.ResponseWriter, r *http.Request) {
@@ -337,16 +398,66 @@ func AddProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Set default values if not provided
+	if config.Weight == 0 {
+		config.Weight = 1 // Default weight
+	}
+	if config.MaxConcurrency == 0 {
+		config.MaxConcurrency = 10 // Default max concurrency
+	}
+
+	// Validate required fields
+	if config.BaseURL == "" || len(config.ModelNames) == 0 {
+		http.Error(w, `{"error":"base_url and model_names are required"}`, 400)
+		return
+	}
+
+	// Set health check defaults
+	if config.HealthCheckURL == "" {
+		// Set default health check URL based on provider
+		switch {
+		case strings.Contains(config.BaseURL, "openai"):
+			config.HealthCheckURL = config.BaseURL + "/v1/models"
+		case strings.Contains(config.BaseURL, "anthropic"):
+			config.HealthCheckURL = config.BaseURL + "/health"
+		case strings.Contains(config.BaseURL, "google"):
+			config.HealthCheckURL = config.BaseURL + "/v1/health"
+		case strings.Contains(config.BaseURL, "meta"):
+			config.HealthCheckURL = config.BaseURL + "/status"
+		default:
+			config.HealthCheckURL = config.BaseURL + "/ping"
+		}
+	}
+
 	providers.AddProvider(config.BaseURL, config)
 	w.WriteHeader(http.StatusCreated)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "provider added", "provider": config.BaseURL})
 }
 
 func RemoveProvider(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	provider := vars["provider"]
 
+	// Check if provider exists before removing
+	allProviders := providers.GetAllProviders()
+	found := false
+	for name := range allProviders {
+		if strings.EqualFold(name, provider) {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		http.Error(w, `{"error":"provider not found"}`, 404)
+		return
+	}
+
 	providers.RemoveProvider(provider)
 	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "provider removed", "provider": provider})
 }
 
 func ListCircuitBreakers(w http.ResponseWriter, r *http.Request) {
