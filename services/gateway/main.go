@@ -217,5 +217,22 @@ func getSecretFromService(secretName string) string {
 	return resp.Value
 }
 
+// getUserSecretFromService retrieves a user-specific secret from the secrets-service
+func getUserSecretFromService(userId, secretName string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := secretClient.GetUserSecret(ctx, &pb.GetUserSecretRequest{
+		UserId:     userId,
+		SecretName: secretName,
+	})
+	if err != nil {
+		logger.Error().Err(err).Str("user_id", userId).Str("secret_name", secretName).Msg("Failed to get user secret from secrets-service")
+		return ""
+	}
+
+	return resp.Value
+}
+
 
 

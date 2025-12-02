@@ -223,6 +223,9 @@ func proxyHTTPRequest(providerConfig ProviderConfig, method, path string, body i
 
 	// Set headers
 	req.Header.Set("Content-Type", "application/json")
+
+	// Use the API key from provider config
+	// Note: This will be overridden by user-specific key in the handler if available
 	req.Header.Set("Authorization", "Bearer "+providerConfig.APIKey)
 
 	// Execute request

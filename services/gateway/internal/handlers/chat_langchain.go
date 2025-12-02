@@ -136,8 +136,18 @@ func LangChainCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Execute with circuit breaker and retry logic
+	// Check for user-specific API key
 	providerName := getProviderName(providerConfig.BaseURL)
+	userApiKey := getUserSecretFromService(userID, fmt.Sprintf("llm/%s/api_key", providerName))
+	if userApiKey != "" {
+		logger.Info().Str("user_id", userID).Str("provider", providerName).Msg("Using user-specific API key")
+		// Override the provider's API key with user-specific key
+		providerConfig.APIKey = userApiKey
+	} else {
+		logger.Info().Str("user_id", userID).Str("provider", providerName).Msg("Using shared API key")
+	}
+
+	// Execute with circuit breaker and retry logic
 	result, err := resilience.ExecuteWithCircuitBreaker(providerName, func() (interface{}, error) {
 		return executeWithRetry(providerConfig, req, 3, 1*time.Second)
 	})

@@ -150,6 +150,104 @@ func (s *server) GetSecret(ctx context.Context, req *pb.GetSecretRequest) (*pb.G
 	return &pb.GetSecretResponse{Value: value}, nil
 }
 
+func (s *server) GetUserSecret(ctx context.Context, req *pb.GetUserSecretRequest) (*pb.GetUserSecretResponse, error) {
+	logger.Info().
+		Str("method", "GetUserSecret").
+		Str("user_id", req.UserId).
+		Str("secret_name", req.SecretName).
+		Msg("Received GetUserSecret request")
+
+	// Validate input
+	if req.UserId == "" || req.SecretName == "" {
+		err := newSecretError(codes.InvalidArgument, InvalidInputError, "user_id and secret_name are required")
+		secretCounter.WithLabelValues("get_user_secret", "error").Inc()
+		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+	}
+
+	// Get user-specific secret from Vault
+	secretPath := fmt.Sprintf("user-secrets/data/%s/%s", req.UserId, req.SecretName)
+	secret, err := vaultClient.Logical().Read(secretPath)
+	if err != nil {
+		logger.Error().
+			Err(err).
+			Str("method", "GetUserSecret").
+			Str("user_id", req.UserId).
+			Str("secret_name", req.SecretName).
+			Msg("Vault read error")
+		secretCounter.WithLabelValues("get_user_secret", "error").Inc()
+		return nil, status.Errorf(codes.Internal, "%s: %s", VaultConnectionError, err.Error())
+	}
+
+	if secret == nil {
+		err := newSecretError(codes.NotFound, SecretNotFoundError, fmt.Sprintf("user secret %s/%s not found", req.UserId, req.SecretName))
+		secretCounter.WithLabelValues("get_user_secret", "not_found").Inc()
+		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+	}
+
+	data, ok := secret.Data["data"].(map[string]interface{})
+	if !ok {
+		err := newSecretError(codes.Internal, InternalServerError, "invalid data format in vault response")
+		secretCounter.WithLabelValues("get_user_secret", "error").Inc()
+		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+	}
+
+	value, ok := data["value"].(string)
+	if !ok {
+		err := newSecretError(codes.Internal, InternalServerError, "invalid value format in vault response")
+		secretCounter.WithLabelValues("get_user_secret", "error").Inc()
+		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+	}
+
+	logger.Info().
+		Str("method", "GetUserSecret").
+		Str("user_id", req.UserId).
+		Str("secret_name", req.SecretName).
+		Msg("User secret retrieved successfully")
+
+	secretCounter.WithLabelValues("get_user_secret", "success").Inc()
+	return &pb.GetUserSecretResponse{Value: value}, nil
+}
+
+func (s *server) SetUserSecret(ctx context.Context, req *pb.SetUserSecretRequest) (*pb.SetUserSecretResponse, error) {
+	logger.Info().
+		Str("method", "SetUserSecret").
+		Str("user_id", req.UserId).
+		Str("secret_name", req.SecretName).
+		Msg("Received SetUserSecret request")
+
+	// Validate input
+	if req.UserId == "" || req.SecretName == "" || req.SecretValue == "" {
+		err := newSecretError(codes.InvalidArgument, InvalidInputError, "user_id, secret_name, and secret_value are required")
+		secretCounter.WithLabelValues("set_user_secret", "error").Inc()
+		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+	}
+
+	// Store user-specific secret in Vault
+	secretPath := fmt.Sprintf("user-secrets/data/%s/%s", req.UserId, req.SecretName)
+	_, err := vaultClient.Logical().Write(secretPath, map[string]interface{}{
+		"data": map[string]interface{}{"value": req.SecretValue},
+	})
+	if err != nil {
+		logger.Error().
+			Err(err).
+			Str("method", "SetUserSecret").
+			Str("user_id", req.UserId).
+			Str("secret_name", req.SecretName).
+			Msg("Vault write error")
+		secretCounter.WithLabelValues("set_user_secret", "error").Inc()
+		return nil, status.Errorf(codes.Internal, "%s: %s", VaultConnectionError, err.Error())
+	}
+
+	logger.Info().
+		Str("method", "SetUserSecret").
+		Str("user_id", req.UserId).
+		Str("secret_name", req.SecretName).
+		Msg("User secret saved successfully")
+
+	secretCounter.WithLabelValues("set_user_secret", "success").Inc()
+	return &pb.SetUserSecretResponse{Status: "saved"}, nil
+}
+
 // ===================== HTTP Admin API =====================
 func adminHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()

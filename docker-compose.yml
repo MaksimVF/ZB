@@ -48,6 +48,14 @@ services:
     depends_on:
       - secret-service
 
+  user-dashboard:
+    build: ./ui/user-dashboard
+    ports: ["3001:5174"]
+    networks:
+      - client_network
+    depends_on:
+      - secret-service
+
   rate-limiter:
     build:
       context: .
