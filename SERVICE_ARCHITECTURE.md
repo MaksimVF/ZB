@@ -98,3 +98,29 @@ To avoid confusion:
 - **Gateway Service**: Always referred to as "gateway" or "agent gateway"
 - **Tail Service**: Always referred to as "tail" or "main service"
 - **Configuration**: Use service names consistently in all config files
+
+## Security Architecture
+
+### 1. Authentication & Authorization
+
+- **mTLS**: All services use mutual TLS for secure communication
+- **API Keys**: Clients authenticate with API keys
+- **JWT Tokens**: Used for user sessions and authorization
+
+### 2. Data Protection
+
+- **Encryption**: All data in transit is encrypted
+- **Secrets Management**: API keys and sensitive data stored securely
+- **Access Controls**: Role-based access to sensitive operations
+
+### 3. Content Security
+
+- **Content Filtering**: Filters malicious content, SQL injection, XSS attempts
+- **Audit Logging**: Logs sensitive operations to file and Redis
+- **Data Isolation**: Ensures client data separation and access controls
+
+### 4. User-Configurable Security
+
+- **Security Configuration API**: Users can enable/disable security features
+- **Per-Client Settings**: Each client can configure their own security policies
+- **Compliance Support**: Features to support SOC2/ISO27001 compliance
