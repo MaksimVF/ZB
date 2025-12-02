@@ -16,7 +16,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"llm-gateway-pro/services/gateway/internal/handlers"
+	"llm-gateway-pro/services/agentic-gateway/internal/handlers"
 )
 
 func TestMain(m *testing.M) {

@@ -15,7 +15,7 @@ import (
 "github.com/google/uuid"
 "google.golang.org/grpc"
 "google.golang.org/grpc/credentials/insecure"
-"llm-gateway-pro/services/gateway/internal/secrets"
+"llm-gateway-pro/services/agentic-gateway/internal/secrets"
 model "llm-gateway-pro/services/head-go/gen_model" // Import the model proto package
 )
 

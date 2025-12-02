@@ -253,7 +253,7 @@
           docker_image:
             name: gateway
             build:
-              path: "{{ project_root }}/services/gateway"
+              path: "{{ project_root }}/services/agentic-gateway"
               pull: yes
             source: build
             force_source: yes

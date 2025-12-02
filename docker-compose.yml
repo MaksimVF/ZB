@@ -68,7 +68,7 @@ services:
       - ./certs:/certs:ro
 
   gateway:
-    build: ./services/gateway
+    build: ./services/agentic-gateway
     ports:
       - "8080:8080"
     networks:

@@ -7,7 +7,7 @@ import (
 "io"
 "log"
 "net/http"
-"llm-gateway-pro/services/gateway/internal/secrets" // ← наш общий helper
+"llm-gateway-pro/services/agentic-gateway/internal/secrets" // ← наш общий helper
 )
 
 type OpenAIRequest struct {

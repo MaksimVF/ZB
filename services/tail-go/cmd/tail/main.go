@@ -19,7 +19,7 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	pb "llm-gateway-pro/services/secret-service/pb" // <-- твой proto
-	"llm-gateway-pro/services/gateway/handlers"
+	"llm-gateway-pro/services/agentic-gateway/internal/handlers"
 		"llm-gateway-pro/services/tail-go/cmd/tail/middleware"
 )
 

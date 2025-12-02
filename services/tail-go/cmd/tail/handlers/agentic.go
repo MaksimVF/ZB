@@ -15,7 +15,7 @@ import (
 "time"
 
 "github.com/go-redis/redis/v8"
-"llm-gateway-pro/services/gateway/internal/secrets"
+"llm-gateway-pro/services/agentic-gateway/internal/secrets"
 )
 
 var rdbAgentic = redis.NewClient(&redis.Options{Addr: "redis:6379"})

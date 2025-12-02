@@ -17,10 +17,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	pb "llm-gateway-pro/services/secret-service/pb"
-	"llm-gateway-pro/services/gateway/internal/handlers"
-	"llm-gateway-pro/services/gateway/internal/billing"
-	"llm-gateway-pro/services/gateway/internal/providers"
-	"llm-gateway-pro/services/gateway/internal/resilience"
+	"llm-gateway-pro/services/agentic-gateway/internal/handlers"
+	"llm-gateway-pro/services/agentic-gateway/internal/billing"
+	"llm-gateway-pro/services/agentic-gateway/internal/providers"
+	"llm-gateway-pro/services/agentic-gateway/internal/resilience"
 )
 
 var (
