@@ -12,8 +12,9 @@ import (
 )
 
 var (
-	secretsCache = make(map[string]string)
-	cacheMutex   = &sync.RWMutex{}
+	secretsCache     = make(map[string]string)
+	userSecretsCache = make(map[string]map[string]string)
+	cacheMutex       = &sync.RWMutex{}
 )
 
 func init() {
@@ -63,6 +64,49 @@ func Delete(key string) {
 	cacheMutex.Lock()
 	delete(secretsCache, key)
 	cacheMutex.Unlock()
+}
+
+func GetUserSecret(userID, key string) (string, error) {
+	cacheMutex.RLock()
+	defer cacheMutex.RUnlock()
+
+	// Check if user has their own secrets
+	if userCache, ok := userSecretsCache[userID]; ok {
+		if value, ok := userCache[key]; ok {
+			return value, nil
+		}
+	}
+
+	// Fall back to shared secrets
+	value, ok := secretsCache[key]
+	if !ok {
+		return "", errors.New("secret not found")
+	}
+
+	return value, nil
+}
+
+func SetUserSecret(userID, key, value string) {
+	cacheMutex.Lock()
+	defer cacheMutex.Unlock()
+
+	if _, ok := userSecretsCache[userID]; !ok {
+		userSecretsCache[userID] = make(map[string]string)
+	}
+
+	userSecretsCache[userID][key] = value
+}
+
+func DeleteUserSecret(userID, key string) {
+	cacheMutex.Lock()
+	defer cacheMutex.Unlock()
+
+	if userCache, ok := userSecretsCache[userID]; ok {
+		delete(userCache, key)
+		if len(userCache) == 0 {
+			delete(userSecretsCache, userID)
+		}
+	}
 }
 
 

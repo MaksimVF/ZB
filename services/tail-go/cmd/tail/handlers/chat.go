@@ -34,12 +34,34 @@ if !ok {
 provider = "openai" // дефолт
 }
 
-// Получаем API-ключ из Vault через secret-service
-apiKey, err := secrets.Get(fmt.Sprintf("llm/%s/api_key", provider))
+// Get user ID from request (assuming it's in the header)
+userID := r.Header.Get("X-User-ID")
+
+// Try to get user-specific API key
+var apiKey string
+if userID != "" {
+apiKey, err = secrets.GetUserSecret(userID, fmt.Sprintf("llm/%s/api_key", provider))
 if err != nil {
-log.Printf("Ошибка получения секрета %s: %v", provider, err)
-http.Error(w, `{"error":"internal configuration error"}`, http.StatusInternalServerError)
-return
+	// Fall back to shared API key
+	apiKey, err = secrets.Get(fmt.Sprintf("llm/%s/api_key", provider))
+	if err != nil {
+		log.Printf("Ошибка получения секрета %s: %v", provider, err)
+		http.Error(w, `{"error":"internal configuration error"}`, http.StatusInternalServerError)
+		return
+	}
+	log.Printf("Using shared API key for user %s, provider %s", userID, provider)
+} else {
+	log.Printf("Using user-specific API key for user %s, provider %s", userID, provider)
+}
+} else {
+	// Use shared API key
+	apiKey, err = secrets.Get(fmt.Sprintf("llm/%s/api_key", provider))
+	if err != nil {
+		log.Printf("Ошибка получения секрета %s: %v", provider, err)
+		http.Error(w, `{"error":"internal configuration error"}`, http.StatusInternalServerError)
+		return
+	}
+	log.Printf("Using shared API key for provider %s", provider)
 }
 
 // Формируем запрос к провайдеру
