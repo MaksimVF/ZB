@@ -72,13 +72,13 @@
 ## Service Relationships
 
 ```
-[External Clients] → [Gateway Service] → [Tail Service] → [Model Proxy] → [LLM Providers]
+[External Clients] → [Gateway Service] → [Head Service] → [Model Proxy] → [LLM Providers]
                     ↓       ↑
               [Auth Service] ←→ [Secrets Service]
                     ↓       ↑
                 [Billing Service]
 
-[Gateway Service] → [Agentic Service] → [LLM Providers]
+[External Clients] → [Agentic Service] → [Head Service] → [Model Proxy] → [LLM Providers]
                     ↓       ↑
                 [Billing Service]
 ```

@@ -104,6 +104,7 @@ services:
       - ./certs:/certs:ro
     depends_on:
       - secret-service
+      - head
 
   secret-service:
     build: ./services/secrets-service

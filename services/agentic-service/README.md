@@ -24,10 +24,10 @@
 
 ## Architecture
 
-The Agentic Service provides specialized agentic capabilities:
+The Agentic Service provides specialized agentic capabilities and routes through the Head Service:
 
 ```
-[Gateway Service] → [Agentic Service] → [LLM Providers]
+[Gateway Service] → [Agentic Service] → [Head Service] → [Model Proxy] → [LLM Providers]
        ↑
 [Billing Service] ←→ [Monitoring]
 ```

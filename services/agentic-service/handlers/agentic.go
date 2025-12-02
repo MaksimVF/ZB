@@ -5,22 +5,75 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-redis/redis/v8"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 	"llm-gateway-pro/services/agentic-service/internal/secrets"
+	"llm-gateway-pro/services/head-go/gen"
 )
 
-var rdbAgentic = redis.NewClient(&redis.Options{Addr: "redis:6379"})
+var (
+	rdbAgentic = redis.NewClient(&redis.Options{Addr: "redis:6379"})
+	headClient  gen.ChatServiceClient
+)
+
+func init() {
+	// Initialize gRPC client to head service
+	conn, err := grpc.Dial(
+		"head-service:50051",
+		grpc.WithTransportCredentials(loadHeadTLSCredentials()),
+		grpc.WithBlock(),
+		grpc.WithTimeout(10*time.Second),
+	)
+	if err != nil {
+		log.Fatalf("Failed to connect to head service: %v", err)
+	}
+
+	headClient = gen.NewChatServiceClient(conn)
+}
+
+func loadHeadTLSCredentials() grpc.TransportCredentials {
+	// Load client certificate and key
+	cert, err := tls.LoadX509KeyPair("/certs/agentic-service.pem", "/certs/agentic-service-key.pem")
+	if err != nil {
+		log.Fatalf("Failed to load client certificate: %v", err)
+	}
+
+	// Load CA certificate
+	caCert, err := os.ReadFile("/certs/ca.pem")
+	if err != nil {
+		log.Fatalf("Failed to load CA certificate: %v", err)
+	}
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCert) {
+		log.Fatalf("Failed to add CA certificate to pool")
+	}
+
+	// Create TLS config
+	config := &tls.Config{
+		ServerName:   "head-service",
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      caCertPool,
+	}
+
+	return credentials.NewTLS(config)
+}
 
 type AgenticRequest struct {
 	Model    string                   `json:"model"`
@@ -89,42 +142,39 @@ func AgenticHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apiKey, _ := secrets.Get(fmt.Sprintf("llm/%s/api_key_premium", provider)) // premium keys!
-	url := "https://api.openai.com/v1/chat/completions"
-	if provider == "anthropic" {
-		url = "https://api.anthropic.com/v1/messages"
+	// Convert messages to the format expected by head service
+	var messages []string
+	for _, msg := range req.Messages {
+		if content, ok := msg["content"].(string); ok {
+			messages = append(messages, content)
+		}
 	}
 
-	// Prepare request body
-	body := map[string]interface{}{
-		"model":              req.Model,
-		"messages":           req.Messages,
-		"tools":              req.Tools,
-		"tool_choice":        req.ToolChoice,
-		"parallel_tool_calls": true,
-		"response_format":    req.ResponseFormat,
-		"max_tokens":         8192,
-	}
-	jsonBody, _ := json.Marshal(body)
+	// Call head service via gRPC
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
 
-	httpReq, _ := http.NewRequest("POST", url, bytes.NewReader(jsonBody))
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	if provider == "anthropic" {
-		httpReq.Header.Set("x-api-key", apiKey)
-		httpReq.Header.Set("anthropic-version", "2023-06-01")
+	chatReq := &gen.ChatRequest{
+		RequestId:   fmt.Sprintf("agentic-%d", time.Now().UnixNano()),
+		Model:       req.Model,
+		Messages:    messages,
+		Temperature:  0.7, // Default temperature for agentic
+		MaxTokens:   8192,
+		Stream:      false,
 	}
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	chatResp, err := headClient.ChatCompletion(ctx, chatReq)
 	if err != nil {
-		http.Error(w, `{"error":"provider error"}`, 502)
+		http.Error(w, `{"error":"head service error"}`, 502)
 		return
 	}
-	defer resp.Body.Close()
 
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	// Parse the response from head service
 	var providerResp map[string]interface{}
-	json.Unmarshal(bodyBytes, &providerResp)
+	if err := json.Unmarshal([]byte(chatResp.FullText), &providerResp); err != nil {
+		http.Error(w, `{"error":"invalid response format"}`, 500)
+		return
+	}
 
 	// Parallel tool_calls + caching
 	toolCalls := extractToolCalls(providerResp)

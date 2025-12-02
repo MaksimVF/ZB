@@ -13,4 +13,5 @@ require (
 )
 
 replace llm-gateway-pro/services/secret-service/pb => ../secret-service/pb
+replace llm-gateway-pro/services/head-go/gen => ../head-go/gen
 
