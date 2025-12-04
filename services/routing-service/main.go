@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -23,6 +24,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/nats-io/nats.go"
+	"github.com/graph-gophers/graphql-go"
+	"github.com/graph-gophers/graphql-go/relay"
+	"github.com/sonh/phony"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -376,9 +380,9 @@ func startHTTPServer() {
 	router.HandleFunc("/api/routing/heads", getAllHeads).Methods("GET")
 	router.HandleFunc("/health", healthCheck).Methods("GET")
 
-	// Webhook endpoints
-	router.HandleFunc("/webhook/head-status", handleHeadStatusWebhook).Methods("POST")
-	router.HandleFunc("/webhook/routing-decision", handleRoutingDecisionWebhook).Methods("POST")
+	// Webhook endpoints with rate limiting
+	router.HandleFunc("/webhook/head-status", rateLimitMiddleware(handleHeadStatusWebhook)).Methods("POST")
+	router.HandleFunc("/webhook/routing-decision", rateLimitMiddleware(handleRoutingDecisionWebhook)).Methods("POST")
 
 	// Server-Sent Events (SSE) endpoints
 	router.HandleFunc("/events/head-status", handleHeadStatusEvents).Methods("GET")
@@ -387,6 +391,10 @@ func startHTTPServer() {
 	// WebSocket endpoints
 	router.HandleFunc("/ws/head-management", handleHeadManagementWebSocket)
 	router.HandleFunc("/ws/routing-decisions", handleRoutingDecisionsWebSocket)
+
+	// GraphQL endpoint
+	router.Handle("/graphql", graphqlHandler()).Methods("POST")
+	router.Handle("/graphiql", graphiqlHandler()).Methods("GET")
 
 	// Serve admin interface
 	router.PathPrefix("/admin/").Handler(http.StripPrefix("/admin/", http.FileServer(http.Dir("./"))))
@@ -400,10 +408,304 @@ func startHTTPServer() {
 		Handler: jwtMiddleware(router),
 	}
 
-	logger.Info("Starting HTTP server with JWT authentication, RBAC, Prometheus metrics, webhook support, SSE, and WebSocket on :8080")
+	logger.Info("Starting HTTP server with JWT authentication, RBAC, Prometheus metrics, webhook support, SSE, WebSocket, and GraphQL on :8080")
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ServerClosed {
 		logger.Fatal("HTTP server failed", zap.Error(err))
 	}
+}
+
+func rateLimitMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Get client IP
+		ip := getClientIP(r)
+
+		// Check rate limit
+		if !rateLimiter.Allow(ip) {
+			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+			return
+		}
+
+		// Call the next handler
+		next.ServeHTTP(w, r)
+	}
+}
+
+func getClientIP(r *http.Request) string {
+	// Try to get IP from X-Forwarded-For header
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff != "" {
+		// Return the first IP in the list
+		ips := strings.Split(xff, ",")
+		if len(ips) > 0 {
+			return strings.TrimSpace(ips[0])
+		}
+	}
+
+	// Fallback to RemoteAddr
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return ip
+}
+
+// Rate limiter implementation
+type RateLimiter struct {
+	mu            sync.Mutex
+	requests      map[string]int
+	lastRequest   map[string]time.Time
+	threshold     int
+	resetTimeout  time.Duration
+}
+
+var rateLimiter = &RateLimiter{
+	requests:     make(map[string]int),
+	lastRequest:  make(map[string]time.Time),
+	threshold:    10,
+	resetTimeout: 1 * time.Minute,
+}
+
+func (rl *RateLimiter) Allow(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	// Check if rate limit is exceeded
+	if requests, exists := rl.requests[ip]; exists && requests >= rl.threshold {
+		// Check if reset timeout has passed
+		if lastRequest, exists := rl.lastRequest[ip]; exists {
+			if time.Since(lastRequest) < rl.resetTimeout {
+				return false
+			}
+			// Reset rate limit
+			delete(rl.requests, ip)
+			delete(rl.lastRequest, ip)
+		}
+	}
+
+	// Increment request count
+	rl.requests[ip]++
+	rl.lastRequest[ip] = time.Now()
+	return true
+}
+
+func graphqlHandler() http.Handler {
+	// Define GraphQL schema
+	schema := `
+	type Head {
+		id: ID!
+		endpoint: String!
+		modelType: String!
+		region: String!
+		status: String!
+		currentLoad: Int!
+		lastHeartbeat: String!
+		metadata: JSON
+	}
+
+	type RoutingDecision {
+		headId: String!
+		endpoint: String!
+		strategyUsed: String!
+		reason: String!
+		metadata: JSON
+	}
+
+	type Query {
+		heads: [Head!]!
+		head(id: ID!): Head
+		routingDecision(modelType: String!, regionPreference: String, strategy: String): RoutingDecision!
+		routingPolicy: RoutingPolicy!
+	}
+
+	type Mutation {
+		registerHead(input: RegisterHeadInput!): Head!
+		updateHeadStatus(id: ID!, status: String!, currentLoad: Int!): Head!
+	}
+
+	input RegisterHeadInput {
+		endpoint: String!
+		modelType: String!
+		region: String!
+		status: String!
+		metadata: JSON
+	}
+
+	type RoutingPolicy {
+		defaultStrategy: String!
+		enableGeoRouting: Boolean!
+		enableLoadBalancing: Boolean!
+		enableModelSpecific: Boolean!
+		strategyConfig: JSON
+	}
+
+	scalar JSON
+	`
+
+	// Create GraphQL resolver
+	resolver := &graphql.Resolver{
+		Schema: graphql.MustParseSchema(schema, &graphql.ResolverConfig{
+			Query: &QueryResolver{},
+			Mutation: &MutationResolver{},
+		}),
+	}
+
+	return &relay.Handler{Resolver: resolver}
+}
+
+type QueryResolver struct{}
+
+func (r *QueryResolver) Heads(ctx context.Context) ([]*HeadService, error) {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+
+	heads := make([]*HeadService, 0, len(headServices))
+	for _, head := range headServices {
+		heads = append(heads, &head)
+	}
+	return heads, nil
+}
+
+func (r *QueryResolver) Head(ctx context.Context, args struct{ ID string }) (*HeadService, error) {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+
+	head, exists := headServices[args.ID]
+	if !exists {
+		return nil, fmt.Errorf("head not found")
+	}
+	return &head, nil
+}
+
+func (r *QueryResolver) RoutingDecision(ctx context.Context, args struct {
+	ModelType       string
+	RegionPreference string
+	Strategy        string
+}) (*pb.GetRoutingDecisionResponse, error) {
+	req := &pb.GetRoutingDecisionRequest{
+		ModelType:       args.ModelType,
+		RegionPreference: args.RegionPreference,
+		RoutingStrategy: args.Strategy,
+	}
+
+	return (&RoutingServer{}).GetRoutingDecision(ctx, req)
+}
+
+func (r *QueryResolver) RoutingPolicy(ctx context.Context) (*RoutingPolicy, error) {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+
+	return &routingPolicy, nil
+}
+
+type MutationResolver struct{}
+
+func (r *MutationResolver) RegisterHead(ctx context.Context, args struct {
+	Input RegisterHeadInput
+}) (*HeadService, error) {
+	req := &pb.RegisterHeadRequest{
+		HeadId:    args.Input.HeadID,
+		Endpoint:  args.Input.Endpoint,
+		ModelType: args.Input.ModelType,
+		Region:    args.Input.Region,
+		Status:    args.Input.Status,
+		Metadata:  args.Input.Metadata,
+	}
+
+	resp, err := (&RoutingServer{}).RegisterHead(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get the registered head
+	head, exists := headServices[args.Input.HeadID]
+	if !exists {
+		return nil, fmt.Errorf("failed to register head")
+	}
+	return &head, nil
+}
+
+func (r *MutationResolver) UpdateHeadStatus(ctx context.Context, args struct {
+	ID          string
+	Status      string
+	CurrentLoad int
+}) (*HeadService, error) {
+	req := &pb.UpdateHeadStatusRequest{
+		HeadId:      args.ID,
+		Status:      args.Status,
+		CurrentLoad: int32(args.CurrentLoad),
+		Timestamp:   time.Now().Unix(),
+	}
+
+	resp, err := (&RoutingServer{}).UpdateHeadStatus(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get the updated head
+	head, exists := headServices[args.ID]
+	if !exists {
+		return nil, fmt.Errorf("failed to update head")
+	}
+	return &head, nil
+}
+
+type RegisterHeadInput struct {
+	HeadID    string            `json:"head_id"`
+	Endpoint  string            `json:"endpoint"`
+	ModelType string            `json:"model_type"`
+	Region    string            `json:"region"`
+	Status    string            `json:"status"`
+	Metadata map[string]string `json:"metadata"`
+}
+
+func graphiqlHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Serve GraphiQL interface
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte(`
+		<!DOCTYPE html>
+		<html>
+		<head>
+			<title>GraphiQL</title>
+			<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/graphiql/0.11.11/graphiql.min.css" />
+		</head>
+		<body style="margin: 0;">
+			<div id="graphiql" style="height: 100vh;"></div>
+			<script src="https://cdnjs.cloudflare.com/ajax/libs/fetch/2.0.3/fetch.min.js"></script>
+			<script src="https://cdnjs.cloudflare.com/ajax/libs/react/16.2.0/umd/react.production.min.js"></script>
+			<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/16.2.0/umd/react-dom.production.min.js"></script>
+			<script src="https://cdnjs.cloudflare.com/ajax/libs/graphiql/0.11.11/graphiql.min.js"></script>
+			<script>
+				function graphQLFetcher(graphQLParams) {
+					return fetch('/graphql', {
+						method: 'post',
+						headers: {
+							'Content-Type': 'application/json',
+						},
+						body: JSON.stringify(graphQLParams),
+					}).then(function (response) {
+						return response.text();
+					}).then(function (responseBody) {
+						try {
+							return JSON.parse(responseBody);
+						} catch (error) {
+							return responseBody;
+						}
+					});
+				}
+
+				ReactDOM.render(
+					React.createElement(GraphiQL, {
+						fetcher: graphQLFetcher,
+						query: '# Welcome to GraphiQL\n# \n# Type queries into this side of the screen, and you will see intelligent\n# typeaheads aware of the current GraphQL type schema and live syntax\n# and validation errors highlighted within the text.\n# \n# Keyboard shortcuts:\n# \n#  Prettify Query:  Shift-Ctrl-P (or press the prettify button above)\n# \n#     Run Query:  Ctrl-Enter (or press the play button above)\n# \n#   Auto Complete:  Ctrl-Space (or just start typing)\n# \nquery MyQuery {\n  heads {\n    id\n    endpoint\n    modelType\n    region\n    status\n    currentLoad\n  }\n}\n',
+					}),
+					document.getElementById('graphiql')
+				);
+			</script>
+		</body>
+		</html>
+		`))
+	})
 }
 
 func waitForShutdown() {
@@ -1404,6 +1706,12 @@ func applyHybridStrategy(heads []HeadService, req *pb.GetRoutingDecisionRequest)
 func callExternalService(serviceName, endpoint string, payload interface{}) ([]byte, error) {
 	startTime := time.Now()
 
+	// Check circuit breaker
+	if !circuitBreaker.Allow(serviceName) {
+		externalServiceCalls.WithLabelValues(serviceName, "circuit_breaker").Inc()
+		return nil, fmt.Errorf("circuit breaker open for service %s", serviceName)
+	}
+
 	// Convert payload to JSON
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -1422,6 +1730,7 @@ func callExternalService(serviceName, endpoint string, payload interface{}) ([]b
 	resp, err := externalServiceClient.Do(req)
 	if err != nil {
 		externalServiceCalls.WithLabelValues(serviceName, "error").Inc()
+		circuitBreaker.Fail(serviceName)
 		return nil, fmt.Errorf("external service request failed: %w", err)
 	}
 	defer resp.Body.Close()
@@ -1429,6 +1738,7 @@ func callExternalService(serviceName, endpoint string, payload interface{}) ([]b
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		externalServiceCalls.WithLabelValues(serviceName, "error").Inc()
+		circuitBreaker.Fail(serviceName)
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
@@ -1436,9 +1746,65 @@ func callExternalService(serviceName, endpoint string, payload interface{}) ([]b
 	status := "success"
 	if resp.StatusCode >= 400 {
 		status = "error"
+		circuitBreaker.Fail(serviceName)
+	} else {
+		circuitBreaker.Success(serviceName)
 	}
 	externalServiceCalls.WithLabelValues(serviceName, status).Inc()
 
 	return body, nil
+}
+
+// Circuit breaker implementation
+type CircuitBreaker struct {
+	mu            sync.Mutex
+	failures      map[string]int
+	lastFailure   map[string]time.Time
+	threshold     int
+	resetTimeout  time.Duration
+}
+
+var circuitBreaker = &CircuitBreaker{
+	failures:     make(map[string]int),
+	lastFailure:  make(map[string]time.Time),
+	threshold:    3,
+	resetTimeout: 30 * time.Second,
+}
+
+func (cb *CircuitBreaker) Allow(service string) bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Check if circuit breaker is open
+	if failures, exists := cb.failures[service]; exists && failures >= cb.threshold {
+		// Check if reset timeout has passed
+		if lastFailure, exists := cb.lastFailure[service]; exists {
+			if time.Since(lastFailure) < cb.resetTimeout {
+				return false
+			}
+			// Reset circuit breaker
+			delete(cb.failures, service)
+			delete(cb.lastFailure, service)
+		}
+	}
+	return true
+}
+
+func (cb *CircuitBreaker) Fail(service string) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Increment failure count
+	cb.failures[service]++
+	cb.lastFailure[service] = time.Now()
+}
+
+func (cb *CircuitBreaker) Success(service string) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Reset failure count on success
+	delete(cb.failures, service)
+	delete(cb.lastFailure, service)
 }
 
