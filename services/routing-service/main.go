@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -23,6 +24,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/nats-io/nats.go"
+	"github.com/graph-gophers/graphql-go"
+	"github.com/graph-gophers/graphql-go/relay"
+	"github.com/sonh/phony"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -46,6 +50,18 @@ var (
 
 	// External service integration
 	externalServiceClient *http.Client
+
+	// SSE and WebSocket clients
+	headStatusClients        = make([]chan string, 0)
+	routingDecisionClients   = make([]chan string, 0)
+	clientsMutex             sync.Mutex
+
+	// WebSocket upgrader
+	upgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			return true // Allow all origins for now
+		},
+	}
 
 	// Prometheus metrics
 	routingDecisions = prometheus.NewCounterVec(
@@ -117,6 +133,21 @@ var (
 		},
 		[]string{"queue", "status"},
 	)
+
+	// SSE and WebSocket metrics
+	sseConnections = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "sse_connections",
+			Help: "Number of active SSE connections",
+		},
+	)
+
+	websocketConnections = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "websocket_connections",
+			Help: "Number of active WebSocket connections",
+		},
+	)
 )
 
 type HeadService struct {
@@ -163,6 +194,8 @@ func main() {
 		cacheMisses,
 		externalServiceCalls,
 		messageQueueMessages,
+		sseConnections,
+		websocketConnections,
 	)
 
 	// Initialize Redis client
@@ -347,9 +380,21 @@ func startHTTPServer() {
 	router.HandleFunc("/api/routing/heads", getAllHeads).Methods("GET")
 	router.HandleFunc("/health", healthCheck).Methods("GET")
 
-	// Webhook endpoints
-	router.HandleFunc("/webhook/head-status", handleHeadStatusWebhook).Methods("POST")
-	router.HandleFunc("/webhook/routing-decision", handleRoutingDecisionWebhook).Methods("POST")
+	// Webhook endpoints with rate limiting
+	router.HandleFunc("/webhook/head-status", rateLimitMiddleware(handleHeadStatusWebhook)).Methods("POST")
+	router.HandleFunc("/webhook/routing-decision", rateLimitMiddleware(handleRoutingDecisionWebhook)).Methods("POST")
+
+	// Server-Sent Events (SSE) endpoints
+	router.HandleFunc("/events/head-status", handleHeadStatusEvents).Methods("GET")
+	router.HandleFunc("/events/routing-decisions", handleRoutingDecisionEvents).Methods("GET")
+
+	// WebSocket endpoints
+	router.HandleFunc("/ws/head-management", handleHeadManagementWebSocket)
+	router.HandleFunc("/ws/routing-decisions", handleRoutingDecisionsWebSocket)
+
+	// GraphQL endpoint
+	router.Handle("/graphql", graphqlHandler()).Methods("POST")
+	router.Handle("/graphiql", graphiqlHandler()).Methods("GET")
 
 	// Serve admin interface
 	router.PathPrefix("/admin/").Handler(http.StripPrefix("/admin/", http.FileServer(http.Dir("./"))))
@@ -363,10 +408,379 @@ func startHTTPServer() {
 		Handler: jwtMiddleware(router),
 	}
 
-	logger.Info("Starting HTTP server with JWT authentication, RBAC, Prometheus metrics, and webhook support on :8080")
+	logger.Info("Starting HTTP server with JWT authentication, RBAC, Prometheus metrics, webhook support, SSE, WebSocket, and GraphQL on :8080")
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ServerClosed {
 		logger.Fatal("HTTP server failed", zap.Error(err))
 	}
+}
+
+func rateLimitMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Get client IP
+		ip := getClientIP(r)
+
+		// Check rate limit
+		if !rateLimiter.Allow(ip) {
+			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+			return
+		}
+
+		// Call the next handler
+		next.ServeHTTP(w, r)
+	}
+}
+
+func getClientIP(r *http.Request) string {
+	// Try to get IP from X-Forwarded-For header
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff != "" {
+		// Return the first IP in the list
+		ips := strings.Split(xff, ",")
+		if len(ips) > 0 {
+			return strings.TrimSpace(ips[0])
+		}
+	}
+
+	// Fallback to RemoteAddr
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return ip
+}
+
+// Rate limiter implementation
+type RateLimiter struct {
+	mu            sync.Mutex
+	requests      map[string]int
+	lastRequest   map[string]time.Time
+	threshold     int
+	resetTimeout  time.Duration
+	burstLimit    int
+	burstDuration time.Duration
+}
+
+var rateLimiter = &RateLimiter{
+	requests:     make(map[string]int),
+	lastRequest:  make(map[string]time.Time),
+	threshold:    10,
+	resetTimeout:  1 * time.Minute,
+	burstLimit:   5,
+	burstDuration: 10 * time.Second,
+}
+
+func (rl *RateLimiter) Allow(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	// Check if rate limit is exceeded
+	if requests, exists := rl.requests[ip]; exists && requests >= rl.threshold {
+		// Check if reset timeout has passed
+		if lastRequest, exists := rl.lastRequest[ip]; exists {
+			if time.Since(lastRequest) < rl.resetTimeout {
+				return false
+			}
+			// Reset rate limit
+			delete(rl.requests, ip)
+			delete(rl.lastRequest, ip)
+		}
+	}
+
+	// Check burst limit
+	if requests, exists := rl.requests[ip]; exists {
+		if requests >= rl.burstLimit {
+			// Check if burst duration has passed
+			if lastRequest, exists := rl.lastRequest[ip]; exists {
+				if time.Since(lastRequest) < rl.burstDuration {
+					return false
+				}
+			}
+		}
+	}
+
+	// Increment request count
+	rl.requests[ip]++
+	rl.lastRequest[ip] = time.Now()
+	return true
+}
+
+func (rl *RateLimiter) Metrics() map[string]interface{} {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	metrics := make(map[string]interface{})
+	for ip, requests := range rl.requests {
+		metrics[ip] = map[string]interface{}{
+			"requests":     requests,
+			"last_request": rl.lastRequest[ip],
+			"threshold":    rl.threshold,
+			"burst_limit":   rl.burstLimit,
+		}
+	}
+	return metrics
+}
+
+func (rl *RateLimiter) Reset(ip string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	delete(rl.requests, ip)
+	delete(rl.lastRequest, ip)
+}
+
+func (rl *RateLimiter) SetThreshold(ip string, threshold int) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	// Set custom threshold for specific IP
+	// Implementation would require per-IP threshold tracking
+	// For now, we'll just log the request
+	logger.Info("Setting custom rate limit threshold", zap.String("ip", ip), zap.Int("threshold", threshold))
+}
+
+func graphqlHandler() http.Handler {
+	// Define GraphQL schema
+	schema := `
+	type Head {
+		id: ID!
+		endpoint: String!
+		modelType: String!
+		region: String!
+		status: String!
+		currentLoad: Int!
+		lastHeartbeat: String!
+		metadata: JSON
+		createdAt: String!
+		updatedAt: String!
+	}
+
+	type RoutingDecision {
+		headId: String!
+		endpoint: String!
+		strategyUsed: String!
+		reason: String!
+		metadata: JSON
+		timestamp: String!
+		processingTime: Float!
+	}
+
+	type Query {
+		heads: [Head!]!
+		head(id: ID!): Head
+		routingDecision(modelType: String!, regionPreference: String, strategy: String): RoutingDecision!
+		routingPolicy: RoutingPolicy!
+		headStatusHistory(headId: ID!, limit: Int): [HeadStatus!]!
+		routingDecisionsHistory(modelType: String!, limit: Int): [RoutingDecision!]!
+	}
+
+	type Mutation {
+		registerHead(input: RegisterHeadInput!): Head!
+		updateHeadStatus(id: ID!, status: String!, currentLoad: Int!): Head!
+		deregisterHead(id: ID!): Boolean!
+		updateRoutingPolicy(input: UpdateRoutingPolicyInput!): RoutingPolicy!
+	}
+
+	input RegisterHeadInput {
+		endpoint: String!
+		modelType: String!
+		region: String!
+		status: String!
+		metadata: JSON
+	}
+
+	input UpdateRoutingPolicyInput {
+		defaultStrategy: String
+		enableGeoRouting: Boolean
+		enableLoadBalancing: Boolean
+		enableModelSpecific: Boolean
+		strategyConfig: JSON
+	}
+
+	type RoutingPolicy {
+		defaultStrategy: String!
+		enableGeoRouting: Boolean!
+		enableLoadBalancing: Boolean!
+		enableModelSpecific: Boolean!
+		strategyConfig: JSON
+		lastUpdated: String!
+	}
+
+	type HeadStatus {
+		headId: String!
+		status: String!
+		currentLoad: Int!
+		timestamp: String!
+		previousStatus: String
+	}
+
+	scalar JSON
+	`
+
+	// Create GraphQL resolver
+	resolver := &graphql.Resolver{
+		Schema: graphql.MustParseSchema(schema, &graphql.ResolverConfig{
+			Query: &QueryResolver{},
+			Mutation: &MutationResolver{},
+		}),
+	}
+
+	return &relay.Handler{Resolver: resolver}
+}
+
+type QueryResolver struct{}
+
+func (r *QueryResolver) Heads(ctx context.Context) ([]*HeadService, error) {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+
+	heads := make([]*HeadService, 0, len(headServices))
+	for _, head := range headServices {
+		heads = append(heads, &head)
+	}
+	return heads, nil
+}
+
+func (r *QueryResolver) Head(ctx context.Context, args struct{ ID string }) (*HeadService, error) {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+
+	head, exists := headServices[args.ID]
+	if !exists {
+		return nil, fmt.Errorf("head not found")
+	}
+	return &head, nil
+}
+
+func (r *QueryResolver) RoutingDecision(ctx context.Context, args struct {
+	ModelType       string
+	RegionPreference string
+	Strategy        string
+}) (*pb.GetRoutingDecisionResponse, error) {
+	req := &pb.GetRoutingDecisionRequest{
+		ModelType:       args.ModelType,
+		RegionPreference: args.RegionPreference,
+		RoutingStrategy: args.Strategy,
+	}
+
+	return (&RoutingServer{}).GetRoutingDecision(ctx, req)
+}
+
+func (r *QueryResolver) RoutingPolicy(ctx context.Context) (*RoutingPolicy, error) {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+
+	return &routingPolicy, nil
+}
+
+type MutationResolver struct{}
+
+func (r *MutationResolver) RegisterHead(ctx context.Context, args struct {
+	Input RegisterHeadInput
+}) (*HeadService, error) {
+	req := &pb.RegisterHeadRequest{
+		HeadId:    args.Input.HeadID,
+		Endpoint:  args.Input.Endpoint,
+		ModelType: args.Input.ModelType,
+		Region:    args.Input.Region,
+		Status:    args.Input.Status,
+		Metadata:  args.Input.Metadata,
+	}
+
+	resp, err := (&RoutingServer{}).RegisterHead(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get the registered head
+	head, exists := headServices[args.Input.HeadID]
+	if !exists {
+		return nil, fmt.Errorf("failed to register head")
+	}
+	return &head, nil
+}
+
+func (r *MutationResolver) UpdateHeadStatus(ctx context.Context, args struct {
+	ID          string
+	Status      string
+	CurrentLoad int
+}) (*HeadService, error) {
+	req := &pb.UpdateHeadStatusRequest{
+		HeadId:      args.ID,
+		Status:      args.Status,
+		CurrentLoad: int32(args.CurrentLoad),
+		Timestamp:   time.Now().Unix(),
+	}
+
+	resp, err := (&RoutingServer{}).UpdateHeadStatus(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get the updated head
+	head, exists := headServices[args.ID]
+	if !exists {
+		return nil, fmt.Errorf("failed to update head")
+	}
+	return &head, nil
+}
+
+type RegisterHeadInput struct {
+	HeadID    string            `json:"head_id"`
+	Endpoint  string            `json:"endpoint"`
+	ModelType string            `json:"model_type"`
+	Region    string            `json:"region"`
+	Status    string            `json:"status"`
+	Metadata map[string]string `json:"metadata"`
+}
+
+func graphiqlHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Serve GraphiQL interface
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte(`
+		<!DOCTYPE html>
+		<html>
+		<head>
+			<title>GraphiQL</title>
+			<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/graphiql/0.11.11/graphiql.min.css" />
+		</head>
+		<body style="margin: 0;">
+			<div id="graphiql" style="height: 100vh;"></div>
+			<script src="https://cdnjs.cloudflare.com/ajax/libs/fetch/2.0.3/fetch.min.js"></script>
+			<script src="https://cdnjs.cloudflare.com/ajax/libs/react/16.2.0/umd/react.production.min.js"></script>
+			<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/16.2.0/umd/react-dom.production.min.js"></script>
+			<script src="https://cdnjs.cloudflare.com/ajax/libs/graphiql/0.11.11/graphiql.min.js"></script>
+			<script>
+				function graphQLFetcher(graphQLParams) {
+					return fetch('/graphql', {
+						method: 'post',
+						headers: {
+							'Content-Type': 'application/json',
+						},
+						body: JSON.stringify(graphQLParams),
+					}).then(function (response) {
+						return response.text();
+					}).then(function (responseBody) {
+						try {
+							return JSON.parse(responseBody);
+						} catch (error) {
+							return responseBody;
+						}
+					});
+				}
+
+				ReactDOM.render(
+					React.createElement(GraphiQL, {
+						fetcher: graphQLFetcher,
+						query: '# Welcome to GraphiQL\n# \n# Type queries into this side of the screen, and you will see intelligent\n# typeaheads aware of the current GraphQL type schema and live syntax\n# and validation errors highlighted within the text.\n# \n# Keyboard shortcuts:\n# \n#  Prettify Query:  Shift-Ctrl-P (or press the prettify button above)\n# \n#     Run Query:  Ctrl-Enter (or press the play button above)\n# \n#   Auto Complete:  Ctrl-Space (or just start typing)\n# \nquery MyQuery {\n  heads {\n    id\n    endpoint\n    modelType\n    region\n    status\n    currentLoad\n  }\n}\n',
+					}),
+					document.getElementById('graphiql')
+				);
+			</script>
+		</body>
+		</html>
+		`))
+	})
 }
 
 func waitForShutdown() {
@@ -393,6 +807,324 @@ func waitForShutdown() {
 	}
 
 	logger.Info("Shutdown complete")
+}
+
+// SSE handlers
+func handleHeadStatusEvents(w http.ResponseWriter, r *http.Request) {
+	// Set headers for SSE
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	// Create a channel to send events
+	eventChan := make(chan string)
+
+	// Register the client
+	clientsMutex.Lock()
+	headStatusClients = append(headStatusClients, eventChan)
+	clientsMutex.Unlock()
+
+	// Remove client on disconnect
+	defer func() {
+		clientsMutex.Lock()
+		for i, client := range headStatusClients {
+			if client == eventChan {
+				headStatusClients = append(headStatusClients[:i], headStatusClients[i+1:]...)
+				break
+			}
+		}
+		clientsMutex.Unlock()
+	}()
+
+	// Listen for events
+	for {
+		select {
+		case event := <-eventChan:
+			fmt.Fprintf(w, "data: %s\n\n", event)
+			w.(http.Flusher).Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func handleRoutingDecisionEvents(w http.ResponseWriter, r *http.Request) {
+	// Set headers for SSE
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	// Create a channel to send events
+	eventChan := make(chan string)
+
+	// Register the client
+	clientsMutex.Lock()
+	routingDecisionClients = append(routingDecisionClients, eventChan)
+	clientsMutex.Unlock()
+
+	// Remove client on disconnect
+	defer func() {
+		clientsMutex.Lock()
+		for i, client := range routingDecisionClients {
+			if client == eventChan {
+				routingDecisionClients = append(routingDecisionClients[:i], routingDecisionClients[i+1:]...)
+				break
+			}
+		}
+		clientsMutex.Unlock()
+	}()
+
+	// Listen for events
+	for {
+		select {
+		case event := <-eventChan:
+			fmt.Fprintf(w, "data: %s\n\n", event)
+			w.(http.Flusher).Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+// WebSocket handlers
+func handleHeadManagementWebSocket(w http.ResponseWriter, r *http.Request) {
+	// Upgrade connection to WebSocket
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		logger.Error("Failed to upgrade to WebSocket", zap.Error(err))
+		return
+	}
+	defer conn.Close()
+
+	// Handle WebSocket messages
+	for {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			logger.Error("WebSocket read error", zap.Error(err))
+			break
+		}
+
+		// Process the message
+		var request struct {
+			Type    string                 `json:"type"`
+			Payload map[string]interface{} `json:"payload"`
+		}
+
+		if err := json.Unmarshal(message, &request); err != nil {
+			logger.Error("Failed to parse WebSocket message", zap.Error(err))
+			continue
+		}
+
+		// Handle different message types
+		switch request.Type {
+		case "register_head":
+			// Handle head registration
+			handleWebSocketHeadRegistration(conn, request.Payload)
+		case "update_status":
+			// Handle status update
+			handleWebSocketStatusUpdate(conn, request.Payload)
+		case "get_heads":
+			// Handle get heads request
+			handleWebSocketGetHeads(conn)
+		default:
+			// Unknown message type
+			response := map[string]interface{}{
+				"type":    "error",
+				"message": "Unknown message type",
+			}
+			conn.WriteJSON(response)
+		}
+	}
+}
+
+func handleRoutingDecisionsWebSocket(w http.ResponseWriter, r *http.Request) {
+	// Upgrade connection to WebSocket
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		logger.Error("Failed to upgrade to WebSocket", zap.Error(err))
+		return
+	}
+	defer conn.Close()
+
+	// Handle WebSocket messages
+	for {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			logger.Error("WebSocket read error", zap.Error(err))
+			break
+		}
+
+		// Process the message
+		var request struct {
+			Type    string                 `json:"type"`
+			Payload map[string]interface{} `json:"payload"`
+		}
+
+		if err := json.Unmarshal(message, &request); err != nil {
+			logger.Error("Failed to parse WebSocket message", zap.Error(err))
+			continue
+		}
+
+		// Handle different message types
+		switch request.Type {
+		case "get_routing_decision":
+			// Handle routing decision request
+			handleWebSocketRoutingDecision(conn, request.Payload)
+		case "get_routing_strategies":
+			// Handle get routing strategies request
+			handleWebSocketGetRoutingStrategies(conn)
+		default:
+			// Unknown message type
+			response := map[string]interface{}{
+				"type":    "error",
+				"message": "Unknown message type",
+			}
+			conn.WriteJSON(response)
+		}
+	}
+}
+
+func handleWebSocketHeadRegistration(conn *websocket.Conn, payload map[string]interface{}) {
+	// Convert payload to RegisterHeadRequest
+	req := &pb.RegisterHeadRequest{
+		HeadId:    payload["head_id"].(string),
+		Endpoint:  payload["endpoint"].(string),
+		ModelType: payload["model_type"].(string),
+		Region:    payload["region"].(string),
+		Status:    payload["status"].(string),
+		Metadata:  make(map[string]string),
+	}
+
+	// Convert metadata
+	if metadata, ok := payload["metadata"].(map[string]interface{}); ok {
+		for k, v := range metadata {
+			req.Metadata[k] = v.(string)
+		}
+	}
+
+	// Register the head
+	resp, err := (&RoutingServer{}).RegisterHead(context.Background(), req)
+	if err != nil {
+		response := map[string]interface{}{
+			"type":    "error",
+			"message": err.Error(),
+		}
+		conn.WriteJSON(response)
+		return
+	}
+
+	// Send success response
+	response := map[string]interface{}{
+		"type":    "register_head_response",
+		"success": resp.Success,
+		"message": resp.Message,
+	}
+	conn.WriteJSON(response)
+}
+
+func handleWebSocketStatusUpdate(conn *websocket.Conn, payload map[string]interface{}) {
+	// Convert payload to UpdateHeadStatusRequest
+	req := &pb.UpdateHeadStatusRequest{
+		HeadId:      payload["head_id"].(string),
+		Status:      payload["status"].(string),
+		CurrentLoad: int32(payload["current_load"].(float64)),
+		Timestamp:   int64(payload["timestamp"].(float64)),
+	}
+
+	// Update the head status
+	resp, err := (&RoutingServer{}).UpdateHeadStatus(context.Background(), req)
+	if err != nil {
+		response := map[string]interface{}{
+			"type":    "error",
+			"message": err.Error(),
+		}
+		conn.WriteJSON(response)
+		return
+	}
+
+	// Send success response
+	response := map[string]interface{}{
+		"type":    "update_status_response",
+		"success": resp.Success,
+		"message": resp.Message,
+	}
+	conn.WriteJSON(response)
+}
+
+func handleWebSocketGetHeads(conn *websocket.Conn) {
+	// Get all heads
+	resp, err := (&RoutingServer{}).GetAllHeads(context.Background(), &pb.GetAllHeadsRequest{})
+	if err != nil {
+		response := map[string]interface{}{
+			"type":    "error",
+			"message": err.Error(),
+		}
+		conn.WriteJSON(response)
+		return
+	}
+
+	// Send success response
+	response := map[string]interface{}{
+		"type":  "get_heads_response",
+		"heads":  resp.Heads,
+	}
+	conn.WriteJSON(response)
+}
+
+func handleWebSocketRoutingDecision(conn *websocket.Conn, payload map[string]interface{}) {
+	// Convert payload to GetRoutingDecisionRequest
+	req := &pb.GetRoutingDecisionRequest{
+		ModelType:       payload["model_type"].(string),
+		RegionPreference: payload["region_preference"].(string),
+		RoutingStrategy: payload["routing_strategy"].(string),
+		Metadata:        make(map[string]string),
+	}
+
+	// Convert metadata
+	if metadata, ok := payload["metadata"].(map[string]interface{}); ok {
+		for k, v := range metadata {
+			req.Metadata[k] = v.(string)
+		}
+	}
+
+	// Get routing decision
+	resp, err := (&RoutingServer{}).GetRoutingDecision(context.Background(), req)
+	if err != nil {
+		response := map[string]interface{}{
+			"type":    "error",
+			"message": err.Error(),
+		}
+		conn.WriteJSON(response)
+		return
+	}
+
+	// Send success response
+	response := map[string]interface{}{
+		"type":           "routing_decision_response",
+		"head_id":         resp.HeadId,
+		"endpoint":       resp.Endpoint,
+		"strategy_used":    resp.StrategyUsed,
+		"reason":          resp.Reason,
+		"metadata":        resp.Metadata,
+	}
+	conn.WriteJSON(response)
+}
+
+func handleWebSocketGetRoutingStrategies(conn *websocket.Conn) {
+	// Get routing policy
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+
+	// Send success response
+	response := map[string]interface{}{
+		"type":             "get_routing_strategies_response",
+		"default_strategy":  routingPolicy.DefaultStrategy,
+		"enable_geo_routing": routingPolicy.EnableGeoRouting,
+		"enable_load_balancing": routingPolicy.EnableLoadBalancing,
+		"enable_model_specific": routingPolicy.EnableModelSpecific,
+		"strategy_config": routingPolicy.StrategyConfig,
+	}
+	conn.WriteJSON(response)
 }
 
 func startMessageQueueSubscribers() {
@@ -1049,6 +1781,12 @@ func applyHybridStrategy(heads []HeadService, req *pb.GetRoutingDecisionRequest)
 func callExternalService(serviceName, endpoint string, payload interface{}) ([]byte, error) {
 	startTime := time.Now()
 
+	// Check circuit breaker
+	if !circuitBreaker.Allow(serviceName) {
+		externalServiceCalls.WithLabelValues(serviceName, "circuit_breaker").Inc()
+		return nil, fmt.Errorf("circuit breaker open for service %s", serviceName)
+	}
+
 	// Convert payload to JSON
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -1067,6 +1805,7 @@ func callExternalService(serviceName, endpoint string, payload interface{}) ([]b
 	resp, err := externalServiceClient.Do(req)
 	if err != nil {
 		externalServiceCalls.WithLabelValues(serviceName, "error").Inc()
+		circuitBreaker.Fail(serviceName)
 		return nil, fmt.Errorf("external service request failed: %w", err)
 	}
 	defer resp.Body.Close()
@@ -1074,6 +1813,7 @@ func callExternalService(serviceName, endpoint string, payload interface{}) ([]b
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		externalServiceCalls.WithLabelValues(serviceName, "error").Inc()
+		circuitBreaker.Fail(serviceName)
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
@@ -1081,9 +1821,111 @@ func callExternalService(serviceName, endpoint string, payload interface{}) ([]b
 	status := "success"
 	if resp.StatusCode >= 400 {
 		status = "error"
+		circuitBreaker.Fail(serviceName)
+	} else {
+		circuitBreaker.Success(serviceName)
 	}
 	externalServiceCalls.WithLabelValues(serviceName, status).Inc()
 
 	return body, nil
+}
+
+// Enhanced circuit breaker implementation
+type CircuitBreaker struct {
+	mu            sync.Mutex
+	failures      map[string]int
+	lastFailure   map[string]time.Time
+	threshold     int
+	resetTimeout  time.Duration
+	halfOpen      bool
+	halfOpenUntil time.Time
+}
+
+var circuitBreaker = &CircuitBreaker{
+	failures:     make(map[string]int),
+	lastFailure:  make(map[string]time.Time),
+	threshold:    3,
+	resetTimeout: 30 * time.Second,
+}
+
+func (cb *CircuitBreaker) Allow(service string) bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Check if circuit breaker is open
+	if failures, exists := cb.failures[service]; exists && failures >= cb.threshold {
+		// Check if reset timeout has passed
+		if lastFailure, exists := cb.lastFailure[service]; exists {
+			if time.Since(lastFailure) < cb.resetTimeout {
+				// Circuit is open
+				return false
+			}
+
+			// Check if we're in half-open state
+			if cb.halfOpen && time.Now().Before(cb.halfOpenUntil) {
+				// Allow one request to test the service
+				cb.halfOpen = false
+				return true
+			}
+
+			// Reset circuit breaker
+			delete(cb.failures, service)
+			delete(cb.lastFailure, service)
+			cb.halfOpen = true
+			cb.halfOpenUntil = time.Now().Add(10 * time.Second)
+			return true
+		}
+	}
+	return true
+}
+
+func (cb *CircuitBreaker) Fail(service string) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Increment failure count
+	cb.failures[service]++
+	cb.lastFailure[service] = time.Now()
+	cb.halfOpen = false
+}
+
+func (cb *CircuitBreaker) Success(service string) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Reset failure count on success
+	delete(cb.failures, service)
+	delete(cb.lastFailure, service)
+	cb.halfOpen = false
+}
+
+func (cb *CircuitBreaker) State(service string) string {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	if failures, exists := cb.failures[service]; exists && failures >= cb.threshold {
+		if lastFailure, exists := cb.lastFailure[service]; exists {
+			if time.Since(lastFailure) < cb.resetTimeout {
+				return "open"
+			}
+			return "half-open"
+		}
+	}
+	return "closed"
+}
+
+func (cb *CircuitBreaker) Metrics() map[string]interface{} {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	metrics := make(map[string]interface{})
+	for service, failures := range cb.failures {
+		metrics[service] = map[string]interface{}{
+			"failures":     failures,
+			"last_failure": cb.lastFailure[service],
+			"state":        cb.State(service),
+		}
+	}
+	return metrics
 }
 
