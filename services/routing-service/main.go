@@ -458,6 +458,12 @@ type RateLimiter struct {
 	resetTimeout  time.Duration
 	burstLimit    int
 	burstDuration time.Duration
+	ipThresholds  map[string]int
+	ipBurstLimits map[string]int
+	ipResetTimeouts map[string]time.Duration
+	ipBurstDurations map[string]time.Duration
+	ipRequestCounts map[string]int
+	ipLastRequests map[string]time.Time
 }
 
 var rateLimiter = &RateLimiter{
@@ -467,17 +473,44 @@ var rateLimiter = &RateLimiter{
 	resetTimeout:  1 * time.Minute,
 	burstLimit:   5,
 	burstDuration: 10 * time.Second,
+	ipThresholds:  make(map[string]int),
+	ipBurstLimits: make(map[string]int),
+	ipResetTimeouts: make(map[string]time.Duration),
+	ipBurstDurations: make(map[string]time.Duration),
+	ipRequestCounts: make(map[string]int),
+	ipLastRequests: make(map[string]time.Time),
 }
 
 func (rl *RateLimiter) Allow(ip string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
+	// Get custom thresholds for IP
+	threshold := rl.threshold
+	if customThreshold, exists := rl.ipThresholds[ip]; exists {
+		threshold = customThreshold
+	}
+
+	burstLimit := rl.burstLimit
+	if customBurstLimit, exists := rl.ipBurstLimits[ip]; exists {
+		burstLimit = customBurstLimit
+	}
+
+	resetTimeout := rl.resetTimeout
+	if customResetTimeout, exists := rl.ipResetTimeouts[ip]; exists {
+		resetTimeout = customResetTimeout
+	}
+
+	burstDuration := rl.burstDuration
+	if customBurstDuration, exists := rl.ipBurstDurations[ip]; exists {
+		burstDuration = customBurstDuration
+	}
+
 	// Check if rate limit is exceeded
-	if requests, exists := rl.requests[ip]; exists && requests >= rl.threshold {
+	if requests, exists := rl.requests[ip]; exists && requests >= threshold {
 		// Check if reset timeout has passed
 		if lastRequest, exists := rl.lastRequest[ip]; exists {
-			if time.Since(lastRequest) < rl.resetTimeout {
+			if time.Since(lastRequest) < resetTimeout {
 				return false
 			}
 			// Reset rate limit
@@ -488,10 +521,10 @@ func (rl *RateLimiter) Allow(ip string) bool {
 
 	// Check burst limit
 	if requests, exists := rl.requests[ip]; exists {
-		if requests >= rl.burstLimit {
+		if requests >= burstLimit {
 			// Check if burst duration has passed
 			if lastRequest, exists := rl.lastRequest[ip]; exists {
-				if time.Since(lastRequest) < rl.burstDuration {
+				if time.Since(lastRequest) < burstDuration {
 					return false
 				}
 			}
@@ -510,11 +543,33 @@ func (rl *RateLimiter) Metrics() map[string]interface{} {
 
 	metrics := make(map[string]interface{})
 	for ip, requests := range rl.requests {
+		threshold := rl.threshold
+		if customThreshold, exists := rl.ipThresholds[ip]; exists {
+			threshold = customThreshold
+		}
+
+		burstLimit := rl.burstLimit
+		if customBurstLimit, exists := rl.ipBurstLimits[ip]; exists {
+			burstLimit = customBurstLimit
+		}
+
+		resetTimeout := rl.resetTimeout
+		if customResetTimeout, exists := rl.ipResetTimeouts[ip]; exists {
+			resetTimeout = customResetTimeout
+		}
+
+		burstDuration := rl.burstDuration
+		if customBurstDuration, exists := rl.ipBurstDurations[ip]; exists {
+			burstDuration = customBurstDuration
+		}
+
 		metrics[ip] = map[string]interface{}{
 			"requests":     requests,
 			"last_request": rl.lastRequest[ip],
-			"threshold":    rl.threshold,
-			"burst_limit":   rl.burstLimit,
+			"threshold":    threshold,
+			"burst_limit":   burstLimit,
+			"reset_timeout": resetTimeout,
+			"burst_duration": burstDuration,
 		}
 	}
 	return metrics
@@ -526,6 +581,12 @@ func (rl *RateLimiter) Reset(ip string) {
 
 	delete(rl.requests, ip)
 	delete(rl.lastRequest, ip)
+	delete(rl.ipThresholds, ip)
+	delete(rl.ipBurstLimits, ip)
+	delete(rl.ipResetTimeouts, ip)
+	delete(rl.ipBurstDurations, ip)
+	delete(rl.ipRequestCounts, ip)
+	delete(rl.ipLastRequests, ip)
 }
 
 func (rl *RateLimiter) SetThreshold(ip string, threshold int) {
@@ -533,9 +594,71 @@ func (rl *RateLimiter) SetThreshold(ip string, threshold int) {
 	defer rl.mu.Unlock()
 
 	// Set custom threshold for specific IP
-	// Implementation would require per-IP threshold tracking
-	// For now, we'll just log the request
+	rl.ipThresholds[ip] = threshold
 	logger.Info("Setting custom rate limit threshold", zap.String("ip", ip), zap.Int("threshold", threshold))
+}
+
+func (rl *RateLimiter) SetBurstLimit(ip string, burstLimit int) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	// Set custom burst limit for specific IP
+	rl.ipBurstLimits[ip] = burstLimit
+	logger.Info("Setting custom rate limit burst limit", zap.String("ip", ip), zap.Int("burst_limit", burstLimit))
+}
+
+func (rl *RateLimiter) SetResetTimeout(ip string, resetTimeout time.Duration) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	// Set custom reset timeout for specific IP
+	rl.ipResetTimeouts[ip] = resetTimeout
+	logger.Info("Setting custom rate limit reset timeout", zap.String("ip", ip), zap.Duration("reset_timeout", resetTimeout))
+}
+
+func (rl *RateLimiter) SetBurstDuration(ip string, burstDuration time.Duration) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	// Set custom burst duration for specific IP
+	rl.ipBurstDurations[ip] = burstDuration
+	logger.Info("Setting custom rate limit burst duration", zap.String("ip", ip), zap.Duration("burst_duration", burstDuration))
+}
+
+func (rl *RateLimiter) SetGlobalThreshold(threshold int) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	// Set global threshold
+	rl.threshold = threshold
+	logger.Info("Setting global rate limit threshold", zap.Int("threshold", threshold))
+}
+
+func (rl *RateLimiter) SetGlobalBurstLimit(burstLimit int) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	// Set global burst limit
+	rl.burstLimit = burstLimit
+	logger.Info("Setting global rate limit burst limit", zap.Int("burst_limit", burstLimit))
+}
+
+func (rl *RateLimiter) SetGlobalResetTimeout(resetTimeout time.Duration) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	// Set global reset timeout
+	rl.resetTimeout = resetTimeout
+	logger.Info("Setting global rate limit reset timeout", zap.Duration("reset_timeout", resetTimeout))
+}
+
+func (rl *RateLimiter) SetGlobalBurstDuration(burstDuration time.Duration) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	// Set global burst duration
+	rl.burstDuration = burstDuration
+	logger.Info("Setting global rate limit burst duration", zap.Duration("burst_duration", burstDuration))
 }
 
 func graphqlHandler() http.Handler {
@@ -552,6 +675,11 @@ func graphqlHandler() http.Handler {
 		metadata: JSON
 		createdAt: String!
 		updatedAt: String!
+		uptime: Float!
+		availability: Float!
+		latency: Float!
+		errorRate: Float!
+		successRate: Float!
 	}
 
 	type RoutingDecision {
@@ -562,6 +690,10 @@ func graphqlHandler() http.Handler {
 		metadata: JSON
 		timestamp: String!
 		processingTime: Float!
+		successRate: Float!
+		errorCount: Int!
+		latency: Float!
+		retryCount: Int!
 	}
 
 	type Query {
@@ -571,6 +703,11 @@ func graphqlHandler() http.Handler {
 		routingPolicy: RoutingPolicy!
 		headStatusHistory(headId: ID!, limit: Int): [HeadStatus!]!
 		routingDecisionsHistory(modelType: String!, limit: Int): [RoutingDecision!]!
+		systemHealth: SystemHealth!
+		circuitBreakerStatus: CircuitBreakerStatus!
+		rateLimiterStatus: RateLimiterStatus!
+		externalServiceMetrics: [ExternalServiceMetric!]!
+		headPerformanceMetrics: [HeadPerformanceMetric!]!
 	}
 
 	type Mutation {
@@ -578,6 +715,11 @@ func graphqlHandler() http.Handler {
 		updateHeadStatus(id: ID!, status: String!, currentLoad: Int!): Head!
 		deregisterHead(id: ID!): Boolean!
 		updateRoutingPolicy(input: UpdateRoutingPolicyInput!): RoutingPolicy!
+		resetCircuitBreaker(service: String!): Boolean!
+		resetRateLimiter(ip: String!): Boolean!
+		setRateLimitThreshold(ip: String!, threshold: Int!): Boolean!
+		setRateLimitBurstLimit(ip: String!, burstLimit: Int!): Boolean!
+		setCircuitBreakerThreshold(service: String!, threshold: Int!): Boolean!
 	}
 
 	input RegisterHeadInput {
@@ -603,6 +745,9 @@ func graphqlHandler() http.Handler {
 		enableModelSpecific: Boolean!
 		strategyConfig: JSON
 		lastUpdated: String!
+		updateCount: Int!
+		policyVersion: String!
+		policyStatus: String!
 	}
 
 	type HeadStatus {
@@ -611,6 +756,58 @@ func graphqlHandler() http.Handler {
 		currentLoad: Int!
 		timestamp: String!
 		previousStatus: String
+		changeDuration: Float!
+		changeReason: String!
+		changeInitiator: String!
+	}
+
+	type SystemHealth {
+		uptime: String!
+		memoryUsage: Float!
+		cpuUsage: Float!
+		activeConnections: Int!
+		errorRate: Float!
+		latency: Float!
+		throughput: Float!
+		successRate: Float!
+	}
+
+	type CircuitBreakerStatus {
+		service: String!
+		state: String!
+		failureCount: Int!
+		lastFailure: String
+		halfOpenUntil: String
+		successCount: Int!
+		recoveryAttempts: Int!
+	}
+
+	type RateLimiterStatus {
+		ip: String!
+		requestCount: Int!
+		lastRequest: String!
+		threshold: Int!
+		burstLimit: Int!
+		burstDuration: Int!
+		resetTimeout: Int!
+	}
+
+	type ExternalServiceMetric {
+		service: String!
+		successRate: Float!
+		errorRate: Float!
+		latency: Float!
+		throughput: Float!
+		availability: Float!
+	}
+
+	type HeadPerformanceMetric {
+		headId: String!
+		latency: Float!
+		throughput: Float!
+		errorRate: Float!
+		successRate: Float!
+		availability: Float!
 	}
 
 	scalar JSON
@@ -1839,6 +2036,11 @@ type CircuitBreaker struct {
 	resetTimeout  time.Duration
 	halfOpen      bool
 	halfOpenUntil time.Time
+	successCount  map[string]int
+	failureCount map[string]int
+	recoveryAttempts map[string]int
+	serviceThresholds map[string]int
+	serviceResetTimeouts map[string]time.Duration
 }
 
 var circuitBreaker = &CircuitBreaker{
@@ -1846,17 +2048,34 @@ var circuitBreaker = &CircuitBreaker{
 	lastFailure:  make(map[string]time.Time),
 	threshold:    3,
 	resetTimeout: 30 * time.Second,
+	successCount: make(map[string]int),
+	failureCount: make(map[string]int),
+	recoveryAttempts: make(map[string]int),
+	serviceThresholds: make(map[string]int),
+	serviceResetTimeouts: make(map[string]time.Duration),
 }
 
 func (cb *CircuitBreaker) Allow(service string) bool {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
+	// Get custom threshold for service
+	threshold := cb.threshold
+	if customThreshold, exists := cb.serviceThresholds[service]; exists {
+		threshold = customThreshold
+	}
+
+	// Get custom reset timeout for service
+	resetTimeout := cb.resetTimeout
+	if customResetTimeout, exists := cb.serviceResetTimeouts[service]; exists {
+		resetTimeout = customResetTimeout
+	}
+
 	// Check if circuit breaker is open
-	if failures, exists := cb.failures[service]; exists && failures >= cb.threshold {
+	if failures, exists := cb.failures[service]; exists && failures >= threshold {
 		// Check if reset timeout has passed
 		if lastFailure, exists := cb.lastFailure[service]; exists {
-			if time.Since(lastFailure) < cb.resetTimeout {
+			if time.Since(lastFailure) < resetTimeout {
 				// Circuit is open
 				return false
 			}
@@ -1885,6 +2104,8 @@ func (cb *CircuitBreaker) Fail(service string) {
 
 	// Increment failure count
 	cb.failures[service]++
+	cb.failureCount[service]++
+	cb.recoveryAttempts[service]++
 	cb.lastFailure[service] = time.Now()
 	cb.halfOpen = false
 }
@@ -1893,19 +2114,33 @@ func (cb *CircuitBreaker) Success(service string) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
+	// Increment success count
+	cb.successCount[service]++
+	cb.halfOpen = false
+
 	// Reset failure count on success
 	delete(cb.failures, service)
 	delete(cb.lastFailure, service)
-	cb.halfOpen = false
 }
 
 func (cb *CircuitBreaker) State(service string) string {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
-	if failures, exists := cb.failures[service]; exists && failures >= cb.threshold {
+	// Get custom threshold for service
+	threshold := cb.threshold
+	if customThreshold, exists := cb.serviceThresholds[service]; exists {
+		threshold = customThreshold
+	}
+
+	if failures, exists := cb.failures[service]; exists && failures >= threshold {
 		if lastFailure, exists := cb.lastFailure[service]; exists {
-			if time.Since(lastFailure) < cb.resetTimeout {
+			resetTimeout := cb.resetTimeout
+			if customResetTimeout, exists := cb.serviceResetTimeouts[service]; exists {
+				resetTimeout = customResetTimeout
+			}
+
+			if time.Since(lastFailure) < resetTimeout {
 				return "open"
 			}
 			return "half-open"
@@ -1924,8 +2159,64 @@ func (cb *CircuitBreaker) Metrics() map[string]interface{} {
 			"failures":     failures,
 			"last_failure": cb.lastFailure[service],
 			"state":        cb.State(service),
+			"success_count": cb.successCount[service],
+			"failure_count": cb.failureCount[service],
+			"recovery_attempts": cb.recoveryAttempts[service],
+			"threshold": cb.serviceThresholds[service],
+			"reset_timeout": cb.serviceResetTimeouts[service],
 		}
 	}
 	return metrics
+}
+
+func (cb *CircuitBreaker) Reset(service string) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Reset all metrics for a service
+	delete(cb.failures, service)
+	delete(cb.lastFailure, service)
+	delete(cb.successCount, service)
+	delete(cb.failureCount, service)
+	delete(cb.recoveryAttempts, service)
+	delete(cb.serviceThresholds, service)
+	delete(cb.serviceResetTimeouts, service)
+	cb.halfOpen = false
+}
+
+func (cb *CircuitBreaker) SetThreshold(service string, threshold int) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Set custom threshold for a service
+	cb.serviceThresholds[service] = threshold
+	logger.Info("Setting custom circuit breaker threshold", zap.String("service", service), zap.Int("threshold", threshold))
+}
+
+func (cb *CircuitBreaker) SetResetTimeout(service string, resetTimeout time.Duration) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Set custom reset timeout for a service
+	cb.serviceResetTimeouts[service] = resetTimeout
+	logger.Info("Setting custom circuit breaker reset timeout", zap.String("service", service), zap.Duration("reset_timeout", resetTimeout))
+}
+
+func (cb *CircuitBreaker) SetGlobalThreshold(threshold int) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Set global threshold
+	cb.threshold = threshold
+	logger.Info("Setting global circuit breaker threshold", zap.Int("threshold", threshold))
+}
+
+func (cb *CircuitBreaker) SetGlobalResetTimeout(resetTimeout time.Duration) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Set global reset timeout
+	cb.resetTimeout = resetTimeout
+	logger.Info("Setting global circuit breaker reset timeout", zap.Duration("reset_timeout", resetTimeout))
 }
 
