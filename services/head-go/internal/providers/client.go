@@ -53,12 +53,15 @@ type ModelClient struct {
     connectionPool *sync.Pool
     maxConnections int
     connectionCount int32
+    configManager *config.NetworkConfigManager
+    configMutex sync.RWMutex
 }
 
 // NewModelClient создаёт клиент, но ещё не подключается
-func NewModelClient(addr string) *ModelClient {
+func NewModelClient(addr string, configManager *config.NetworkConfigManager) *ModelClient {
     return &ModelClient{
         addr: addr,
+        configManager: configManager,
         maxConnections: 100, // Default max connections
         connectionPool: &sync.Pool{
             New: func() interface{} {
@@ -98,6 +101,22 @@ func loadTLSCredentials() (credentials.TransportCredentials, error) {
 
 // Init(ctx context.Context) error {
 func (m *ModelClient) Init(ctx context.Context) error {
+    return m.reconnect(ctx)
+}
+
+// reconnect reconnects to the model proxy with current configuration
+func (m *ModelClient) reconnect(ctx context.Context) error {
+    m.configMutex.Lock()
+    defer m.configMutex.Unlock()
+
+    // Get current network config
+    if m.configManager != nil {
+        networkConfig := m.configManager.GetConfig()
+        if networkConfig.HeadEndpoint != "" {
+            m.addr = networkConfig.HeadEndpoint
+        }
+    }
+
     tlsCreds, err := loadTLSCredentials()
     if err != nil {
         return err
@@ -108,6 +127,11 @@ func (m *ModelClient) Init(ctx context.Context) error {
         Time:                10 * time.Second, // ping every 10 seconds
         Timeout:            2 * time.Second,  // wait 2 seconds for pong
         PermitWithoutStream: true,
+    }
+
+    // Close existing connection if any
+    if m.conn != nil {
+        m.conn.Close()
     }
 
     conn, err := grpc.DialContext(ctx, m.addr,
@@ -140,7 +164,13 @@ func (m *ModelClient) Init(ctx context.Context) error {
         RequestVolumeThreshold: 5,
     })
 
-    // Initialize connection pool
+    // Reinitialize connection pool
+    m.connectionPool = &sync.Pool{
+        New: func() interface{} {
+            return &grpc.ClientConn{}
+        },
+    }
+
     for i := 0; i < m.maxConnections; i++ {
         conn, err := grpc.DialContext(ctx, m.addr,
             grpc.WithTransportCredentials(tlsCreds),
