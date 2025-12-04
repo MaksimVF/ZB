@@ -458,6 +458,8 @@ type RateLimiter struct {
 	resetTimeout  time.Duration
 	burstLimit    int
 	burstDuration time.Duration
+	ipThresholds  map[string]int
+	ipBurstLimits map[string]int
 }
 
 var rateLimiter = &RateLimiter{
@@ -467,14 +469,27 @@ var rateLimiter = &RateLimiter{
 	resetTimeout:  1 * time.Minute,
 	burstLimit:   5,
 	burstDuration: 10 * time.Second,
+	ipThresholds:  make(map[string]int),
+	ipBurstLimits: make(map[string]int),
 }
 
 func (rl *RateLimiter) Allow(ip string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
+	// Get custom thresholds for IP
+	threshold := rl.threshold
+	if customThreshold, exists := rl.ipThresholds[ip]; exists {
+		threshold = customThreshold
+	}
+
+	burstLimit := rl.burstLimit
+	if customBurstLimit, exists := rl.ipBurstLimits[ip]; exists {
+		burstLimit = customBurstLimit
+	}
+
 	// Check if rate limit is exceeded
-	if requests, exists := rl.requests[ip]; exists && requests >= rl.threshold {
+	if requests, exists := rl.requests[ip]; exists && requests >= threshold {
 		// Check if reset timeout has passed
 		if lastRequest, exists := rl.lastRequest[ip]; exists {
 			if time.Since(lastRequest) < rl.resetTimeout {
@@ -488,7 +503,7 @@ func (rl *RateLimiter) Allow(ip string) bool {
 
 	// Check burst limit
 	if requests, exists := rl.requests[ip]; exists {
-		if requests >= rl.burstLimit {
+		if requests >= burstLimit {
 			// Check if burst duration has passed
 			if lastRequest, exists := rl.lastRequest[ip]; exists {
 				if time.Since(lastRequest) < rl.burstDuration {
@@ -510,11 +525,21 @@ func (rl *RateLimiter) Metrics() map[string]interface{} {
 
 	metrics := make(map[string]interface{})
 	for ip, requests := range rl.requests {
+		threshold := rl.threshold
+		if customThreshold, exists := rl.ipThresholds[ip]; exists {
+			threshold = customThreshold
+		}
+
+		burstLimit := rl.burstLimit
+		if customBurstLimit, exists := rl.ipBurstLimits[ip]; exists {
+			burstLimit = customBurstLimit
+		}
+
 		metrics[ip] = map[string]interface{}{
 			"requests":     requests,
 			"last_request": rl.lastRequest[ip],
-			"threshold":    rl.threshold,
-			"burst_limit":   rl.burstLimit,
+			"threshold":    threshold,
+			"burst_limit":   burstLimit,
 		}
 	}
 	return metrics
@@ -526,6 +551,8 @@ func (rl *RateLimiter) Reset(ip string) {
 
 	delete(rl.requests, ip)
 	delete(rl.lastRequest, ip)
+	delete(rl.ipThresholds, ip)
+	delete(rl.ipBurstLimits, ip)
 }
 
 func (rl *RateLimiter) SetThreshold(ip string, threshold int) {
@@ -533,9 +560,35 @@ func (rl *RateLimiter) SetThreshold(ip string, threshold int) {
 	defer rl.mu.Unlock()
 
 	// Set custom threshold for specific IP
-	// Implementation would require per-IP threshold tracking
-	// For now, we'll just log the request
+	rl.ipThresholds[ip] = threshold
 	logger.Info("Setting custom rate limit threshold", zap.String("ip", ip), zap.Int("threshold", threshold))
+}
+
+func (rl *RateLimiter) SetBurstLimit(ip string, burstLimit int) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	// Set custom burst limit for specific IP
+	rl.ipBurstLimits[ip] = burstLimit
+	logger.Info("Setting custom rate limit burst limit", zap.String("ip", ip), zap.Int("burst_limit", burstLimit))
+}
+
+func (rl *RateLimiter) SetGlobalThreshold(threshold int) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	// Set global threshold
+	rl.threshold = threshold
+	logger.Info("Setting global rate limit threshold", zap.Int("threshold", threshold))
+}
+
+func (rl *RateLimiter) SetGlobalBurstLimit(burstLimit int) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	// Set global burst limit
+	rl.burstLimit = burstLimit
+	logger.Info("Setting global rate limit burst limit", zap.Int("burst_limit", burstLimit))
 }
 
 func graphqlHandler() http.Handler {
@@ -552,6 +605,8 @@ func graphqlHandler() http.Handler {
 		metadata: JSON
 		createdAt: String!
 		updatedAt: String!
+		uptime: Float!
+		availability: Float!
 	}
 
 	type RoutingDecision {
@@ -562,6 +617,8 @@ func graphqlHandler() http.Handler {
 		metadata: JSON
 		timestamp: String!
 		processingTime: Float!
+		successRate: Float!
+		errorCount: Int!
 	}
 
 	type Query {
@@ -571,6 +628,9 @@ func graphqlHandler() http.Handler {
 		routingPolicy: RoutingPolicy!
 		headStatusHistory(headId: ID!, limit: Int): [HeadStatus!]!
 		routingDecisionsHistory(modelType: String!, limit: Int): [RoutingDecision!]!
+		systemHealth: SystemHealth!
+		circuitBreakerStatus: CircuitBreakerStatus!
+		rateLimiterStatus: RateLimiterStatus!
 	}
 
 	type Mutation {
@@ -578,6 +638,8 @@ func graphqlHandler() http.Handler {
 		updateHeadStatus(id: ID!, status: String!, currentLoad: Int!): Head!
 		deregisterHead(id: ID!): Boolean!
 		updateRoutingPolicy(input: UpdateRoutingPolicyInput!): RoutingPolicy!
+		resetCircuitBreaker(service: String!): Boolean!
+		resetRateLimiter(ip: String!): Boolean!
 	}
 
 	input RegisterHeadInput {
@@ -603,6 +665,7 @@ func graphqlHandler() http.Handler {
 		enableModelSpecific: Boolean!
 		strategyConfig: JSON
 		lastUpdated: String!
+		updateCount: Int!
 	}
 
 	type HeadStatus {
@@ -611,6 +674,32 @@ func graphqlHandler() http.Handler {
 		currentLoad: Int!
 		timestamp: String!
 		previousStatus: String
+		changeDuration: Float!
+	}
+
+	type SystemHealth {
+		uptime: String!
+		memoryUsage: Float!
+		cpuUsage: Float!
+		activeConnections: Int!
+		errorRate: Float!
+		latency: Float!
+	}
+
+	type CircuitBreakerStatus {
+		service: String!
+		state: String!
+		failureCount: Int!
+		lastFailure: String
+		halfOpenUntil: String
+	}
+
+	type RateLimiterStatus {
+		ip: String!
+		requestCount: Int!
+		lastRequest: String!
+		threshold: Int!
+		burstLimit: Int!
 	}
 
 	scalar JSON
@@ -1839,6 +1928,8 @@ type CircuitBreaker struct {
 	resetTimeout  time.Duration
 	halfOpen      bool
 	halfOpenUntil time.Time
+	successCount  map[string]int
+	failureCount map[string]int
 }
 
 var circuitBreaker = &CircuitBreaker{
@@ -1846,6 +1937,8 @@ var circuitBreaker = &CircuitBreaker{
 	lastFailure:  make(map[string]time.Time),
 	threshold:    3,
 	resetTimeout: 30 * time.Second,
+	successCount: make(map[string]int),
+	failureCount: make(map[string]int),
 }
 
 func (cb *CircuitBreaker) Allow(service string) bool {
@@ -1885,6 +1978,7 @@ func (cb *CircuitBreaker) Fail(service string) {
 
 	// Increment failure count
 	cb.failures[service]++
+	cb.failureCount[service]++
 	cb.lastFailure[service] = time.Now()
 	cb.halfOpen = false
 }
@@ -1893,10 +1987,13 @@ func (cb *CircuitBreaker) Success(service string) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
+	// Increment success count
+	cb.successCount[service]++
+	cb.halfOpen = false
+
 	// Reset failure count on success
 	delete(cb.failures, service)
 	delete(cb.lastFailure, service)
-	cb.halfOpen = false
 }
 
 func (cb *CircuitBreaker) State(service string) string {
@@ -1924,8 +2021,32 @@ func (cb *CircuitBreaker) Metrics() map[string]interface{} {
 			"failures":     failures,
 			"last_failure": cb.lastFailure[service],
 			"state":        cb.State(service),
+			"success_count": cb.successCount[service],
+			"failure_count": cb.failureCount[service],
 		}
 	}
 	return metrics
+}
+
+func (cb *CircuitBreaker) Reset(service string) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Reset all metrics for a service
+	delete(cb.failures, service)
+	delete(cb.lastFailure, service)
+	delete(cb.successCount, service)
+	delete(cb.failureCount, service)
+	cb.halfOpen = false
+}
+
+func (cb *CircuitBreaker) SetThreshold(service string, threshold int) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Set custom threshold for a service
+	// Implementation would require per-service threshold tracking
+	// For now, we'll just log the request
+	logger.Info("Setting custom circuit breaker threshold", zap.String("service", service), zap.Int("threshold", threshold))
 }
 
