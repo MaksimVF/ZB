@@ -38,6 +38,10 @@ var (
 	routingPolicy RoutingPolicy
 	configMutex   sync.RWMutex
 
+	// Performance optimization
+	routingCache = make(map[string]string) // Cache for routing decisions
+	cacheMutex   sync.RWMutex
+
 	// Prometheus metrics
 	routingDecisions = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -74,6 +78,21 @@ var (
 			Help: "Total number of HTTP requests",
 		},
 		[]string{"method", "endpoint", "status"},
+	)
+
+	// Cache performance metrics
+	cacheHits = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "cache_hits_total",
+			Help: "Total number of cache hits",
+		},
+	)
+
+	cacheMisses = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "cache_misses_total",
+			Help: "Total number of cache misses",
+		},
 	)
 )
 
@@ -117,6 +136,8 @@ func main() {
 		headStatusUpdates,
 		activeHeads,
 		httpRequests,
+		cacheHits,
+		cacheMisses,
 	)
 
 	// Initialize Redis client
@@ -388,6 +409,18 @@ func (s *RoutingServer) UpdateHeadStatus(ctx context.Context, req *pb.UpdateHead
 		}, err
 	}
 
+	// Invalidate cache if head becomes inactive
+	if head.Status != "active" {
+		// Clear cache entries that might reference this head
+		cacheMutex.Lock()
+		for key, headID := range routingCache {
+			if headID == head.HeadID {
+				delete(routingCache, key)
+			}
+		}
+		cacheMutex.Unlock()
+	}
+
 	// Record metrics
 	headStatusUpdates.Inc()
 
@@ -398,6 +431,36 @@ func (s *RoutingServer) GetRoutingDecision(ctx context.Context, req *pb.GetRouti
 
 	// Implement routing decision logic based on current policy
 	// This is a simplified version - in production this would be more sophisticated
+
+	// Check cache first
+	cacheKey := fmt.Sprintf("%s-%s-%s-%s", req.ModelType, req.RegionPreference, req.RoutingStrategy, req.Metadata["model"])
+	cacheMutex.RLock()
+	cachedHeadID, found := routingCache[cacheKey]
+	cacheMutex.RUnlock()
+
+	if found {
+		// Cache hit
+		cacheHits.Inc()
+
+		// Find the cached head in our current list
+		configMutex.RLock()
+		for _, head := range headServices {
+			if head.HeadID == cachedHeadID && head.Status == "active" {
+				configMutex.RUnlock()
+				return &pb.GetRoutingDecisionResponse{
+					HeadId:      head.HeadID,
+					Endpoint:    head.Endpoint,
+					StrategyUsed: "cached",
+					Reason:      "Cache hit",
+					Metadata:    map[string]string{"model": head.ModelType, "region": head.Region},
+				}, nil
+			}
+		}
+		configMutex.RUnlock()
+	}
+
+	// Cache miss - proceed with normal routing
+	cacheMisses.Inc()
 
 	configMutex.RLock()
 	defer configMutex.RUnlock()
@@ -458,6 +521,11 @@ func (s *RoutingServer) GetRoutingDecision(ctx context.Context, req *pb.GetRouti
 			Reason:      "No suitable head found",
 		}, nil
 	}
+
+	// Update cache
+	cacheMutex.Lock()
+	routingCache[cacheKey] = selectedHead.HeadID
+	cacheMutex.Unlock()
 
 	// Record metrics
 	routingDecisions.WithLabelValues(strategy, req.ModelType, selectedHead.Region).Inc()
