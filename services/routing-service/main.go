@@ -22,6 +22,7 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/nats-io/nats.go"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -34,6 +35,7 @@ var (
 	logger        *zap.Logger
 	httpServer    *http.Server
 	grpcServer    *grpc.Server
+	natsConn      *nats.Conn
 	headServices  = make(map[string]HeadService)
 	routingPolicy RoutingPolicy
 	configMutex   sync.RWMutex
@@ -106,6 +108,15 @@ var (
 		},
 		[]string{"service", "status"},
 	)
+
+	// Message queue metrics
+	messageQueueMessages = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "message_queue_messages_total",
+			Help: "Total number of message queue messages",
+		},
+		[]string{"queue", "status"},
+	)
 )
 
 type HeadService struct {
@@ -151,6 +162,7 @@ func main() {
 		cacheHits,
 		cacheMisses,
 		externalServiceCalls,
+		messageQueueMessages,
 	)
 
 	// Initialize Redis client
@@ -177,6 +189,17 @@ func main() {
 	externalServiceClient = &http.Client{
 		Timeout: 10 * time.Second,
 	}
+
+	// Initialize NATS connection
+	var err error
+	natsConn, err = nats.Connect(nats.DefaultURL)
+	if err != nil {
+		logger.Fatal("Failed to connect to NATS", zap.Error(err))
+	}
+	defer natsConn.Close()
+
+	// Start message queue subscribers
+	go startMessageQueueSubscribers()
 
 	// Start gRPC server
 	go startGRPCServer()
@@ -364,7 +387,103 @@ func waitForShutdown() {
 		grpcServer.GracefulStop()
 	}
 
+	// Close NATS connection
+	if natsConn != nil {
+		natsConn.Close()
+	}
+
 	logger.Info("Shutdown complete")
+}
+
+func startMessageQueueSubscribers() {
+	// Subscribe to head status updates
+	natsConn.Subscribe("head.status.update", func(msg *nats.Msg) {
+		var statusUpdate struct {
+			HeadID     string `json:"head_id"`
+			Status     string `json:"status"`
+			CurrentLoad int32  `json:"current_load"`
+			Timestamp  int64  `json:"timestamp"`
+		}
+
+		if err := json.Unmarshal(msg.Data, &statusUpdate); err != nil {
+			messageQueueMessages.WithLabelValues("head.status.update", "error").Inc()
+			return
+		}
+
+		// Process the status update
+		err := processHeadStatusUpdate(statusUpdate.HeadID, statusUpdate.Status, statusUpdate.CurrentLoad, statusUpdate.Timestamp)
+		if err != nil {
+			messageQueueMessages.WithLabelValues("head.status.update", "error").Inc()
+			return
+		}
+
+		messageQueueMessages.WithLabelValues("head.status.update", "success").Inc()
+	})
+
+	// Subscribe to routing decision requests
+	natsConn.Subscribe("routing.decision.request", func(msg *nats.Msg) {
+		var decisionRequest struct {
+			ModelType       string            `json:"model_type"`
+			RegionPreference string            `json:"region_preference"`
+			RoutingStrategy  string            `json:"routing_strategy"`
+			Metadata        map[string]string `json:"metadata"`
+		}
+
+		if err := json.Unmarshal(msg.Data, &decisionRequest); err != nil {
+			messageQueueMessages.WithLabelValues("routing.decision.request", "error").Inc()
+			return
+		}
+
+		// Process the routing decision request
+		decision, err := makeRoutingDecisionFromWebhook(decisionRequest.ModelType, decisionRequest.RegionPreference, decisionRequest.RoutingStrategy, decisionRequest.Metadata)
+		if err != nil {
+			messageQueueMessages.WithLabelValues("routing.decision.request", "error").Inc()
+			return
+		}
+
+		// Publish the decision response
+		responseData, err := json.Marshal(decision)
+		if err != nil {
+			messageQueueMessages.WithLabelValues("routing.decision.response", "error").Inc()
+			return
+		}
+
+		natsConn.Publish("routing.decision.response", responseData)
+		messageQueueMessages.WithLabelValues("routing.decision.request", "success").Inc()
+	})
+
+	// Subscribe to head registration requests
+	natsConn.Subscribe("head.registration.request", func(msg *nats.Msg) {
+		var registrationRequest struct {
+			HeadID    string            `json:"head_id"`
+			Endpoint string            `json:"endpoint"`
+			ModelType string            `json:"model_type"`
+			Region    string            `json:"region"`
+			Status    string            `json:"status"`
+			Metadata map[string]string `json:"metadata"`
+		}
+
+		if err := json.Unmarshal(msg.Data, &registrationRequest); err != nil {
+			messageQueueMessages.WithLabelValues("head.registration.request", "error").Inc()
+			return
+		}
+
+		// Process the registration request
+		_, err := (&RoutingServer{}).RegisterHead(context.Background(), &pb.RegisterHeadRequest{
+			HeadId:    registrationRequest.HeadID,
+			Endpoint:  registrationRequest.Endpoint,
+			ModelType: registrationRequest.ModelType,
+			Region:    registrationRequest.Region,
+			Status:    registrationRequest.Status,
+			Metadata:  registrationRequest.Metadata,
+		})
+		if err != nil {
+			messageQueueMessages.WithLabelValues("head.registration.request", "error").Inc()
+			return
+		}
+
+		messageQueueMessages.WithLabelValues("head.registration.request", "success").Inc()
+	})
 }
 
 // Webhook handlers
