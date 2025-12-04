@@ -48,7 +48,15 @@ func main() {
 		Addr: "redis:6379",
 	})
 
-	// === 2. Подключаемся к secret-service (gRPC + mTLS) ===
+	// === 2. Инициализируем NetworkConfigManager ===
+	networkConfigManager := config.NewNetworkConfigManager("redis:6379")
+	err := networkConfigManager.LoadConfig()
+	if err != nil {
+		log.Fatalf("Не удалось загрузить сетевую конфигурацию: %v", err)
+	}
+	networkConfigManager.StartAutoReload(10 * time.Second)
+
+	// === 3. Подключаемся к secret-service (gRPC + mTLS) ===
 	var err error
 	secretConn, err = grpc.Dial(
 		"secret-service:50053",
@@ -61,7 +69,7 @@ func main() {
 
 	secretClient = pb.NewSecretServiceClient(secretConn)
 
-	// === 3. Подключаемся к auth-service (gRPC + mTLS) ===
+	// === 4. Подключаемся к auth-service (gRPC + mTLS) ===
 	authConn, err = grpc.Dial(
 		"auth-service:50051",
 		grpc.WithTransportCredentials(loadClientTLSCredentials()),
@@ -72,6 +80,14 @@ func main() {
 	defer authConn.Close()
 
 	authClient = pb.NewAuthServiceClient(authConn)
+
+	// === 5. Инициализируем HeadClient с NetworkConfigManager ===
+	networkConfig := networkConfigManager.GetConfig()
+	headEndpoint := networkConfig.HeadEndpoint
+	if headEndpoint == "" {
+		headEndpoint = "head:50055" // Default fallback
+	}
+	headClient = grpc.NewHeadClient(headEndpoint, networkConfigManager)
 
 	// === 4. Фоновая задача: обновление секретов при изменении ===
 	go watchSecretsUpdates()
