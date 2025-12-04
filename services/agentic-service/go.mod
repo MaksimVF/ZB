@@ -1,7 +1,7 @@
 
 
 
-module llm-gateway-pro/services/agentic-service
+module github.com/MaksimVF/ZB/services/agentic-service
 
 go 1.22
 
@@ -12,6 +12,6 @@ require (
 	google.golang.org/protobuf v1.31.0
 )
 
-replace llm-gateway-pro/services/secret-service/pb => ../secret-service/pb
-replace llm-gateway-pro/services/head-go/gen => ../head-go/gen
+replace github.com/MaksimVF/ZB/services/secrets-service/pb => ../secrets-service/pb
+replace github.com/MaksimVF/ZB/services/head-go/gen => ../head-go/gen
 

@@ -1,4 +1,4 @@
-module github.com/yourorg/head
+module github.com/MaksimVF/ZB/services/head-go
 
 go 1.21
 

@@ -2,7 +2,7 @@
 
 
 
-module github.com/yourorg/network-config
+module github.com/MaksimVF/ZB/services/network-config
 
 go 1.21
 
