@@ -26,7 +26,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
-	pb "llm-gateway-pro/services/secret-service/pb" // <-- твой proto
+	pb "github.com/MaksimVF/ZB/services/secrets-service/pb" // <-- твой proto
 	"llm-gateway-pro/services/gateway/handlers"
 	"llm-gateway-pro/services/tail-go/cmd/tail/middleware"
 	"llm-gateway-pro/services/tail-go/middleware"

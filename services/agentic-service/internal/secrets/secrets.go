@@ -13,7 +13,7 @@ import (
 	"google.golang.org/grpc"
 
 	"llm-gateway-pro/services/agentic-service/internal/grpc"
-	pb "llm-gateway-pro/services/secret-service/pb"
+	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
 )
 
 var (

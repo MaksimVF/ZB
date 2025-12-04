@@ -28,7 +28,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
-	pb "llm-gateway-pro/services/secret-service/pb"
+	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
 	"llm-gateway-pro/services/agentic-service/handlers"
 	"llm-gateway-pro/services/agentic-service/middleware"
 )
