@@ -47,6 +47,18 @@ var (
 	// External service integration
 	externalServiceClient *http.Client
 
+	// SSE and WebSocket clients
+	headStatusClients        = make([]chan string, 0)
+	routingDecisionClients   = make([]chan string, 0)
+	clientsMutex             sync.Mutex
+
+	// WebSocket upgrader
+	upgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			return true // Allow all origins for now
+		},
+	}
+
 	// Prometheus metrics
 	routingDecisions = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -117,6 +129,21 @@ var (
 		},
 		[]string{"queue", "status"},
 	)
+
+	// SSE and WebSocket metrics
+	sseConnections = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "sse_connections",
+			Help: "Number of active SSE connections",
+		},
+	)
+
+	websocketConnections = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "websocket_connections",
+			Help: "Number of active WebSocket connections",
+		},
+	)
 )
 
 type HeadService struct {
@@ -163,6 +190,8 @@ func main() {
 		cacheMisses,
 		externalServiceCalls,
 		messageQueueMessages,
+		sseConnections,
+		websocketConnections,
 	)
 
 	// Initialize Redis client
@@ -351,6 +380,14 @@ func startHTTPServer() {
 	router.HandleFunc("/webhook/head-status", handleHeadStatusWebhook).Methods("POST")
 	router.HandleFunc("/webhook/routing-decision", handleRoutingDecisionWebhook).Methods("POST")
 
+	// Server-Sent Events (SSE) endpoints
+	router.HandleFunc("/events/head-status", handleHeadStatusEvents).Methods("GET")
+	router.HandleFunc("/events/routing-decisions", handleRoutingDecisionEvents).Methods("GET")
+
+	// WebSocket endpoints
+	router.HandleFunc("/ws/head-management", handleHeadManagementWebSocket)
+	router.HandleFunc("/ws/routing-decisions", handleRoutingDecisionsWebSocket)
+
 	// Serve admin interface
 	router.PathPrefix("/admin/").Handler(http.StripPrefix("/admin/", http.FileServer(http.Dir("./"))))
 
@@ -363,7 +400,7 @@ func startHTTPServer() {
 		Handler: jwtMiddleware(router),
 	}
 
-	logger.Info("Starting HTTP server with JWT authentication, RBAC, Prometheus metrics, and webhook support on :8080")
+	logger.Info("Starting HTTP server with JWT authentication, RBAC, Prometheus metrics, webhook support, SSE, and WebSocket on :8080")
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ServerClosed {
 		logger.Fatal("HTTP server failed", zap.Error(err))
 	}
@@ -393,6 +430,324 @@ func waitForShutdown() {
 	}
 
 	logger.Info("Shutdown complete")
+}
+
+// SSE handlers
+func handleHeadStatusEvents(w http.ResponseWriter, r *http.Request) {
+	// Set headers for SSE
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	// Create a channel to send events
+	eventChan := make(chan string)
+
+	// Register the client
+	clientsMutex.Lock()
+	headStatusClients = append(headStatusClients, eventChan)
+	clientsMutex.Unlock()
+
+	// Remove client on disconnect
+	defer func() {
+		clientsMutex.Lock()
+		for i, client := range headStatusClients {
+			if client == eventChan {
+				headStatusClients = append(headStatusClients[:i], headStatusClients[i+1:]...)
+				break
+			}
+		}
+		clientsMutex.Unlock()
+	}()
+
+	// Listen for events
+	for {
+		select {
+		case event := <-eventChan:
+			fmt.Fprintf(w, "data: %s\n\n", event)
+			w.(http.Flusher).Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func handleRoutingDecisionEvents(w http.ResponseWriter, r *http.Request) {
+	// Set headers for SSE
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	// Create a channel to send events
+	eventChan := make(chan string)
+
+	// Register the client
+	clientsMutex.Lock()
+	routingDecisionClients = append(routingDecisionClients, eventChan)
+	clientsMutex.Unlock()
+
+	// Remove client on disconnect
+	defer func() {
+		clientsMutex.Lock()
+		for i, client := range routingDecisionClients {
+			if client == eventChan {
+				routingDecisionClients = append(routingDecisionClients[:i], routingDecisionClients[i+1:]...)
+				break
+			}
+		}
+		clientsMutex.Unlock()
+	}()
+
+	// Listen for events
+	for {
+		select {
+		case event := <-eventChan:
+			fmt.Fprintf(w, "data: %s\n\n", event)
+			w.(http.Flusher).Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+// WebSocket handlers
+func handleHeadManagementWebSocket(w http.ResponseWriter, r *http.Request) {
+	// Upgrade connection to WebSocket
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		logger.Error("Failed to upgrade to WebSocket", zap.Error(err))
+		return
+	}
+	defer conn.Close()
+
+	// Handle WebSocket messages
+	for {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			logger.Error("WebSocket read error", zap.Error(err))
+			break
+		}
+
+		// Process the message
+		var request struct {
+			Type    string                 `json:"type"`
+			Payload map[string]interface{} `json:"payload"`
+		}
+
+		if err := json.Unmarshal(message, &request); err != nil {
+			logger.Error("Failed to parse WebSocket message", zap.Error(err))
+			continue
+		}
+
+		// Handle different message types
+		switch request.Type {
+		case "register_head":
+			// Handle head registration
+			handleWebSocketHeadRegistration(conn, request.Payload)
+		case "update_status":
+			// Handle status update
+			handleWebSocketStatusUpdate(conn, request.Payload)
+		case "get_heads":
+			// Handle get heads request
+			handleWebSocketGetHeads(conn)
+		default:
+			// Unknown message type
+			response := map[string]interface{}{
+				"type":    "error",
+				"message": "Unknown message type",
+			}
+			conn.WriteJSON(response)
+		}
+	}
+}
+
+func handleRoutingDecisionsWebSocket(w http.ResponseWriter, r *http.Request) {
+	// Upgrade connection to WebSocket
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		logger.Error("Failed to upgrade to WebSocket", zap.Error(err))
+		return
+	}
+	defer conn.Close()
+
+	// Handle WebSocket messages
+	for {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			logger.Error("WebSocket read error", zap.Error(err))
+			break
+		}
+
+		// Process the message
+		var request struct {
+			Type    string                 `json:"type"`
+			Payload map[string]interface{} `json:"payload"`
+		}
+
+		if err := json.Unmarshal(message, &request); err != nil {
+			logger.Error("Failed to parse WebSocket message", zap.Error(err))
+			continue
+		}
+
+		// Handle different message types
+		switch request.Type {
+		case "get_routing_decision":
+			// Handle routing decision request
+			handleWebSocketRoutingDecision(conn, request.Payload)
+		case "get_routing_strategies":
+			// Handle get routing strategies request
+			handleWebSocketGetRoutingStrategies(conn)
+		default:
+			// Unknown message type
+			response := map[string]interface{}{
+				"type":    "error",
+				"message": "Unknown message type",
+			}
+			conn.WriteJSON(response)
+		}
+	}
+}
+
+func handleWebSocketHeadRegistration(conn *websocket.Conn, payload map[string]interface{}) {
+	// Convert payload to RegisterHeadRequest
+	req := &pb.RegisterHeadRequest{
+		HeadId:    payload["head_id"].(string),
+		Endpoint:  payload["endpoint"].(string),
+		ModelType: payload["model_type"].(string),
+		Region:    payload["region"].(string),
+		Status:    payload["status"].(string),
+		Metadata:  make(map[string]string),
+	}
+
+	// Convert metadata
+	if metadata, ok := payload["metadata"].(map[string]interface{}); ok {
+		for k, v := range metadata {
+			req.Metadata[k] = v.(string)
+		}
+	}
+
+	// Register the head
+	resp, err := (&RoutingServer{}).RegisterHead(context.Background(), req)
+	if err != nil {
+		response := map[string]interface{}{
+			"type":    "error",
+			"message": err.Error(),
+		}
+		conn.WriteJSON(response)
+		return
+	}
+
+	// Send success response
+	response := map[string]interface{}{
+		"type":    "register_head_response",
+		"success": resp.Success,
+		"message": resp.Message,
+	}
+	conn.WriteJSON(response)
+}
+
+func handleWebSocketStatusUpdate(conn *websocket.Conn, payload map[string]interface{}) {
+	// Convert payload to UpdateHeadStatusRequest
+	req := &pb.UpdateHeadStatusRequest{
+		HeadId:      payload["head_id"].(string),
+		Status:      payload["status"].(string),
+		CurrentLoad: int32(payload["current_load"].(float64)),
+		Timestamp:   int64(payload["timestamp"].(float64)),
+	}
+
+	// Update the head status
+	resp, err := (&RoutingServer{}).UpdateHeadStatus(context.Background(), req)
+	if err != nil {
+		response := map[string]interface{}{
+			"type":    "error",
+			"message": err.Error(),
+		}
+		conn.WriteJSON(response)
+		return
+	}
+
+	// Send success response
+	response := map[string]interface{}{
+		"type":    "update_status_response",
+		"success": resp.Success,
+		"message": resp.Message,
+	}
+	conn.WriteJSON(response)
+}
+
+func handleWebSocketGetHeads(conn *websocket.Conn) {
+	// Get all heads
+	resp, err := (&RoutingServer{}).GetAllHeads(context.Background(), &pb.GetAllHeadsRequest{})
+	if err != nil {
+		response := map[string]interface{}{
+			"type":    "error",
+			"message": err.Error(),
+		}
+		conn.WriteJSON(response)
+		return
+	}
+
+	// Send success response
+	response := map[string]interface{}{
+		"type":  "get_heads_response",
+		"heads":  resp.Heads,
+	}
+	conn.WriteJSON(response)
+}
+
+func handleWebSocketRoutingDecision(conn *websocket.Conn, payload map[string]interface{}) {
+	// Convert payload to GetRoutingDecisionRequest
+	req := &pb.GetRoutingDecisionRequest{
+		ModelType:       payload["model_type"].(string),
+		RegionPreference: payload["region_preference"].(string),
+		RoutingStrategy: payload["routing_strategy"].(string),
+		Metadata:        make(map[string]string),
+	}
+
+	// Convert metadata
+	if metadata, ok := payload["metadata"].(map[string]interface{}); ok {
+		for k, v := range metadata {
+			req.Metadata[k] = v.(string)
+		}
+	}
+
+	// Get routing decision
+	resp, err := (&RoutingServer{}).GetRoutingDecision(context.Background(), req)
+	if err != nil {
+		response := map[string]interface{}{
+			"type":    "error",
+			"message": err.Error(),
+		}
+		conn.WriteJSON(response)
+		return
+	}
+
+	// Send success response
+	response := map[string]interface{}{
+		"type":           "routing_decision_response",
+		"head_id":         resp.HeadId,
+		"endpoint":       resp.Endpoint,
+		"strategy_used":    resp.StrategyUsed,
+		"reason":          resp.Reason,
+		"metadata":        resp.Metadata,
+	}
+	conn.WriteJSON(response)
+}
+
+func handleWebSocketGetRoutingStrategies(conn *websocket.Conn) {
+	// Get routing policy
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+
+	// Send success response
+	response := map[string]interface{}{
+		"type":             "get_routing_strategies_response",
+		"default_strategy":  routingPolicy.DefaultStrategy,
+		"enable_geo_routing": routingPolicy.EnableGeoRouting,
+		"enable_load_balancing": routingPolicy.EnableLoadBalancing,
+		"enable_model_specific": routingPolicy.EnableModelSpecific,
+		"strategy_config": routingPolicy.StrategyConfig,
+	}
+	conn.WriteJSON(response)
 }
 
 func startMessageQueueSubscribers() {
