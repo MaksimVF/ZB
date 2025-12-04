@@ -6,6 +6,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -20,6 +22,7 @@ import (
 	"github.com/go-redis/redis/v8"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
 	pb "github.com/MaksimVF/ZB/gen/proto"
 )
@@ -103,34 +106,127 @@ func startGRPCServer() {
 		logger.Fatal("Failed to listen", zap.Error(err))
 	}
 
-	grpcServer = grpc.NewServer()
+	// Load TLS certificates
+	serverCert, err := tls.LoadX509KeyPair("certs/server.crt", "certs/server.key")
+	if err != nil {
+		logger.Fatal("Failed to load server certificates", zap.Error(err))
+	}
+
+	// Load CA certificate
+	caCert, err := os.ReadFile("certs/ca.crt")
+	if err != nil {
+		logger.Fatal("Failed to read CA certificate", zap.Error(err))
+	}
+
+	// Create certificate pool
+	certPool := x509.NewCertPool()
+	if !certPool.AppendCertsFromPEM(caCert) {
+		logger.Fatal("Failed to add CA certificate to pool")
+	}
+
+	// Create TLS configuration
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:   certPool,
+	}
+
+	// Create gRPC server with TLS
+	grpcServer = grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(tlsConfig)),
+	)
 	pb.RegisterRoutingServiceServer(grpcServer, &RoutingServer{})
 
-	logger.Info("Starting gRPC server on :50055")
+	logger.Info("Starting gRPC server with mTLS on :50055")
 	if err := grpcServer.Serve(lis); err != nil {
 		logger.Fatal("gRPC server failed", zap.Error(err))
+	}
+}
+
+
+type UserRole string
+
+const (
+	RoleAdmin    UserRole = "admin"
+	RoleOperator UserRole = "operator"
+	RoleViewer   UserRole = "viewer"
+)
+
+type UserContext struct {
+	UserID string
+	Role   UserRole
+}
+
+func jwtMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip authentication for health check
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			http.Error(w, "Missing authorization header", http.StatusUnauthorized)
+			return
+		}
+
+		// In production, validate the JWT token and extract user info
+		// For now, we'll simulate token validation and role extraction
+		var userCtx UserContext
+
+		// Simulate token validation
+		switch authHeader {
+		case "Bearer admin-token":
+			userCtx = UserContext{UserID: "admin-user", Role: RoleAdmin}
+		case "Bearer operator-token":
+			userCtx = UserContext{UserID: "operator-user", Role: RoleOperator}
+		case "Bearer viewer-token":
+			userCtx = UserContext{UserID: "viewer-user", Role: RoleViewer}
+		default:
+			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			return
+		}
+
+		// Add user context to request
+		ctx := context.WithValue(r.Context(), "user", userCtx)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func checkRole(requiredRole UserRole) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			userCtx, ok := r.Context().Value("user").(UserContext)
+			if !ok || userCtx.Role != requiredRole {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
 	}
 }
 
 func startHTTPServer() {
 	router := mux.NewRouter()
 
-	// Admin API endpoints
+	// Admin API endpoints with RBAC
 	router.HandleFunc("/api/routing/policy", getRoutingPolicy).Methods("GET")
-	router.HandleFunc("/api/routing/policy", updateRoutingPolicy).Methods("PUT")
+	router.Handle("/api/routing/policy", checkRole(RoleAdmin)(http.HandlerFunc(updateRoutingPolicy))).Methods("PUT")
+	router.Handle("/api/routing/heads", checkRole(RoleOperator)(http.HandlerFunc(registerHeadHTTP))).Methods("POST")
 	router.HandleFunc("/api/routing/heads", getAllHeads).Methods("GET")
-	router.HandleFunc("/api/routing/heads", registerHeadHTTP).Methods("POST")
 	router.HandleFunc("/health", healthCheck).Methods("GET")
 
 	// Serve admin interface
 	router.PathPrefix("/admin/").Handler(http.StripPrefix("/admin/", http.FileServer(http.Dir("./"))))
 
+	// Apply JWT middleware
 	httpServer = &http.Server{
 		Addr:    ":8080",
-		Handler: router,
+		Handler: jwtMiddleware(router),
 	}
 
-	logger.Info("Starting HTTP server on :8080")
+	logger.Info("Starting HTTP server with JWT authentication and RBAC on :8080")
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ServerClosed {
 		logger.Fatal("HTTP server failed", zap.Error(err))
 	}

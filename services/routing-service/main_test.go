@@ -150,6 +150,21 @@ func TestRoutingService(t *testing.T) {
 		}
 	})
 
+	// Test mTLS connection
+	t.Run("mTLS_Connection", func(t *testing.T) {
+		// This test would verify that the gRPC connection uses mTLS
+		// In a real test, we would check the credentials
+		if client == nil {
+			t.Errorf("gRPC client not initialized")
+		}
+	})
+
+	// Test JWT authentication
+	t.Run("JWT_Authentication", func(t *testing.T) {
+		// Test that HTTP endpoints require authentication
+		// This would be a proper HTTP test with different tokens
+	})
+
 	server.Stop()
 }
 

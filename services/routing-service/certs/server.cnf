@@ -1,0 +1,20 @@
+
+
+
+[req]
+distinguished_name = req_distinguished_name
+req_extensions = req_ext
+prompt = no
+
+[req_distinguished_name]
+CN = routing-server
+
+[req_ext]
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = localhost
+DNS.2 = routing-server
+IP.1 = 127.0.0.1
+
+

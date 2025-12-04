@@ -24,6 +24,9 @@ FROM alpine:latest
 # Copy the Pre-built binary file from the previous stage
 COPY --from=builder /app/routing-service /usr/local/bin/routing-service
 
+# Copy the certs
+COPY certs /certs
+
 # Expose the port the app runs on
 EXPOSE 50061 8080
 
