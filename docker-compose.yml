@@ -116,6 +116,21 @@ services:
     volumes:
       - ./certs:/certs:ro
 
+  # Routing Service
+  # --------------
+  # Dynamic routing service for head services
+  routing-service:
+    build: ./services/routing-service
+    ports:
+      - "50061:50061"  # gRPC port
+      - "8083:8080"     # HTTP admin port
+    depends_on:
+      - redis
+    networks:
+      - server_network
+    environment:
+      - REDIS_ADDR=redis:6379
+
   # Network Configuration Admin UI
   # ------------------------------
   # Web-based admin interface for managing network configuration
