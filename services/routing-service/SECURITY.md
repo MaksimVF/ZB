@@ -62,12 +62,25 @@ The service implements RBAC with the following roles:
 - `/api/routing/*` (GET) - Requires Viewer role
 - `/health` - No authentication required
 
-## 4. Future Enhancements
+## 4. Webhook Security
 
-- Implement proper JWT token validation
+The service implements enhanced security for webhook endpoints:
+
+### Authentication
+- Webhooks require JWT tokens with the prefix "webhook-" (e.g., "Bearer webhook-token")
+- Application signatures are validated using the "X-App-Signature" header with prefix "app-sig-"
+
+### Endpoint Protection
+- `/webhook/head-status` - Requires webhook JWT token and application signature
+- `/webhook/routing-decision` - Requires webhook JWT token and application signature
+
+## 5. Future Enhancements
+
+- Implement proper JWT token validation with cryptographic verification
 - Add token expiration and refresh
 - Integrate with OAuth2/SSO providers
 - Implement audit logging
+- Add IP whitelisting for webhook sources
 
 ## Certificate Management
 
