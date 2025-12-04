@@ -42,6 +42,9 @@ var (
 	routingCache = make(map[string]string) // Cache for routing decisions
 	cacheMutex   sync.RWMutex
 
+	// External service integration
+	externalServiceClient *http.Client
+
 	// Prometheus metrics
 	routingDecisions = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -94,6 +97,15 @@ var (
 			Help: "Total number of cache misses",
 		},
 	)
+
+	// External service metrics
+	externalServiceCalls = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "external_service_calls_total",
+			Help: "Total number of external service calls",
+		},
+		[]string{"service", "status"},
+	)
 )
 
 type HeadService struct {
@@ -138,6 +150,7 @@ func main() {
 		httpRequests,
 		cacheHits,
 		cacheMisses,
+		externalServiceCalls,
 	)
 
 	// Initialize Redis client
@@ -158,6 +171,11 @@ func main() {
 		EnableLoadBalancing: true,
 		EnableModelSpecific: true,
 		StrategyConfig:    make(map[string]string),
+	}
+
+	// Initialize external service client
+	externalServiceClient = &http.Client{
+		Timeout: 10 * time.Second,
 	}
 
 	// Start gRPC server
@@ -306,6 +324,10 @@ func startHTTPServer() {
 	router.HandleFunc("/api/routing/heads", getAllHeads).Methods("GET")
 	router.HandleFunc("/health", healthCheck).Methods("GET")
 
+	// Webhook endpoints
+	router.HandleFunc("/webhook/head-status", handleHeadStatusWebhook).Methods("POST")
+	router.HandleFunc("/webhook/routing-decision", handleRoutingDecisionWebhook).Methods("POST")
+
 	// Serve admin interface
 	router.PathPrefix("/admin/").Handler(http.StripPrefix("/admin/", http.FileServer(http.Dir("./"))))
 
@@ -318,7 +340,7 @@ func startHTTPServer() {
 		Handler: jwtMiddleware(router),
 	}
 
-	logger.Info("Starting HTTP server with JWT authentication, RBAC, and Prometheus metrics on :8080")
+	logger.Info("Starting HTTP server with JWT authentication, RBAC, Prometheus metrics, and webhook support on :8080")
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ServerClosed {
 		logger.Fatal("HTTP server failed", zap.Error(err))
 	}
@@ -344,6 +366,87 @@ func waitForShutdown() {
 
 	logger.Info("Shutdown complete")
 }
+
+// Webhook handlers
+func handleHeadStatusWebhook(w http.ResponseWriter, r *http.Request) {
+	var webhookData struct {
+		HeadID     string `json:"head_id"`
+		Status     string `json:"status"`
+		CurrentLoad int32  `json:"current_load"`
+		Timestamp  int64  `json:"timestamp"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&webhookData); err != nil {
+		http.Error(w, "Invalid webhook payload", http.StatusBadRequest)
+		return
+	}
+
+	// Process the webhook
+	err := processHeadStatusUpdate(webhookData.HeadID, webhookData.Status, webhookData.CurrentLoad, webhookData.Timestamp)
+	if err != nil {
+		http.Error(w, "Failed to process webhook", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, "Webhook processed successfully")
+}
+
+func handleRoutingDecisionWebhook(w http.ResponseWriter, r *http.Request) {
+	var webhookData struct {
+		ModelType       string            `json:"model_type"`
+		RegionPreference string            `json:"region_preference"`
+		RoutingStrategy  string            `json:"routing_strategy"`
+		Metadata        map[string]string `json:"metadata"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&webhookData); err != nil {
+		http.Error(w, "Invalid webhook payload", http.StatusBadRequest)
+		return
+	}
+
+	// Process the routing decision request
+	decision, err := makeRoutingDecisionFromWebhook(webhookData.ModelType, webhookData.RegionPreference, webhookData.RoutingStrategy, webhookData.Metadata)
+	if err != nil {
+		http.Error(w, "Failed to make routing decision", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(decision)
+}
+
+func processHeadStatusUpdate(headID, status string, currentLoad int32, timestamp int64) error {
+	// Update head status in the system
+	_, err := (&RoutingServer{}).UpdateHeadStatus(context.Background(), &pb.UpdateHeadStatusRequest{
+		HeadId:      headID,
+		Status:      status,
+		CurrentLoad: currentLoad,
+		Timestamp:   timestamp,
+	})
+	return err
+}
+
+func makeRoutingDecisionFromWebhook(modelType, regionPreference, routingStrategy string, metadata map[string]string) (map[string]interface{}, error) {
+	// Make a routing decision based on webhook data
+	resp, err := (&RoutingServer{}).GetRoutingDecision(context.Background(), &pb.GetRoutingDecisionRequest{
+		ModelType:       modelType,
+		RegionPreference: regionPreference,
+		RoutingStrategy: routingStrategy,
+		Metadata:        metadata,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"head_id":       resp.HeadId,
+		"endpoint":      resp.Endpoint,
+		"strategy_used": resp.StrategyUsed,
+		"reason":        resp.Reason,
+		"metadata":      resp.Metadata,
+	}, nil
 
 // gRPC Methods
 
@@ -821,5 +924,47 @@ func applyHybridStrategy(heads []HeadService, req *pb.GetRoutingDecisionRequest)
 	}
 
 	return applyLeastLoadedStrategy(heads)
+}
+
+// External service integration
+func callExternalService(serviceName, endpoint string, payload interface{}) ([]byte, error) {
+	startTime := time.Now()
+
+	// Convert payload to JSON
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		externalServiceCalls.WithLabelValues(serviceName, "error").Inc()
+		return nil, fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	// Make HTTP request to external service
+	req, err := http.NewRequest("POST", endpoint, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		externalServiceCalls.WithLabelValues(serviceName, "error").Inc()
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := externalServiceClient.Do(req)
+	if err != nil {
+		externalServiceCalls.WithLabelValues(serviceName, "error").Inc()
+		return nil, fmt.Errorf("external service request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		externalServiceCalls.WithLabelValues(serviceName, "error").Inc()
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	// Record metrics
+	status := "success"
+	if resp.StatusCode >= 400 {
+		status = "error"
+	}
+	externalServiceCalls.WithLabelValues(serviceName, status).Inc()
+
+	return body, nil
 }
 
