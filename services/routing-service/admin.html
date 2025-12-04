@@ -1,0 +1,296 @@
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Routing Service Admin</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        h1, h2 {
+            color: #333;
+        }
+        .section {
+            margin-bottom: 30px;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background: #fafafa;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input, select, textarea {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        .head-list {
+            list-style: none;
+            padding: 0;
+        }
+        .head-item {
+            padding: 10px;
+            margin-bottom: 10px;
+            background: white;
+            border-radius: 4px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .status-active {
+            color: #4CAF50;
+        }
+        .status-draining {
+            color: #FF9800;
+        }
+        .status-offline {
+            color: #F44336;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Routing Service Administration</h1>
+
+        <div class="section">
+            <h2>Routing Policy Configuration</h2>
+            <form id="policyForm">
+                <div class="form-group">
+                    <label for="defaultStrategy">Default Strategy:</label>
+                    <select id="defaultStrategy" name="defaultStrategy">
+                        <option value="round_robin">Round Robin</option>
+                        <option value="least_loaded">Least Loaded</option>
+                        <option value="geo_preferred">Geo Preferred</option>
+                        <option value="model_specific">Model Specific</option>
+                        <option value="hybrid">Hybrid</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="enableGeoRouting" name="enableGeoRouting">
+                        Enable Geographic Routing
+                    </label>
+                </div>
+
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="enableLoadBalancing" name="enableLoadBalancing">
+                        Enable Load Balancing
+                    </label>
+                </div>
+
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="enableModelSpecific" name="enableModelSpecific">
+                        Enable Model-Specific Routing
+                    </label>
+                </div>
+
+                <div class="form-group">
+                    <label for="strategyConfig">Strategy Configuration (JSON):</label>
+                    <textarea id="strategyConfig" name="strategyConfig" rows="4"></textarea>
+                </div>
+
+                <button type="submit">Update Policy</button>
+            </form>
+        </div>
+
+        <div class="section">
+            <h2>Head Services</h2>
+            <div id="headList" class="head-list">
+                <!-- Head services will be loaded here -->
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Register New Head</h2>
+            <form id="registerHeadForm">
+                <div class="form-group">
+                    <label for="headId">Head ID:</label>
+                    <input type="text" id="headId" name="headId" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="endpoint">Endpoint:</label>
+                    <input type="text" id="endpoint" name="endpoint" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="region">Region:</label>
+                    <input type="text" id="region" name="region" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="modelType">Model Type:</label>
+                    <input type="text" id="modelType" name="modelType" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="version">Version:</label>
+                    <input type="text" id="version" name="version" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="metadata">Metadata (JSON):</label>
+                    <textarea id="metadata" name="metadata" rows="3"></textarea>
+                </div>
+
+                <button type="submit">Register Head</button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Load initial data
+            loadRoutingPolicy();
+            loadHeadServices();
+
+            // Handle form submissions
+            document.getElementById('policyForm').addEventListener('submit', updateRoutingPolicy);
+            document.getElementById('registerHeadForm').addEventListener('submit', registerHead);
+        });
+
+        function loadRoutingPolicy() {
+            fetch('/api/routing/policy')
+                .then(response => response.json())
+                .then(policy => {
+                    document.getElementById('defaultStrategy').value = policy.default_strategy;
+                    document.getElementById('enableGeoRouting').checked = policy.enable_geo_routing;
+                    document.getElementById('enableLoadBalancing').checked = policy.enable_load_balancing;
+                    document.getElementById('enableModelSpecific').checked = policy.enable_model_specific;
+                    document.getElementById('strategyConfig').value = JSON.stringify(policy.strategy_config, null, 2);
+                })
+                .catch(error => console.error('Error loading policy:', error));
+        }
+
+        function updateRoutingPolicy(event) {
+            event.preventDefault();
+
+            const policy = {
+                default_strategy: document.getElementById('defaultStrategy').value,
+                enable_geo_routing: document.getElementById('enableGeoRouting').checked,
+                enable_load_balancing: document.getElementById('enableLoadBalancing').checked,
+                enable_model_specific: document.getElementById('enableModelSpecific').checked,
+                strategy_config: JSON.parse(document.getElementById('strategyConfig').value || '{}')
+            };
+
+            fetch('/api/routing/policy', {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(policy),
+            })
+            .then(response => {
+                if (response.ok) {
+                    alert('Policy updated successfully');
+                } else {
+                    alert('Failed to update policy');
+                }
+            })
+            .catch(error => console.error('Error updating policy:', error));
+        }
+
+        function loadHeadServices() {
+            fetch('/api/routing/heads')
+                .then(response => response.json())
+                .then(heads => {
+                    const headList = document.getElementById('headList');
+                    headList.innerHTML = '';
+
+                    Object.values(heads).forEach(head => {
+                        const headItem = document.createElement('div');
+                        headItem.className = 'head-item';
+
+                        let statusClass = 'status-active';
+                        if (head.status === 'draining') {
+                            statusClass = 'status-draining';
+                        } else if (head.status === 'offline') {
+                            statusClass = 'status-offline';
+                        }
+
+                        headItem.innerHTML = `
+                            <h3>${head.head_id}</h3>
+                            <p><strong>Endpoint:</strong> ${head.endpoint}</p>
+                            <p><strong>Status:</strong> <span class="${statusClass}">${head.status}</span></p>
+                            <p><strong>Load:</strong> ${head.current_load}%</p>
+                            <p><strong>Region:</strong> ${head.region}</p>
+                            <p><strong>Model Type:</strong> ${head.model_type}</p>
+                            <p><strong>Version:</strong> ${head.version}</p>
+                            <p><strong>Last Heartbeat:</strong> ${new Date(head.last_heartbeat * 1000).toLocaleString()}</p>
+                        `;
+
+                        headList.appendChild(headItem);
+                    });
+                })
+                .catch(error => console.error('Error loading heads:', error));
+        }
+
+        function registerHead(event) {
+            event.preventDefault();
+
+            const head = {
+                head_id: document.getElementById('headId').value,
+                endpoint: document.getElementById('endpoint').value,
+                region: document.getElementById('region').value,
+                model_type: document.getElementById('modelType').value,
+                version: document.getElementById('version').value,
+                metadata: JSON.parse(document.getElementById('metadata').value || '{}')
+            };
+
+            fetch('/api/routing/heads', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(head),
+            })
+            .then(response => {
+                if (response.ok) {
+                    alert('Head registered successfully');
+                    loadHeadServices(); // Refresh the list
+                } else {
+                    alert('Failed to register head');
+                }
+            })
+            .catch(error => console.error('Error registering head:', error));
+        }
+    </script>
+</body>
+</html>
+
+
