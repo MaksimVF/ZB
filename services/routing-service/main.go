@@ -1,20 +1,23 @@
 
 
+
+
 package main
 
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/mux"
+	"github.com/go-redis/redis/v8"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 
@@ -23,76 +26,79 @@ import (
 
 var (
 	redisClient   *redis.Client
-	logger         *zap.Logger
-	grpcServer     *grpc.Server
-	httpServer     *http.Server
-	configMutex    sync.RWMutex
-	routingPolicy  RoutingPolicy
-	headServices   = make(map[string]HeadService)
+	logger        *zap.Logger
+	httpServer    *http.Server
+	grpcServer    *grpc.Server
+	headServices  = make(map[string]HeadService)
+	routingPolicy RoutingPolicy
+	configMutex   sync.RWMutex
 )
-
-type RoutingPolicy struct {
-	DefaultStrategy      string            `json:"default_strategy"`
-	EnableGeoRouting     bool              `json:"enable_geo_routing"`
-	EnableLoadBalancing  bool              `json:"enable_load_balancing"`
-	EnableModelSpecific  bool              `json:"enable_model_specific"`
-	StrategyConfig       map[string]string `json:"strategy_config"`
-}
 
 type HeadService struct {
 	HeadID        string            `json:"head_id"`
 	Endpoint      string            `json:"endpoint"`
 	Status        string            `json:"status"`
 	CurrentLoad   int32             `json:"current_load"`
-	LastHeartbeat int64             `json:"last_heartbeat"`
 	Region        string            `json:"region"`
 	ModelType     string            `json:"model_type"`
 	Version       string            `json:"version"`
 	Metadata      map[string]string `json:"metadata"`
+	LastHeartbeat int64             `json:"last_heartbeat"`
+}
+
+type RoutingPolicy struct {
+	DefaultStrategy   string            `json:"default_strategy"`
+	EnableGeoRouting  bool              `json:"enable_geo_routing"`
+	EnableLoadBalancing bool            `json:"enable_load_balancing"`
+	EnableModelSpecific bool            `json:"enable_model_specific"`
+	StrategyConfig    map[string]string `json:"strategy_config"`
 }
 
 type RoutingServer struct {
 	pb.UnimplementedRoutingServiceServer
 }
 
-func init() {
+func main() {
 	// Initialize logger
 	var err error
 	logger, err = zap.NewProduction()
 	if err != nil {
-		log.Fatalf("Failed to initialize logger: %v", err)
+		panic(err)
 	}
+	defer logger.Sync()
 
 	// Initialize Redis client
 	redisClient = redis.NewClient(&redis.Options{
 		Addr: "redis:6379",
 	})
 
-	// Load initial routing policy
-	loadRoutingPolicy()
+	// Test Redis connection
+	ctx := context.Background()
+	if err := redisClient.Ping(ctx).Err(); err != nil {
+		logger.Fatal("Failed to connect to Redis", zap.Error(err))
+	}
 
-	// Load initial head services
-	loadHeadServices()
-}
+	// Initialize default routing policy
+	routingPolicy = RoutingPolicy{
+		DefaultStrategy:   "round_robin",
+		EnableGeoRouting:  true,
+		EnableLoadBalancing: true,
+		EnableModelSpecific: true,
+		StrategyConfig:    make(map[string]string),
+	}
 
-func main() {
 	// Start gRPC server
 	go startGRPCServer()
 
-	// Start HTTP server for admin interface
+	// Start HTTP server
 	go startHTTPServer()
 
 	// Wait for shutdown signal
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
-	<-c
-
-	logger.Info("Shutting down Routing Service...")
-	shutdown()
+	waitForShutdown()
 }
 
 func startGRPCServer() {
-	lis, err := net.Listen("tcp", ":50061")
+	lis, err := net.Listen("tcp", ":50055")
 	if err != nil {
 		logger.Fatal("Failed to listen", zap.Error(err))
 	}
@@ -100,7 +106,7 @@ func startGRPCServer() {
 	grpcServer = grpc.NewServer()
 	pb.RegisterRoutingServiceServer(grpcServer, &RoutingServer{})
 
-	logger.Info("Starting gRPC server on :50061")
+	logger.Info("Starting gRPC server on :50055")
 	if err := grpcServer.Serve(lis); err != nil {
 		logger.Fatal("gRPC server failed", zap.Error(err))
 	}
@@ -130,198 +136,92 @@ func startHTTPServer() {
 	}
 }
 
-func shutdown() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Shutdown gRPC server
-	grpcServer.GracefulStop()
+func waitForShutdown() {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+	logger.Info("Shutting down...")
 
 	// Shutdown HTTP server
-	_ = httpServer.Shutdown(ctx)
-
-	logger.Info("Routing Service stopped")
-}
-
-// Load routing policy from Redis
-func loadRoutingPolicy() {
-	configMutex.Lock()
-	defer configMutex.Unlock()
-
-	ctx := context.Background()
-	result, err := redisClient.Get(ctx, "routing:policy").Result()
-	if err == redis.Nil {
-		// Default policy if not found
-		routingPolicy = RoutingPolicy{
-			DefaultStrategy:     "round_robin",
-			EnableGeoRouting:    true,
-			EnableLoadBalancing: true,
-			EnableModelSpecific: true,
-			StrategyConfig:     make(map[string]string),
-		}
-		return
-	} else if err != nil {
-		logger.Error("Failed to load routing policy", zap.Error(err))
-		return
-	}
-
-	err = json.Unmarshal([]byte(result), &routingPolicy)
-	if err != nil {
-		logger.Error("Failed to parse routing policy", zap.Error(err))
-	}
-}
-
-// Save routing policy to Redis
-func saveRoutingPolicy(policy RoutingPolicy) error {
-	configMutex.Lock()
-	defer configMutex.Unlock()
-
-	data, err := json.Marshal(policy)
-	if err != nil {
-		return err
-	}
-
-	ctx := context.Background()
-	return redisClient.Set(ctx, "routing:policy", data, 0).Err()
-}
-
-// Load head services from Redis
-func loadHeadServices() {
-	configMutex.Lock()
-	defer configMutex.Unlock()
-
-	ctx := context.Background()
-	pattern := "routing:head:*"
-	keys, err := redisClient.Keys(ctx, pattern).Result()
-	if err != nil {
-		logger.Error("Failed to load head services", zap.Error(err))
-		return
-	}
-
-	for _, key := range keys {
-		if !contains(key, ":status") && !contains(key, ":heartbeat") {
-			headID := extractHeadID(key)
-			headData, err := redisClient.Get(ctx, key).Result()
-			if err == nil {
-				var headService HeadService
-				err = json.Unmarshal([]byte(headData), &headService)
-				if err == nil {
-					headServices[headID] = headService
-				}
-			}
+	if httpServer != nil {
+		if err := httpServer.Shutdown(context.Background()); err != nil {
+			logger.Error("HTTP server shutdown error", zap.Error(err))
 		}
 	}
+
+	// Shutdown gRPC server
+	if grpcServer != nil {
+		grpcServer.GracefulStop()
+	}
+
+	logger.Info("Shutdown complete")
 }
 
-// Helper functions
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && s[len(s)-len(substr):] == substr
-}
+// gRPC Methods
 
-func extractHeadID(key string) string {
-	// Extract head_id from "routing:head:{head_id}"
-	// Simple implementation - in production use proper parsing
-	return key[len("routing:head:"):]
-}
-
-// gRPC method implementations
 func (s *RoutingServer) RegisterHead(ctx context.Context, req *pb.RegisterHeadRequest) (*pb.RegisterHeadResponse, error) {
-	headID := req.HeadId
-	headService := HeadService{
-		HeadID:    headID,
-		Endpoint:  req.Endpoint,
-		Status:    "active",
-		Region:    req.Region,
-		ModelType: req.ModelType,
-		Version:   req.Version,
-		Metadata:  req.Metadata,
+	configMutex.Lock()
+	defer configMutex.Unlock()
+
+	head := HeadService{
+		HeadID:      req.HeadId,
+		Endpoint:    req.Endpoint,
+		Status:      "active",
+		Region:      req.Region,
+		ModelType:   req.ModelType,
+		Version:     req.Version,
+		Metadata:    req.Metadata,
+		LastHeartbeat: time.Now().Unix(),
 	}
+
+	headServices[req.HeadId] = head
 
 	// Store in Redis
-	ctxRedis := context.Background()
-	headData, err := json.Marshal(headService)
+	err := storeHeadInRedis(head)
 	if err != nil {
-		return &pb.RegisterHeadResponse{Success: false, Message: "Failed to serialize head data"}, nil
+		return &pb.RegisterHeadResponse{
+			Success: false,
+			Message: "Failed to store head in Redis",
+		}, err
 	}
 
-	// Use Lua script to register head
-	luaScript := `
-	local head_data = ARGV[1]
-	local model_type = ARGV[2]
-	local region = ARGV[3]
-
-	-- Store head information
-	redis.call('SET', 'routing:head:' .. KEYS[1], head_data)
-
-	-- Add to model index
-	redis.call('SADD', 'routing:model:' .. model_type, KEYS[1])
-
-	-- Add to region index
-	redis.call('SADD', 'routing:region:' .. region, KEYS[1])
-
-	return 1
-	`
-
-	_, err = redisClient.Eval(ctxRedis, luaScript, []string{headID}, headData, req.ModelType, req.Region).Result()
-	if err != nil {
-		return &pb.RegisterHeadResponse{Success: false, Message: "Failed to register head"}, nil
-	}
-
-	// Update local cache
-	configMutex.Lock()
-	headServices[headID] = headService
-	configMutex.Unlock()
-
-	return &pb.RegisterHeadResponse{Success: true, Message: "Head registered successfully"}, nil
+	return &pb.RegisterHeadResponse{
+		Success: true,
+		Message: "Head registered successfully",
+	}, nil
 }
 
 func (s *RoutingServer) UpdateHeadStatus(ctx context.Context, req *pb.UpdateHeadStatusRequest) (*pb.UpdateHeadStatusResponse, error) {
-	headID := req.HeadId
-
-	// Update local cache
 	configMutex.Lock()
-	if headService, exists := headServices[headID]; exists {
-		headService.Status = req.Status
-		headService.CurrentLoad = req.CurrentLoad
-		headService.LastHeartbeat = req.Timestamp
-		headServices[headID] = headService
+	defer configMutex.Unlock()
+
+	head, exists := headServices[req.HeadId]
+	if !exists {
+		return &pb.UpdateHeadStatusResponse{
+			Success: false,
+			Message: "Head not found",
+		}, nil
 	}
-	configMutex.Unlock()
+
+	head.Status = req.Status
+	head.CurrentLoad = req.CurrentLoad
+	head.LastHeartbeat = req.Timestamp
+	headServices[req.HeadId] = head
 
 	// Update in Redis
-	ctxRedis := context.Background()
-	statusData, err := json.Marshal(map[string]interface{}{
-		"status":       req.Status,
-		"current_load": req.CurrentLoad,
-		"timestamp":    req.Timestamp,
-	})
+	err := updateHeadStatusInRedis(head)
 	if err != nil {
-		return &pb.UpdateHeadStatusResponse{Success: false, Message: "Failed to serialize status data"}, nil
-	}
-
-	// Use Lua script to update status
-	luaScript := `
-	local status_data = ARGV[1]
-	local timestamp = ARGV[2]
-
-	-- Store status information
-	redis.call('SET', 'routing:head:' .. KEYS[1] .. ':status', status_data)
-
-	-- Update heartbeat
-	redis.call('SET', 'routing:head:' .. KEYS[1] .. ':heartbeat', timestamp)
-
-	return 1
-	`
-
-	_, err = redisClient.Eval(ctxRedis, luaScript, []string{headID}, statusData, fmt.Sprintf("%d", req.Timestamp)).Result()
-	if err != nil {
-		return &pb.UpdateHeadStatusResponse{Success: false, Message: "Failed to update head status"}, nil
+		return &pb.UpdateHeadStatusResponse{
+			Success: false,
+			Message: "Failed to update head in Redis",
+		}, err
 	}
 
 	return &pb.UpdateHeadStatusResponse{Success: true, Message: "Head status updated successfully"}, nil
 }
 
 func (s *RoutingServer) GetRoutingDecision(ctx context.Context, req *pb.GetRoutingDecisionRequest) (*pb.GetRoutingDecisionResponse, error) {
+
 	// Implement routing decision logic based on current policy
 	// This is a simplified version - in production this would be more sophisticated
 
@@ -347,14 +247,49 @@ func (s *RoutingServer) GetRoutingDecision(ctx context.Context, req *pb.GetRouti
 		}, nil
 	}
 
-	// Simple round-robin for now
-	selectedHead = &candidates[0] // In production, implement proper routing logic
+	// Apply routing strategy based on request or default policy
+	strategy := req.RoutingStrategy
+	if strategy == "" {
+		strategy = routingPolicy.DefaultStrategy
+	}
+
+	var reason string
+	switch strategy {
+	case "round_robin":
+		selectedHead = applyRoundRobinStrategy(candidates)
+		reason = "Round-robin selection"
+	case "least_loaded":
+		selectedHead = applyLeastLoadedStrategy(candidates)
+		reason = "Least loaded selection"
+	case "geo_preferred":
+		selectedHead = applyGeoPreferredStrategy(candidates, req.RegionPreference)
+		reason = "Geo-preferred selection"
+	case "model_specific":
+		selectedHead = applyModelSpecificStrategy(candidates, req.Metadata)
+		reason = "Model-specific selection"
+	case "hybrid":
+		selectedHead = applyHybridStrategy(candidates, req)
+		reason = "Hybrid strategy selection"
+	default:
+		// Default to round-robin
+		selectedHead = applyRoundRobinStrategy(candidates)
+		reason = "Default round-robin selection"
+	}
+
+	if selectedHead == nil {
+		return &pb.GetRoutingDecisionResponse{
+			HeadId:      "",
+			Endpoint:    "",
+			StrategyUsed: strategy,
+			Reason:      "No suitable head found",
+		}, nil
+	}
 
 	return &pb.GetRoutingDecisionResponse{
 		HeadId:      selectedHead.HeadID,
 		Endpoint:    selectedHead.Endpoint,
-		StrategyUsed: routingPolicy.DefaultStrategy,
-		Reason:      "Basic round-robin selection",
+		StrategyUsed: strategy,
+		Reason:      reason,
 		Metadata:    map[string]string{"model": selectedHead.ModelType, "region": selectedHead.Region},
 	}, nil
 }
@@ -370,11 +305,11 @@ func (s *RoutingServer) GetAllHeads(ctx context.Context, req *pb.GetAllHeadsRequ
 			Endpoint:      head.Endpoint,
 			Status:        head.Status,
 			CurrentLoad:   head.CurrentLoad,
-			LastHeartbeat: head.LastHeartbeat,
 			Region:        head.Region,
 			ModelType:     head.ModelType,
 			Version:       head.Version,
 			Metadata:      head.Metadata,
+			LastHeartbeat: head.LastHeartbeat,
 		})
 	}
 
@@ -382,83 +317,84 @@ func (s *RoutingServer) GetAllHeads(ctx context.Context, req *pb.GetAllHeadsRequ
 }
 
 func (s *RoutingServer) UpdateRoutingPolicy(ctx context.Context, req *pb.UpdateRoutingPolicyRequest) (*pb.UpdateRoutingPolicyResponse, error) {
-	newPolicy := RoutingPolicy{
-		DefaultStrategy:     req.Policy.DefaultStrategy,
-		EnableGeoRouting:    req.Policy.EnableGeoRouting,
-		EnableLoadBalancing: req.Policy.EnableLoadBalancing,
-		EnableModelSpecific: req.Policy.EnableModelSpecific,
-		StrategyConfig:     req.Policy.StrategyConfig,
-	}
-
-	err := saveRoutingPolicy(newPolicy)
-	if err != nil {
-		return &pb.UpdateRoutingPolicyResponse{Success: false, Message: "Failed to save routing policy"}, nil
-	}
-
-	// Update local cache
 	configMutex.Lock()
-	routingPolicy = newPolicy
-	configMutex.Unlock()
+	defer configMutex.Unlock()
 
-	return &pb.UpdateRoutingPolicyResponse{Success: true, Message: "Routing policy updated successfully"}, nil
+	routingPolicy = RoutingPolicy{
+		DefaultStrategy:   req.DefaultStrategy,
+		EnableGeoRouting:  req.EnableGeoRouting,
+		EnableLoadBalancing: req.EnableLoadBalancing,
+		EnableModelSpecific: req.EnableModelSpecific,
+		StrategyConfig:    req.StrategyConfig,
+	}
+
+	// Store in Redis
+	err := storeRoutingPolicyInRedis(routingPolicy)
+	if err != nil {
+		return &pb.UpdateRoutingPolicyResponse{
+			Success: false,
+			Message: "Failed to store policy in Redis",
+		}, err
+	}
+
+	return &pb.UpdateRoutingPolicyResponse{
+		Success: true,
+		Message: "Routing policy updated successfully",
+	}, nil
 }
 
 func (s *RoutingServer) GetRoutingPolicy(ctx context.Context, req *pb.GetRoutingPolicyRequest) (*pb.GetRoutingPolicyResponse, error) {
 	configMutex.RLock()
 	defer configMutex.RUnlock()
 
-	policy := &pb.RoutingPolicy{
-		DefaultStrategy:     routingPolicy.DefaultStrategy,
-		EnableGeoRouting:    routingPolicy.EnableGeoRouting,
+	return &pb.GetRoutingPolicyResponse{
+		DefaultStrategy:   routingPolicy.DefaultStrategy,
+		EnableGeoRouting:  routingPolicy.EnableGeoRouting,
 		EnableLoadBalancing: routingPolicy.EnableLoadBalancing,
 		EnableModelSpecific: routingPolicy.EnableModelSpecific,
-		StrategyConfig:     routingPolicy.StrategyConfig,
-	}
-
-	return &pb.GetRoutingPolicyResponse{Policy: policy}, nil
+		StrategyConfig:    routingPolicy.StrategyConfig,
+	}, nil
 }
 
-// HTTP handlers
+// HTTP Handlers
+
 func getRoutingPolicy(w http.ResponseWriter, r *http.Request) {
 	configMutex.RLock()
 	defer configMutex.RUnlock()
 
-	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(routingPolicy)
 }
 
 func updateRoutingPolicy(w http.ResponseWriter, r *http.Request) {
-	var newPolicy RoutingPolicy
-	err := json.NewDecoder(r.Body).Decode(&newPolicy)
+	var policy RoutingPolicy
+	err := json.NewDecoder(r.Body).Decode(&policy)
 	if err != nil {
 		http.Error(w, "Invalid request payload", http.StatusBadRequest)
 		return
 	}
 
-	err = saveRoutingPolicy(newPolicy)
+	configMutex.Lock()
+	defer configMutex.Unlock()
+
+	routingPolicy = policy
+
+	// Store in Redis
+	err = storeRoutingPolicyInRedis(policy)
 	if err != nil {
-		http.Error(w, "Failed to save routing policy", http.StatusInternalServerError)
+		http.Error(w, "Failed to store policy", http.StatusInternalServerError)
 		return
 	}
 
-	// Update local cache
-	configMutex.Lock()
-	routingPolicy = newPolicy
-	configMutex.Unlock()
-
 	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(policy)
 }
 
 func getAllHeads(w http.ResponseWriter, r *http.Request) {
 	configMutex.RLock()
 	defer configMutex.RUnlock()
 
-	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(headServices)
 }
-
-
-
 
 // HTTP handler for head registration
 func registerHeadHTTP(w http.ResponseWriter, r *http.Request) {
@@ -495,7 +431,6 @@ func registerHeadHTTP(w http.ResponseWriter, r *http.Request) {
 
 func healthCheck(w http.ResponseWriter, r *http.Request) {
 
-
 	ctx := context.Background()
 	err := redisClient.Ping(ctx).Err()
 	if err != nil {
@@ -504,6 +439,142 @@ func healthCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
+	json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
+}
+
+// Redis Functions
+
+func storeHeadInRedis(head HeadService) error {
+	ctx := context.Background()
+
+	// Store head data
+	headKey := fmt.Sprintf("head:%s", head.HeadID)
+	headData := map[string]interface{}{
+		"head_id":        head.HeadID,
+		"endpoint":       head.Endpoint,
+		"status":         head.Status,
+		"current_load":   head.CurrentLoad,
+		"region":         head.Region,
+		"model_type":     head.ModelType,
+		"version":        head.Version,
+		"metadata":        head.Metadata,
+		"last_heartbeat": head.LastHeartbeat,
+	}
+
+	err := redisClient.HMSet(ctx, headKey, headData).Err()
+	if err != nil {
+		return err
+	}
+
+	// Add to model type index
+	err = redisClient.SAdd(ctx, fmt.Sprintf("model:%s:heads", head.ModelType), head.HeadID).Err()
+	if err != nil {
+		return err
+	}
+
+	// Add to region index
+	err = redisClient.SAdd(ctx, fmt.Sprintf("region:%s:heads", head.Region), head.HeadID).Err()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func updateHeadStatusInRedis(head HeadService) error {
+	ctx := context.Background()
+
+	headKey := fmt.Sprintf("head:%s", head.HeadID)
+	headData := map[string]interface{}{
+		"status":         head.Status,
+		"current_load":   head.CurrentLoad,
+		"last_heartbeat": head.LastHeartbeat,
+	}
+
+	return redisClient.HMSet(ctx, headKey, headData).Err()
+}
+
+func storeRoutingPolicyInRedis(policy RoutingPolicy) error {
+	ctx := context.Background()
+
+	policyData := map[string]interface{}{
+		"default_strategy":    policy.DefaultStrategy,
+		"enable_geo_routing":  policy.EnableGeoRouting,
+		"enable_load_balancing": policy.EnableLoadBalancing,
+		"enable_model_specific": policy.EnableModelSpecific,
+		"strategy_config":     policy.StrategyConfig,
+	}
+
+	return redisClient.HMSet(ctx, "routing:policy", policyData).Err()
+}
+
+// Routing Strategy Functions
+
+// applyRoundRobinStrategy implements round-robin load balancing
+func applyRoundRobinStrategy(heads []HeadService) *HeadService {
+	// Simple round-robin: select the first head (in production, track last used)
+	if len(heads) == 0 {
+		return nil
+	}
+	return &heads[0]
+}
+
+// applyLeastLoadedStrategy selects the head with the lowest current load
+func applyLeastLoadedStrategy(heads []HeadService) *HeadService {
+	if len(heads) == 0 {
+		return nil
+	}
+
+	// Find the head with the minimum load
+	minLoad := heads[0]
+	for _, head := range heads[1:] {
+		if head.CurrentLoad < minLoad.CurrentLoad {
+			minLoad = head
+		}
+	}
+	return &minLoad
+}
+
+// applyGeoPreferredStrategy selects a head in the preferred region
+func applyGeoPreferredStrategy(heads []HeadService, preferredRegion string) *HeadService {
+	if len(heads) == 0 {
+		return nil
+	}
+
+	// First try to find a head in the preferred region
+	for _, head := range heads {
+		if head.Region == preferredRegion {
+			return &head
+		}
+	}
+
+	// If no head in preferred region, fall back to round-robin
+	return applyRoundRobinStrategy(heads)
+}
+
+// applyModelSpecificStrategy selects based on model-specific criteria
+func applyModelSpecificStrategy(heads []HeadService, metadata map[string]string) *HeadService {
+	if len(heads) == 0 {
+		return nil
+	}
+
+	// For now, just return the first head
+	// In production, this would use model-specific criteria from metadata
+	return &heads[0]
+}
+
+// applyHybridStrategy combines multiple strategies
+func applyHybridStrategy(heads []HeadService, req *pb.GetRoutingDecisionRequest) *HeadService {
+	if len(heads) == 0 {
+		return nil
+	}
+
+	// Hybrid approach: first try geo-preferred, then least-loaded
+	geoHead := applyGeoPreferredStrategy(heads, req.RegionPreference)
+	if geoHead != nil {
+		return geoHead
+	}
+
+	return applyLeastLoadedStrategy(heads)
 }
 

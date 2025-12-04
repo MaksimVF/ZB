@@ -73,8 +73,8 @@ func TestRoutingService(t *testing.T) {
 		}
 	})
 
-	// Test GetRoutingDecision
-	t.Run("GetRoutingDecision", func(t *testing.T) {
+	// Test GetRoutingDecision with different strategies
+	t.Run("GetRoutingDecision_RoundRobin", func(t *testing.T) {
 		resp, err := client.GetRoutingDecision(context.Background(), &pb.GetRoutingDecisionRequest{
 			ClientId:        "test-client",
 			ModelType:       "llama-3",
@@ -87,6 +87,55 @@ func TestRoutingService(t *testing.T) {
 		}
 		if resp.HeadId == "" {
 			t.Errorf("GetRoutingDecision returned empty head ID")
+		}
+		if resp.StrategyUsed != "round_robin" {
+			t.Errorf("Expected round_robin strategy, got %s", resp.StrategyUsed)
+		}
+	})
+
+	t.Run("GetRoutingDecision_LeastLoaded", func(t *testing.T) {
+		// First, update head status to have different loads
+		client.UpdateHeadStatus(context.Background(), &pb.UpdateHeadStatusRequest{
+			HeadId:      "test-head-1",
+			Status:      "active",
+			CurrentLoad: 10,
+			Timestamp:    time.Now().Unix(),
+		})
+
+		resp, err := client.GetRoutingDecision(context.Background(), &pb.GetRoutingDecisionRequest{
+			ClientId:        "test-client",
+			ModelType:       "llama-3",
+			RegionPreference: "us-east-1",
+			RoutingStrategy: "least_loaded",
+			Metadata:        map[string]string{"priority": "high"},
+		})
+		if err != nil {
+			t.Errorf("GetRoutingDecision failed: %v", err)
+		}
+		if resp.HeadId == "" {
+			t.Errorf("GetRoutingDecision returned empty head ID")
+		}
+		if resp.StrategyUsed != "least_loaded" {
+			t.Errorf("Expected least_loaded strategy, got %s", resp.StrategyUsed)
+		}
+	})
+
+	t.Run("GetRoutingDecision_GeoPreferred", func(t *testing.T) {
+		resp, err := client.GetRoutingDecision(context.Background(), &pb.GetRoutingDecisionRequest{
+			ClientId:        "test-client",
+			ModelType:       "llama-3",
+			RegionPreference: "us-west-2",
+			RoutingStrategy: "geo_preferred",
+			Metadata:        map[string]string{"priority": "high"},
+		})
+		if err != nil {
+			t.Errorf("GetRoutingDecision failed: %v", err)
+		}
+		if resp.HeadId == "" {
+			t.Errorf("GetRoutingDecision returned empty head ID")
+		}
+		if resp.StrategyUsed != "geo_preferred" {
+			t.Errorf("Expected geo_preferred strategy, got %s", resp.StrategyUsed)
 		}
 	})
 
