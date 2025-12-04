@@ -1,4 +1,4 @@
-module llm-gateway-pro/services/gateway
+module github.com/MaksimVF/ZB/services/gateway
 
 go 1.21
 
@@ -11,12 +11,12 @@ require (
 	github.com/stretchr/testify v1.8.4
 )
 
-replace llm-gateway-pro/services/gateway/internal/secrets => ./internal/secrets
+replace github.com/MaksimVF/ZB/services/gateway/internal/secrets => ./internal/secrets
 
-replace llm-gateway-pro/services/gateway/internal/handlers => ./internal/handlers
+replace github.com/MaksimVF/ZB/services/gateway/internal/handlers => ./internal/handlers
 
-replace llm-gateway-pro/services/gateway/internal/billing => ./internal/billing
+replace github.com/MaksimVF/ZB/services/gateway/internal/billing => ./internal/billing
 
-replace llm-gateway-pro/services/gateway/internal/providers => ./internal/providers
+replace github.com/MaksimVF/ZB/services/gateway/internal/providers => ./internal/providers
 
-replace llm-gateway-pro/services/gateway/internal/resilience => ./internal/resilience
+replace github.com/MaksimVF/ZB/services/gateway/internal/resilience => ./internal/resilience

@@ -19,6 +19,6 @@ require (
 	gorm.io/gorm v1.25.5
 )
 
-replace llm-gateway-pro/services/auth-service/pb => ../pb
+replace github.com/MaksimVF/ZB/services/auth-service/pb => ../pb
 
 
