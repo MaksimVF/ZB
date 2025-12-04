@@ -115,3 +115,17 @@ services:
       - server_network
     volumes:
       - ./certs:/certs:ro
+
+  # Network Configuration Admin UI
+  # ------------------------------
+  # Web-based admin interface for managing network configuration
+  network-config-admin:
+    build: ./services/network-config-admin
+    ports:
+      - "8082:8080"
+    depends_on:
+      - redis
+    networks:
+      - server_network
+    environment:
+      - REDIS_ADDR=redis:6379

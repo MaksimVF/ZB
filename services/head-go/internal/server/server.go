@@ -83,22 +83,30 @@ var (
 type HeadServer struct {
     gen.UnimplementedChatServiceServer // встраиваем, чтобы не писать заглушки
     gen.UnimplementedEmbeddingServiceServer // встраиваем, чтобы не писать заглушки
-    cfg            *config.Config
-    model          *modelclient.ModelClient
-    auth           *auth.Authenticator
-    webhook        *webhook.WebhookClient
-    registry       *models.ModelRegistry
-    embedding      *embedding.EmbeddingService
-    shutdown       bool
-    shutdownMutex  sync.RWMutex
-    activeRequests int32
-    maxRequests    int
-    healthStatus   string
-    healthMutex    sync.RWMutex
+    cfg                    *config.Config
+    model                  *modelclient.ModelClient
+    auth                   *auth.Authenticator
+    webhook                *webhook.WebhookClient
+    registry               *models.ModelRegistry
+    embedding              *embedding.EmbeddingService
+    networkConfigManager   *config.NetworkConfigManager
+    shutdown               bool
+    shutdownMutex          sync.RWMutex
+    activeRequests         int32
+    maxRequests            int
+    healthStatus           string
+    healthMutex            sync.RWMutex
 }
 
-func New(cfg *config.Config) *HeadServer {
-    modelClient := modelclient.NewModelClient(cfg.ModelProxyAddr)
+func New(cfg *config.Config, networkConfigManager *config.NetworkConfigManager) *HeadServer {
+    // Get network config for model proxy address
+    networkConfig := networkConfigManager.GetConfig()
+    modelProxyAddr := networkConfig.HeadEndpoint
+    if modelProxyAddr == "" {
+        modelProxyAddr = cfg.ModelProxyAddr
+    }
+
+    modelClient := modelclient.NewModelClient(modelProxyAddr, networkConfigManager)
     return &HeadServer{
         cfg:            cfg,
         model:          modelClient,
@@ -106,6 +114,7 @@ func New(cfg *config.Config) *HeadServer {
         webhook:        webhook.NewWebhookClient(cfg.WebhookConfig),
         registry:       cfg.ModelRegistry,
         embedding:      embedding.NewEmbeddingService(cfg, modelClient),
+        networkConfigManager: networkConfigManager,
         shutdown:       false,
         activeRequests: 0,
         maxRequests:    1000, // Default max concurrent requests
@@ -278,6 +287,11 @@ func (s *HeadServer) runHealthChecks() {
                 if state != grpc.ConnectivityReady {
                     log.Printf("Model client connection state: %s", state)
                     s.SetHealthStatus("NOT_SERVING")
+                    // Try to reconnect
+                    err := s.model.reconnect(context.Background())
+                    if err != nil {
+                        log.Printf("Failed to reconnect: %v", err)
+                    }
                 } else {
                     s.SetHealthStatus("SERVING")
                 }
@@ -287,6 +301,21 @@ func (s *HeadServer) runHealthChecks() {
             active := atomic.LoadInt32(&s.activeRequests)
             if active > int32(s.maxRequests)*90/100 {
                 log.Printf("High load: %d active requests (limit: %d)", active, s.maxRequests)
+            }
+
+            // Check for configuration updates
+            if s.networkConfigManager != nil {
+                err := s.networkConfigManager.LoadConfig()
+                if err != nil {
+                    log.Printf("Failed to reload network config: %v", err)
+                } else {
+                    log.Printf("Network config reloaded successfully")
+                    // Reconnect model client with new config
+                    err := s.model.reconnect(context.Background())
+                    if err != nil {
+                        log.Printf("Failed to reconnect with new config: %v", err)
+                    }
+                }
             }
         }
     }
