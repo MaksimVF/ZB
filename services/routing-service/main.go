@@ -346,6 +346,49 @@ func jwtMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func webhookSecurityMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Validate JWT token for webhook
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			http.Error(w, "Missing authorization header", http.StatusUnauthorized)
+			httpRequests.WithLabelValues(r.Method, r.URL.Path, "401").Inc()
+			return
+		}
+
+		// In production, validate the JWT token
+		// For now, we'll check for a specific webhook token format
+		if !strings.HasPrefix(authHeader, "Bearer webhook-") {
+			http.Error(w, "Invalid webhook token", http.StatusUnauthorized)
+			httpRequests.WithLabelValues(r.Method, r.URL.Path, "401").Inc()
+			return
+		}
+
+		// Validate application signature if present
+		appSignature := r.Header.Get("X-App-Signature")
+		if appSignature == "" {
+			http.Error(w, "Missing application signature", http.StatusUnauthorized)
+			httpRequests.WithLabelValues(r.Method, r.URL.Path, "401").Inc()
+			return
+		}
+
+		// In production, validate the application signature
+		// For now, we'll check for a specific format
+		if !strings.HasPrefix(appSignature, "app-sig-") {
+			http.Error(w, "Invalid application signature", http.StatusUnauthorized)
+			httpRequests.WithLabelValues(r.Method, r.URL.Path, "401").Inc()
+			return
+		}
+
+		// Create a response recorder to capture status code
+		rec := statusRecorder{ResponseWriter: w, statusCode: 200}
+		next.ServeHTTP(&rec, r)
+
+		// Record HTTP request metrics
+		httpRequests.WithLabelValues(r.Method, r.URL.Path, fmt.Sprintf("%d", rec.statusCode)).Inc()
+	})
+}
+
 // statusRecorder is a wrapper around http.ResponseWriter that captures the status code
 type statusRecorder struct {
 	http.ResponseWriter
@@ -380,9 +423,9 @@ func startHTTPServer() {
 	router.HandleFunc("/api/routing/heads", getAllHeads).Methods("GET")
 	router.HandleFunc("/health", healthCheck).Methods("GET")
 
-	// Webhook endpoints with rate limiting
-	router.HandleFunc("/webhook/head-status", rateLimitMiddleware(handleHeadStatusWebhook)).Methods("POST")
-	router.HandleFunc("/webhook/routing-decision", rateLimitMiddleware(handleRoutingDecisionWebhook)).Methods("POST")
+	// Webhook endpoints with security and rate limiting
+	router.Handle("/webhook/head-status", webhookSecurityMiddleware(rateLimitMiddleware(http.HandlerFunc(handleHeadStatusWebhook)))).Methods("POST")
+	router.Handle("/webhook/routing-decision", webhookSecurityMiddleware(rateLimitMiddleware(http.HandlerFunc(handleRoutingDecisionWebhook)))).Methods("POST")
 
 	// Server-Sent Events (SSE) endpoints
 	router.HandleFunc("/events/head-status", handleHeadStatusEvents).Methods("GET")
