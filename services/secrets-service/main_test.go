@@ -14,7 +14,7 @@ import (
 	"github.com/hashicorp/vault/api"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	pb "llm-gateway-pro/services/secret-service/pb"
+	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
 )
 
 func setupTestEnvironment() {

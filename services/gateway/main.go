@@ -35,7 +35,7 @@ import (
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	pb "llm-gateway-pro/services/secret-service/pb"
+	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
 	"llm-gateway-pro/services/gateway/internal/handlers"
 	"llm-gateway-pro/services/gateway/internal/billing"
 	"llm-gateway-pro/services/gateway/internal/providers"

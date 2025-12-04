@@ -20,7 +20,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
-	pb "llm-gateway-pro/services/secret-service/pb"
+	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
 )
 
 var (
