@@ -20,6 +20,8 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/go-redis/redis/v8"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -35,6 +37,44 @@ var (
 	headServices  = make(map[string]HeadService)
 	routingPolicy RoutingPolicy
 	configMutex   sync.RWMutex
+
+	// Prometheus metrics
+	routingDecisions = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "routing_decisions_total",
+			Help: "Total number of routing decisions made",
+		},
+		[]string{"strategy", "model_type", "region"},
+	)
+
+	headRegistrations = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "head_registrations_total",
+			Help: "Total number of head registrations",
+		},
+	)
+
+	headStatusUpdates = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "head_status_updates_total",
+			Help: "Total number of head status updates",
+		},
+	)
+
+	activeHeads = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "active_heads",
+			Help: "Number of active heads",
+		},
+	)
+
+	httpRequests = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "http_requests_total",
+			Help: "Total number of HTTP requests",
+		},
+		[]string{"method", "endpoint", "status"},
+	)
 )
 
 type HeadService struct {
@@ -69,6 +109,15 @@ func main() {
 		panic(err)
 	}
 	defer logger.Sync()
+
+	// Initialize Prometheus metrics
+	prometheus.MustRegister(
+		routingDecisions,
+		headRegistrations,
+		headStatusUpdates,
+		activeHeads,
+		httpRequests,
+	)
 
 	// Initialize Redis client
 	redisClient = redis.NewClient(&redis.Options{
@@ -168,6 +217,7 @@ func jwtMiddleware(next http.Handler) http.Handler {
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
 			http.Error(w, "Missing authorization header", http.StatusUnauthorized)
+			httpRequests.WithLabelValues(r.Method, r.URL.Path, "401").Inc()
 			return
 		}
 
@@ -185,13 +235,31 @@ func jwtMiddleware(next http.Handler) http.Handler {
 			userCtx = UserContext{UserID: "viewer-user", Role: RoleViewer}
 		default:
 			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			httpRequests.WithLabelValues(r.Method, r.URL.Path, "401").Inc()
 			return
 		}
 
 		// Add user context to request
 		ctx := context.WithValue(r.Context(), "user", userCtx)
-		next.ServeHTTP(w, r.WithContext(ctx))
+
+		// Create a response recorder to capture status code
+		rec := statusRecorder{ResponseWriter: w, statusCode: 200}
+		next.ServeHTTP(&rec, r.WithContext(ctx))
+
+		// Record HTTP request metrics
+		httpRequests.WithLabelValues(r.Method, r.URL.Path, fmt.Sprintf("%d", rec.statusCode)).Inc()
 	})
+}
+
+// statusRecorder is a wrapper around http.ResponseWriter that captures the status code
+type statusRecorder struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.statusCode = code
+	r.ResponseWriter.WriteHeader(code)
 }
 
 func checkRole(requiredRole UserRole) func(http.Handler) http.Handler {
@@ -220,13 +288,16 @@ func startHTTPServer() {
 	// Serve admin interface
 	router.PathPrefix("/admin/").Handler(http.StripPrefix("/admin/", http.FileServer(http.Dir("./"))))
 
+	// Add Prometheus metrics endpoint
+	router.Handle("/metrics", promhttp.Handler()).Methods("GET")
+
 	// Apply JWT middleware
 	httpServer = &http.Server{
 		Addr:    ":8080",
 		Handler: jwtMiddleware(router),
 	}
 
-	logger.Info("Starting HTTP server with JWT authentication and RBAC on :8080")
+	logger.Info("Starting HTTP server with JWT authentication, RBAC, and Prometheus metrics on :8080")
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ServerClosed {
 		logger.Fatal("HTTP server failed", zap.Error(err))
 	}
@@ -281,6 +352,10 @@ func (s *RoutingServer) RegisterHead(ctx context.Context, req *pb.RegisterHeadRe
 		}, err
 	}
 
+	// Record metrics
+	headRegistrations.Inc()
+	activeHeads.Inc()
+
 	return &pb.RegisterHeadResponse{
 		Success: true,
 		Message: "Head registered successfully",
@@ -312,6 +387,9 @@ func (s *RoutingServer) UpdateHeadStatus(ctx context.Context, req *pb.UpdateHead
 			Message: "Failed to update head in Redis",
 		}, err
 	}
+
+	// Record metrics
+	headStatusUpdates.Inc()
 
 	return &pb.UpdateHeadStatusResponse{Success: true, Message: "Head status updated successfully"}, nil
 }
@@ -380,6 +458,9 @@ func (s *RoutingServer) GetRoutingDecision(ctx context.Context, req *pb.GetRouti
 			Reason:      "No suitable head found",
 		}, nil
 	}
+
+	// Record metrics
+	routingDecisions.WithLabelValues(strategy, req.ModelType, selectedHead.Region).Inc()
 
 	return &pb.GetRoutingDecisionResponse{
 		HeadId:      selectedHead.HeadID,
