@@ -756,6 +756,11 @@ func graphqlHandler() http.Handler {
 		throughput: Float!
 		retryCount: Int!
 		recoveryTime: Float!
+		recoveryAttempts: Int!
+		recoverySuccesses: Int!
+		recoveryFailures: Int!
+		recoveryLatency: Float!
+		recoveryThroughput: Float!
 	}
 
 	type RoutingDecision {
@@ -772,6 +777,10 @@ func graphqlHandler() http.Handler {
 		retryCount: Int!
 		recoveryTime: Float!
 		recoveryAttempts: Int!
+		recoverySuccesses: Int!
+		recoveryFailures: Int!
+		recoveryLatency: Float!
+		recoveryThroughput: Float!
 	}
 
 	type Query {
@@ -788,6 +797,8 @@ func graphqlHandler() http.Handler {
 		headPerformanceMetrics: [HeadPerformanceMetric!]!
 		headStatusChanges: [HeadStatusChange!]!
 		routingDecisionChanges: [RoutingDecisionChange!]!
+		headRecoveryMetrics: [HeadRecoveryMetric!]!
+		routingDecisionRecoveryMetrics: [RoutingDecisionRecoveryMetric!]!
 	}
 
 	type Mutation {
@@ -803,6 +814,8 @@ func graphqlHandler() http.Handler {
 		setCircuitBreakerResetTimeout(service: String!, resetTimeout: Int!): Boolean!
 		setRateLimitResetTimeout(ip: String!, resetTimeout: Int!): Boolean!
 		setRateLimitBurstDuration(ip: String!, burstDuration: Int!): Boolean!
+		setHeadRecoveryMetrics(headId: String!, recoveryMetrics: HeadRecoveryMetricsInput!): Boolean!
+		setRoutingDecisionRecoveryMetrics(routingDecisionId: String!, recoveryMetrics: RoutingDecisionRecoveryMetricsInput!): Boolean!
 	}
 
 	input RegisterHeadInput {
@@ -821,6 +834,24 @@ func graphqlHandler() http.Handler {
 		strategyConfig: JSON
 	}
 
+	input HeadRecoveryMetricsInput {
+		recoveryTime: Float!
+		recoveryAttempts: Int!
+		recoverySuccesses: Int!
+		recoveryFailures: Int!
+		recoveryLatency: Float!
+		recoveryThroughput: Float!
+	}
+
+	input RoutingDecisionRecoveryMetricsInput {
+		recoveryTime: Float!
+		recoveryAttempts: Int!
+		recoverySuccesses: Int!
+		recoveryFailures: Int!
+		recoveryLatency: Float!
+		recoveryThroughput: Float!
+	}
+
 	type RoutingPolicy {
 		defaultStrategy: String!
 		enableGeoRouting: Boolean!
@@ -832,6 +863,7 @@ func graphqlHandler() http.Handler {
 		policyVersion: String!
 		policyStatus: String!
 		policyMetrics: PolicyMetrics!
+		policyRecoveryMetrics: PolicyRecoveryMetrics!
 	}
 
 	type HeadStatus {
@@ -844,6 +876,7 @@ func graphqlHandler() http.Handler {
 		changeReason: String!
 		changeInitiator: String!
 		changeMetrics: HeadStatusChangeMetrics!
+		changeRecoveryMetrics: HeadStatusChangeRecoveryMetrics!
 	}
 
 	type SystemHealth {
@@ -856,6 +889,7 @@ func graphqlHandler() http.Handler {
 		throughput: Float!
 		successRate: Float!
 		systemMetrics: SystemHealthMetrics!
+		systemRecoveryMetrics: SystemRecoveryMetrics!
 	}
 
 	type CircuitBreakerStatus {
@@ -867,6 +901,7 @@ func graphqlHandler() http.Handler {
 		successCount: Int!
 		recoveryAttempts: Int!
 		circuitBreakerMetrics: CircuitBreakerMetrics!
+		circuitBreakerRecoveryMetrics: CircuitBreakerRecoveryMetrics!
 	}
 
 	type RateLimiterStatus {
@@ -878,6 +913,7 @@ func graphqlHandler() http.Handler {
 		burstDuration: Int!
 		resetTimeout: Int!
 		rateLimiterMetrics: RateLimiterMetrics!
+		rateLimiterRecoveryMetrics: RateLimiterRecoveryMetrics!
 	}
 
 	type ExternalServiceMetric {
@@ -888,6 +924,7 @@ func graphqlHandler() http.Handler {
 		throughput: Float!
 		availability: Float!
 		externalServiceMetrics: ExternalServiceMetrics!
+		externalServiceRecoveryMetrics: ExternalServiceRecoveryMetrics!
 	}
 
 	type HeadPerformanceMetric {
@@ -898,6 +935,7 @@ func graphqlHandler() http.Handler {
 		successRate: Float!
 		availability: Float!
 		headPerformanceMetrics: HeadPerformanceMetrics!
+		headPerformanceRecoveryMetrics: HeadPerformanceRecoveryMetrics!
 	}
 
 	type HeadStatusChange {
@@ -909,6 +947,7 @@ func graphqlHandler() http.Handler {
 		changeReason: String!
 		changeInitiator: String!
 		changeMetrics: HeadStatusChangeMetrics!
+		changeRecoveryMetrics: HeadStatusChangeRecoveryMetrics!
 	}
 
 	type RoutingDecisionChange {
@@ -920,6 +959,7 @@ func graphqlHandler() http.Handler {
 		changeReason: String!
 		changeInitiator: String!
 		changeMetrics: RoutingDecisionChangeMetrics!
+		changeRecoveryMetrics: RoutingDecisionChangeRecoveryMetrics!
 	}
 
 	type PolicyMetrics {
@@ -927,6 +967,7 @@ func graphqlHandler() http.Handler {
 		policyErrors: Int!
 		policySuccessRate: Float!
 		policyLatency: Float!
+		policyRecoveryMetrics: PolicyRecoveryMetrics!
 	}
 
 	type HeadStatusChangeMetrics {
@@ -934,6 +975,7 @@ func graphqlHandler() http.Handler {
 		changeSuccessRate: Float!
 		changeErrorRate: Float!
 		changeThroughput: Float!
+		changeRecoveryMetrics: HeadStatusChangeRecoveryMetrics!
 	}
 
 	type RoutingDecisionChangeMetrics {
@@ -941,6 +983,7 @@ func graphqlHandler() http.Handler {
 		changeSuccessRate: Float!
 		changeErrorRate: Float!
 		changeThroughput: Float!
+		changeRecoveryMetrics: RoutingDecisionChangeRecoveryMetrics!
 	}
 
 	type SystemHealthMetrics {
@@ -948,6 +991,7 @@ func graphqlHandler() http.Handler {
 		systemSuccessRate: Float!
 		systemErrorRate: Float!
 		systemThroughput: Float!
+		systemRecoveryMetrics: SystemRecoveryMetrics!
 	}
 
 	type CircuitBreakerMetrics {
@@ -955,6 +999,7 @@ func graphqlHandler() http.Handler {
 		circuitBreakerSuccessRate: Float!
 		circuitBreakerErrorRate: Float!
 		circuitBreakerThroughput: Float!
+		circuitBreakerRecoveryMetrics: CircuitBreakerRecoveryMetrics!
 	}
 
 	type RateLimiterMetrics {
@@ -962,6 +1007,7 @@ func graphqlHandler() http.Handler {
 		rateLimiterSuccessRate: Float!
 		rateLimiterErrorRate: Float!
 		rateLimiterThroughput: Float!
+		rateLimiterRecoveryMetrics: RateLimiterRecoveryMetrics!
 	}
 
 	type ExternalServiceMetrics {
@@ -969,6 +1015,7 @@ func graphqlHandler() http.Handler {
 		externalServiceSuccessRate: Float!
 		externalServiceErrorRate: Float!
 		externalServiceThroughput: Float!
+		externalServiceRecoveryMetrics: ExternalServiceRecoveryMetrics!
 	}
 
 	type HeadPerformanceMetrics {
@@ -976,6 +1023,99 @@ func graphqlHandler() http.Handler {
 		headPerformanceSuccessRate: Float!
 		headPerformanceErrorRate: Float!
 		headPerformanceThroughput: Float!
+		headPerformanceRecoveryMetrics: HeadPerformanceRecoveryMetrics!
+	}
+
+	type PolicyRecoveryMetrics {
+		policyRecoveryTime: Float!
+		policyRecoveryAttempts: Int!
+		policyRecoverySuccesses: Int!
+		policyRecoveryFailures: Int!
+		policyRecoveryLatency: Float!
+		policyRecoveryThroughput: Float!
+	}
+
+	type HeadStatusChangeRecoveryMetrics {
+		changeRecoveryTime: Float!
+		changeRecoveryAttempts: Int!
+		changeRecoverySuccesses: Int!
+		changeRecoveryFailures: Int!
+		changeRecoveryLatency: Float!
+		changeRecoveryThroughput: Float!
+	}
+
+	type RoutingDecisionChangeRecoveryMetrics {
+		changeRecoveryTime: Float!
+		changeRecoveryAttempts: Int!
+		changeRecoverySuccesses: Int!
+		changeRecoveryFailures: Int!
+		changeRecoveryLatency: Float!
+		changeRecoveryThroughput: Float!
+	}
+
+	type SystemRecoveryMetrics {
+		systemRecoveryTime: Float!
+		systemRecoveryAttempts: Int!
+		systemRecoverySuccesses: Int!
+		systemRecoveryFailures: Int!
+		systemRecoveryLatency: Float!
+		systemRecoveryThroughput: Float!
+	}
+
+	type CircuitBreakerRecoveryMetrics {
+		circuitBreakerRecoveryTime: Float!
+		circuitBreakerRecoveryAttempts: Int!
+		circuitBreakerRecoverySuccesses: Int!
+		circuitBreakerRecoveryFailures: Int!
+		circuitBreakerRecoveryLatency: Float!
+		circuitBreakerRecoveryThroughput: Float!
+	}
+
+	type RateLimiterRecoveryMetrics {
+		rateLimiterRecoveryTime: Float!
+		rateLimiterRecoveryAttempts: Int!
+		rateLimiterRecoverySuccesses: Int!
+		rateLimiterRecoveryFailures: Int!
+		rateLimiterRecoveryLatency: Float!
+		rateLimiterRecoveryThroughput: Float!
+	}
+
+	type ExternalServiceRecoveryMetrics {
+		externalServiceRecoveryTime: Float!
+		externalServiceRecoveryAttempts: Int!
+		externalServiceRecoverySuccesses: Int!
+		externalServiceRecoveryFailures: Int!
+		externalServiceRecoveryLatency: Float!
+		externalServiceRecoveryThroughput: Float!
+	}
+
+	type HeadPerformanceRecoveryMetrics {
+		headPerformanceRecoveryTime: Float!
+		headPerformanceRecoveryAttempts: Int!
+		headPerformanceRecoverySuccesses: Int!
+		headPerformanceRecoveryFailures: Int!
+		headPerformanceRecoveryLatency: Float!
+		headPerformanceRecoveryThroughput: Float!
+	}
+
+	type HeadRecoveryMetric {
+		headId: String!
+		recoveryTime: Float!
+		recoveryAttempts: Int!
+		recoverySuccesses: Int!
+		recoveryFailures: Int!
+		recoveryLatency: Float!
+		recoveryThroughput: Float!
+	}
+
+	type RoutingDecisionRecoveryMetric {
+		routingDecisionId: String!
+		recoveryTime: Float!
+		recoveryAttempts: Int!
+		recoverySuccesses: Int!
+		recoveryFailures: Int!
+		recoveryLatency: Float!
+		recoveryThroughput: Float!
 	}
 
 	scalar JSON
@@ -2215,6 +2355,11 @@ type CircuitBreaker struct {
 	serviceRecoveryAttempts map[string]int
 	serviceRecoverySuccesses map[string]int
 	serviceRecoveryFailures map[string]int
+	serviceRecoveryTime map[string]time.Duration
+	serviceRecoveryLatency map[string]time.Duration
+	serviceRecoveryThroughput map[string]float64
+	serviceRecoverySuccessRate map[string]float64
+	serviceRecoveryErrorRate map[string]float64
 }
 
 var circuitBreaker = &CircuitBreaker{
@@ -2233,6 +2378,11 @@ var circuitBreaker = &CircuitBreaker{
 	serviceRecoveryAttempts: make(map[string]int),
 	serviceRecoverySuccesses: make(map[string]int),
 	serviceRecoveryFailures: make(map[string]int),
+	serviceRecoveryTime: make(map[string]time.Duration),
+	serviceRecoveryLatency: make(map[string]time.Duration),
+	serviceRecoveryThroughput: make(map[string]float64),
+	serviceRecoverySuccessRate: make(map[string]float64),
+	serviceRecoveryErrorRate: make(map[string]float64),
 }
 
 func (cb *CircuitBreaker) Allow(service string) bool {
@@ -2357,6 +2507,11 @@ func (cb *CircuitBreaker) Metrics() map[string]interface{} {
 			"success_window": cb.serviceSuccessWindows[service],
 			"recovery_successes": cb.serviceRecoverySuccesses[service],
 			"recovery_failures": cb.serviceRecoveryFailures[service],
+			"recovery_time": cb.serviceRecoveryTime[service],
+			"recovery_latency": cb.serviceRecoveryLatency[service],
+			"recovery_throughput": cb.serviceRecoveryThroughput[service],
+			"recovery_success_rate": cb.serviceRecoverySuccessRate[service],
+			"recovery_error_rate": cb.serviceRecoveryErrorRate[service],
 		}
 	}
 	return metrics
@@ -2380,6 +2535,11 @@ func (cb *CircuitBreaker) Reset(service string) {
 	delete(cb.serviceRecoveryAttempts, service)
 	delete(cb.serviceRecoverySuccesses, service)
 	delete(cb.serviceRecoveryFailures, service)
+	delete(cb.serviceRecoveryTime, service)
+	delete(cb.serviceRecoveryLatency, service)
+	delete(cb.serviceRecoveryThroughput, service)
+	delete(cb.serviceRecoverySuccessRate, service)
+	delete(cb.serviceRecoveryErrorRate, service)
 	cb.halfOpen = false
 }
 
@@ -2428,6 +2588,51 @@ func (cb *CircuitBreaker) SetSuccessWindow(service string, successWindow time.Du
 	logger.Info("Setting custom circuit breaker success window", zap.String("service", service), zap.Duration("success_window", successWindow))
 }
 
+func (cb *CircuitBreaker) SetRecoveryTime(service string, recoveryTime time.Duration) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Set custom recovery time for a service
+	cb.serviceRecoveryTime[service] = recoveryTime
+	logger.Info("Setting custom circuit breaker recovery time", zap.String("service", service), zap.Duration("recovery_time", recoveryTime))
+}
+
+func (cb *CircuitBreaker) SetRecoveryLatency(service string, recoveryLatency time.Duration) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Set custom recovery latency for a service
+	cb.serviceRecoveryLatency[service] = recoveryLatency
+	logger.Info("Setting custom circuit breaker recovery latency", zap.String("service", service), zap.Duration("recovery_latency", recoveryLatency))
+}
+
+func (cb *CircuitBreaker) SetRecoveryThroughput(service string, recoveryThroughput float64) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Set custom recovery throughput for a service
+	cb.serviceRecoveryThroughput[service] = recoveryThroughput
+	logger.Info("Setting custom circuit breaker recovery throughput", zap.String("service", service), zap.Float64("recovery_throughput", recoveryThroughput))
+}
+
+func (cb *CircuitBreaker) SetRecoverySuccessRate(service string, recoverySuccessRate float64) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Set custom recovery success rate for a service
+	cb.serviceRecoverySuccessRate[service] = recoverySuccessRate
+	logger.Info("Setting custom circuit breaker recovery success rate", zap.String("service", service), zap.Float64("recovery_success_rate", recoverySuccessRate))
+}
+
+func (cb *CircuitBreaker) SetRecoveryErrorRate(service string, recoveryErrorRate float64) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Set custom recovery error rate for a service
+	cb.serviceRecoveryErrorRate[service] = recoveryErrorRate
+	logger.Info("Setting custom circuit breaker recovery error rate", zap.String("service", service), zap.Float64("recovery_error_rate", recoveryErrorRate))
+}
+
 func (cb *CircuitBreaker) SetGlobalThreshold(threshold int) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
@@ -2471,5 +2676,50 @@ func (cb *CircuitBreaker) SetGlobalSuccessWindow(successWindow time.Duration) {
 	// Set global success window
 	cb.successWindow = successWindow
 	logger.Info("Setting global circuit breaker success window", zap.Duration("success_window", successWindow))
+}
+
+func (cb *CircuitBreaker) SetGlobalRecoveryTime(recoveryTime time.Duration) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Set global recovery time
+	cb.recoveryTime = recoveryTime
+	logger.Info("Setting global circuit breaker recovery time", zap.Duration("recovery_time", recoveryTime))
+}
+
+func (cb *CircuitBreaker) SetGlobalRecoveryLatency(recoveryLatency time.Duration) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Set global recovery latency
+	cb.recoveryLatency = recoveryLatency
+	logger.Info("Setting global circuit breaker recovery latency", zap.Duration("recovery_latency", recoveryLatency))
+}
+
+func (cb *CircuitBreaker) SetGlobalRecoveryThroughput(recoveryThroughput float64) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Set global recovery throughput
+	cb.recoveryThroughput = recoveryThroughput
+	logger.Info("Setting global circuit breaker recovery throughput", zap.Float64("recovery_throughput", recoveryThroughput))
+}
+
+func (cb *CircuitBreaker) SetGlobalRecoverySuccessRate(recoverySuccessRate float64) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Set global recovery success rate
+	cb.recoverySuccessRate = recoverySuccessRate
+	logger.Info("Setting global circuit breaker recovery success rate", zap.Float64("recovery_success_rate", recoverySuccessRate))
+}
+
+func (cb *CircuitBreaker) SetGlobalRecoveryErrorRate(recoveryErrorRate float64) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Set global recovery error rate
+	cb.recoveryErrorRate = recoveryErrorRate
+	logger.Info("Setting global circuit breaker recovery error rate", zap.Float64("recovery_error_rate", recoveryErrorRate))
 }
 
