@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -32,6 +33,7 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	"github.com/MaksimVF/ZB/services/routing-service/middleware"
+	"github.com/MaksimVF/ZB/services/routing-service/retry"
 	pb "github.com/MaksimVF/ZB/gen/proto"
 )
 
@@ -2363,47 +2365,67 @@ func callExternalService(serviceName, endpoint string, payload interface{}) ([]b
 		return nil, fmt.Errorf("circuit breaker open for service %s", serviceName)
 	}
 
-	// Convert payload to JSON
-	payloadBytes, err := json.Marshal(payload)
+	// Define retry configuration
+	retryConfig := retry.DefaultConfig()
+	retryConfig.MaxAttempts = 3
+	retryConfig.InitialDelay = 100 * time.Millisecond
+	retryConfig.MaxDelay = 2 * time.Second
+	retryConfig.JitterFactor = 0.3
+
+	// Create a wrapper function for retry logic
+	attemptFunc := func() (interface{}, error) {
+		// Convert payload to JSON
+		payloadBytes, err := json.Marshal(payload)
+		if err != nil {
+			externalServiceCalls.WithLabelValues(serviceName, "error").Inc()
+			return nil, fmt.Errorf("failed to marshal payload: %w", err)
+		}
+
+		// Make HTTP request to external service
+		req, err := http.NewRequest("POST", endpoint, bytes.NewBuffer(payloadBytes))
+		if err != nil {
+			externalServiceCalls.WithLabelValues(serviceName, "error").Inc()
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := externalServiceClient.Do(req)
+		if err != nil {
+			externalServiceCalls.WithLabelValues(serviceName, "error").Inc()
+			circuitBreaker.Fail(serviceName)
+			return nil, fmt.Errorf("external service request failed: %w", err)
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			externalServiceCalls.WithLabelValues(serviceName, "error").Inc()
+			circuitBreaker.Fail(serviceName)
+			return nil, fmt.Errorf("failed to read response: %w", err)
+		}
+
+		// Record metrics
+		status := "success"
+		if resp.StatusCode >= 400 {
+			status = "error"
+			circuitBreaker.Fail(serviceName)
+			return nil, fmt.Errorf("external service returned status %d", resp.StatusCode)
+		} else {
+			circuitBreaker.Success(serviceName)
+		}
+		externalServiceCalls.WithLabelValues(serviceName, status).Inc()
+
+		return body, nil
+	}
+
+	// Execute with retry logic
+	result, err := retry.Do(retryConfig, attemptFunc)
 	if err != nil {
 		externalServiceCalls.WithLabelValues(serviceName, "error").Inc()
-		return nil, fmt.Errorf("failed to marshal payload: %w", err)
+		return nil, err
 	}
 
-	// Make HTTP request to external service
-	req, err := http.NewRequest("POST", endpoint, bytes.NewBuffer(payloadBytes))
-	if err != nil {
-		externalServiceCalls.WithLabelValues(serviceName, "error").Inc()
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := externalServiceClient.Do(req)
-	if err != nil {
-		externalServiceCalls.WithLabelValues(serviceName, "error").Inc()
-		circuitBreaker.Fail(serviceName)
-		return nil, fmt.Errorf("external service request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		externalServiceCalls.WithLabelValues(serviceName, "error").Inc()
-		circuitBreaker.Fail(serviceName)
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	// Record metrics
-	status := "success"
-	if resp.StatusCode >= 400 {
-		status = "error"
-		circuitBreaker.Fail(serviceName)
-	} else {
-		circuitBreaker.Success(serviceName)
-	}
-	externalServiceCalls.WithLabelValues(serviceName, status).Inc()
-
-	return body, nil
+	return result.([]byte), nil
 }
 
 // Enhanced circuit breaker implementation
