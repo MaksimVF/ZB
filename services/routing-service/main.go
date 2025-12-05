@@ -31,6 +31,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
+	"github.com/MaksimVF/ZB/services/routing-service/middleware"
 	pb "github.com/MaksimVF/ZB/gen/proto"
 )
 
@@ -99,6 +100,15 @@ var (
 			Help: "Total number of HTTP requests",
 		},
 		[]string{"method", "endpoint", "status"},
+	)
+
+	httpRequestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "http_request_duration_seconds",
+			Help:    "HTTP request latency distribution",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method", "endpoint"},
 	)
 
 	// Cache performance metrics
@@ -190,6 +200,7 @@ func main() {
 		headStatusUpdates,
 		activeHeads,
 		httpRequests,
+		httpRequestDuration,
 		cacheHits,
 		cacheMisses,
 		externalServiceCalls,
@@ -309,10 +320,14 @@ func jwtMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Start timer for request duration
+		start := time.Now()
+
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
 			http.Error(w, "Missing authorization header", http.StatusUnauthorized)
 			httpRequests.WithLabelValues(r.Method, r.URL.Path, "401").Inc()
+			httpRequestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(time.Since(start).Seconds())
 			return
 		}
 
@@ -331,6 +346,7 @@ func jwtMiddleware(next http.Handler) http.Handler {
 		default:
 			http.Error(w, "Invalid token", http.StatusUnauthorized)
 			httpRequests.WithLabelValues(r.Method, r.URL.Path, "401").Inc()
+			httpRequestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(time.Since(start).Seconds())
 			return
 		}
 
@@ -343,16 +359,21 @@ func jwtMiddleware(next http.Handler) http.Handler {
 
 		// Record HTTP request metrics
 		httpRequests.WithLabelValues(r.Method, r.URL.Path, fmt.Sprintf("%d", rec.statusCode)).Inc()
+		httpRequestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(time.Since(start).Seconds())
 	})
 }
 
 func webhookSecurityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Start timer for request duration
+		start := time.Now()
+
 		// Validate JWT token for webhook
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
 			http.Error(w, "Missing authorization header", http.StatusUnauthorized)
 			httpRequests.WithLabelValues(r.Method, r.URL.Path, "401").Inc()
+			httpRequestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(time.Since(start).Seconds())
 			return
 		}
 
@@ -361,6 +382,7 @@ func webhookSecurityMiddleware(next http.Handler) http.Handler {
 		if !strings.HasPrefix(authHeader, "Bearer webhook-") {
 			http.Error(w, "Invalid webhook token", http.StatusUnauthorized)
 			httpRequests.WithLabelValues(r.Method, r.URL.Path, "401").Inc()
+			httpRequestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(time.Since(start).Seconds())
 			return
 		}
 
@@ -369,6 +391,7 @@ func webhookSecurityMiddleware(next http.Handler) http.Handler {
 		if appSignature == "" {
 			http.Error(w, "Missing application signature", http.StatusUnauthorized)
 			httpRequests.WithLabelValues(r.Method, r.URL.Path, "401").Inc()
+			httpRequestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(time.Since(start).Seconds())
 			return
 		}
 
@@ -377,6 +400,7 @@ func webhookSecurityMiddleware(next http.Handler) http.Handler {
 		if !strings.HasPrefix(appSignature, "app-sig-") {
 			http.Error(w, "Invalid application signature", http.StatusUnauthorized)
 			httpRequests.WithLabelValues(r.Method, r.URL.Path, "401").Inc()
+			httpRequestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(time.Since(start).Seconds())
 			return
 		}
 
@@ -386,6 +410,7 @@ func webhookSecurityMiddleware(next http.Handler) http.Handler {
 
 		// Record HTTP request metrics
 		httpRequests.WithLabelValues(r.Method, r.URL.Path, fmt.Sprintf("%d", rec.statusCode)).Inc()
+		httpRequestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(time.Since(start).Seconds())
 	})
 }
 
@@ -444,6 +469,9 @@ func startHTTPServer() {
 
 	// Add Prometheus metrics endpoint
 	router.Handle("/metrics", promhttp.Handler()).Methods("GET")
+
+	// Apply middlewares
+	router.Use(middleware.AuditLoggingMiddleware)
 
 	// Apply JWT middleware
 	httpServer = &http.Server{

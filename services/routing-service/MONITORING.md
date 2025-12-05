@@ -21,6 +21,30 @@ This document describes the monitoring setup for the routing service using Prome
 ### HTTP Metrics
 
 - `http_requests_total`: Total number of HTTP requests (labeled by method, endpoint, status)
+- `http_request_duration_seconds`: HTTP request latency distribution
+
+### Cache Metrics
+
+- `cache_hits_total`: Total number of cache hits
+- `cache_misses_total`: Total number of cache misses
+
+### External Service Metrics
+
+- `external_service_calls_total`: Total number of external service calls (labeled by service, status)
+
+### System Metrics
+
+- `process_cpu_seconds_total`: CPU usage
+- `process_resident_memory_bytes`: Memory usage
+
+### Real-time Metrics
+
+- `sse_connections`: Number of active SSE connections
+- `websocket_connections`: Number of active WebSocket connections
+
+### Message Queue Metrics
+
+- `message_queue_messages_total`: Total number of message queue messages (labeled by queue, status)
 
 ## Prometheus Configuration
 
@@ -28,12 +52,38 @@ The Prometheus configuration is located in `prometheus/prometheus.yml`. It scrap
 
 ## Grafana Dashboard
 
-A Grafana dashboard configuration is provided in `grafana/dashboards/routing-service.json`. The dashboard includes:
+Two Grafana dashboard configurations are provided:
 
-1. **Routing Decisions by Strategy**: Shows the rate of routing decisions by strategy
-2. **Active Heads**: Displays the current number of active heads
-3. **HTTP Requests**: Shows the rate of HTTP requests by method and endpoint
-4. **Head Operations**: Shows the rate of head registrations and status updates
+1. **Basic Dashboard**: `grafana/dashboards/routing-service.json`
+   - Routing Decisions by Strategy
+   - Active Heads
+   - HTTP Requests
+   - Head Operations
+   - Cache Performance
+
+2. **Enhanced Dashboard**: `grafana/dashboards/routing-service-enhanced.json`
+   - All basic metrics plus:
+   - HTTP Request Latency
+   - HTTP Error Rates
+   - Routing Errors
+   - System CPU and Memory Usage
+   - Real-time Connections
+   - Message Queue Activity
+   - Routing Decisions by Model Type and Region
+   - External Service Errors and Success
+
+## Audit Logging
+
+The routing service includes audit logging for sensitive operations:
+
+- Logs to file: `/var/log/routing_audit.log`
+- Logs to Redis channel: `audit:routing:logs`
+
+Sensitive operations include:
+- Admin operations
+- Policy changes
+- Head management
+- Routing configuration
 
 ## Setup Instructions
 
@@ -57,6 +107,9 @@ The following alerts can be configured in Prometheus:
 - **HighRoutingErrors**: Alert when routing decision errors exceed a threshold
 - **LowActiveHeads**: Alert when the number of active heads falls below a threshold
 - **HighHTTPErrors**: Alert when HTTP error rates exceed a threshold
+- **HighLatency**: Alert when HTTP request latency exceeds thresholds
+- **HighMemoryUsage**: Alert when memory usage is too high
+- **HighCPUUsage**: Alert when CPU usage is too high
 
 ## Example Alert Configuration
 
@@ -81,6 +134,24 @@ groups:
     annotations:
       summary: "Low active heads"
       description: "Number of active heads is below minimum threshold"
+
+  - alert: HighHTTPLatency
+    expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) > 1
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High HTTP latency"
+      description: "95th percentile HTTP request latency is above 1 second"
+
+  - alert: HighMemoryUsage
+    expr: process_resident_memory_bytes > 1e9  # 1GB
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High memory usage"
+      description: "Memory usage exceeds 1GB"
 ```
 
 ## Monitoring Best Practices
@@ -89,6 +160,9 @@ groups:
 2. **Set appropriate alert thresholds** based on your environment
 3. **Monitor routing strategy effectiveness** to optimize performance
 4. **Track HTTP error rates** to identify API issues
+5. **Monitor system resources** (CPU, memory) to ensure service health
+6. **Review audit logs** regularly for security and compliance
+7. **Analyze latency patterns** to optimize performance
 
 
 
