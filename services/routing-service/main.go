@@ -27,7 +27,6 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/graph-gophers/graphql-go"
 	"github.com/graph-gophers/graphql-go/relay"
-	"github.com/sonh/phony"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -172,14 +171,24 @@ type HeadService struct {
 	Version       string            `json:"version"`
 	Metadata      map[string]string `json:"metadata"`
 	LastHeartbeat int64             `json:"last_heartbeat"`
+	// Optimization fields
+	LoadHistory    []int32           `json:"load_history,omitempty"` // Historical load data for prediction
+	ResponseTimes []int64           `json:"response_times,omitempty"` // Historical response times
+	Capacity      int32             `json:"capacity,omitempty"` // Maximum capacity
+	Utilization   float64           `json:"utilization,omitempty"` // Current utilization percentage
 }
 
 type RoutingPolicy struct {
-	DefaultStrategy   string            `json:"default_strategy"`
-	EnableGeoRouting  bool              `json:"enable_geo_routing"`
-	EnableLoadBalancing bool            `json:"enable_load_balancing"`
-	EnableModelSpecific bool            `json:"enable_model_specific"`
-	StrategyConfig    map[string]string `json:"strategy_config"`
+	DefaultStrategy       string            `json:"default_strategy"`
+	EnableGeoRouting      bool              `json:"enable_geo_routing"`
+	EnableLoadBalancing   bool              `json:"enable_load_balancing"`
+	EnableModelSpecific    bool              `json:"enable_model_specific"`
+	EnablePredictive       bool              `json:"enable_predictive"`
+	EnableAdaptive         bool              `json:"enable_adaptive"`
+	StrategyConfig        map[string]string `json:"strategy_config"`
+	PredictionWindow      int               `json:"prediction_window"` // Time window for predictions in minutes
+	LoadGrowthFactor      float64           `json:"load_growth_factor"` // Growth factor for load prediction
+	CapacityThreshold      float64           `json:"capacity_threshold"` // Utilization threshold for routing
 }
 
 type RoutingServer struct {
@@ -224,11 +233,16 @@ func main() {
 
 	// Initialize default routing policy
 	routingPolicy = RoutingPolicy{
-		DefaultStrategy:   "round_robin",
-		EnableGeoRouting:  true,
-		EnableLoadBalancing: true,
-		EnableModelSpecific: true,
-		StrategyConfig:    make(map[string]string),
+		DefaultStrategy:       "adaptive",
+		EnableGeoRouting:      true,
+		EnableLoadBalancing:   true,
+		EnableModelSpecific:   true,
+		EnablePredictive:      true,
+		EnableAdaptive:        true,
+		StrategyConfig:        make(map[string]string),
+		PredictionWindow:      15,            // 15-minute prediction window
+		LoadGrowthFactor:      1.1,           // 10% growth prediction
+		CapacityThreshold:     80.0,          // 80% utilization threshold
 	}
 
 	// Initialize external service client
@@ -2034,15 +2048,21 @@ func (s *RoutingServer) GetRoutingDecision(ctx context.Context, req *pb.GetRouti
 		selectedHead = applyGeoPreferredStrategy(candidates, req.RegionPreference)
 		reason = "Geo-preferred selection"
 	case "model_specific":
-		selectedHead = applyModelSpecificStrategy(candidates, req.Metadata)
-		reason = "Model-specific selection"
+		selectedHead = applyEnhancedModelSpecificStrategy(candidates, req.Metadata)
+		reason = "Enhanced model-specific selection"
+	case "predictive":
+		selectedHead = applyPredictiveLoadBalancing(candidates)
+		reason = "Predictive load balancing"
+	case "adaptive":
+		selectedHead = applyAdaptiveRouting(candidates, req)
+		reason = "Adaptive routing"
 	case "hybrid":
 		selectedHead = applyHybridStrategy(candidates, req)
 		reason = "Hybrid strategy selection"
 	default:
-		// Default to round-robin
-		selectedHead = applyRoundRobinStrategy(candidates)
-		reason = "Default round-robin selection"
+		// Default to adaptive routing for better optimization
+		selectedHead = applyAdaptiveRouting(candidates, req)
+		reason = "Default adaptive routing selection"
 	}
 
 	if selectedHead == nil {
@@ -2058,6 +2078,32 @@ func (s *RoutingServer) GetRoutingDecision(ctx context.Context, req *pb.GetRouti
 	cacheMutex.Lock()
 	routingCache[cacheKey] = selectedHead.HeadID
 	cacheMutex.Unlock()
+
+	// Update head metrics for predictive algorithms
+	updateHeadMetrics(selectedHead, req.ModelType, strategy)
+
+// updateHeadMetrics updates the head's performance metrics for predictive algorithms
+func updateHeadMetrics(head *HeadService, modelType, strategy string) {
+	// Update load history (keep last 10 samples)
+	if len(head.LoadHistory) >= 10 {
+		head.LoadHistory = head.LoadHistory[1:]
+	}
+	head.LoadHistory = append(head.LoadHistory, head.CurrentLoad)
+
+	// Update response time history (simulate response time for now)
+	responseTime := int64(50 + rand.Intn(100)) // Simulate 50-150ms response time
+	if len(head.ResponseTimes) >= 10 {
+		head.ResponseTimes = head.ResponseTimes[1:]
+	}
+	head.ResponseTimes = append(head.ResponseTimes, responseTime)
+
+	// Update utilization
+	if head.Capacity > 0 {
+		head.Utilization = float64(head.CurrentLoad) / float64(head.Capacity) * 100
+	} else {
+		head.Utilization = 0
+	}
+}
 
 	// Record metrics
 	routingDecisions.WithLabelValues(strategy, req.ModelType, selectedHead.Region).Inc()
@@ -2346,13 +2392,170 @@ func applyHybridStrategy(heads []HeadService, req *pb.GetRoutingDecisionRequest)
 		return nil
 	}
 
-	// Hybrid approach: first try geo-preferred, then least-loaded
+	// Enhanced hybrid approach with adaptive routing
+	// First try geo-preferred, then use predictive load balancing
 	geoHead := applyGeoPreferredStrategy(heads, req.RegionPreference)
 	if geoHead != nil {
+		// Check if the geo-preferred head can handle the load
+		if canHandleLoad(geoHead) {
+			return geoHead
+		}
+	}
+
+	// Use predictive load balancing
+	return applyPredictiveLoadBalancing(heads)
+}
+
+// canHandleLoad checks if a head can handle additional load
+func canHandleLoad(head *HeadService) bool {
+	// Calculate utilization percentage
+	if head.Capacity == 0 {
+		return true // If capacity not set, assume it can handle load
+	}
+
+	utilization := float64(head.CurrentLoad) / float64(head.Capacity) * 100
+	// Use the configured capacity threshold from policy
+	threshold := routingPolicy.CapacityThreshold
+	if threshold == 0 {
+		threshold = 80.0 // Default to 80% if not configured
+	}
+	return utilization < threshold
+}
+
+// applyPredictiveLoadBalancing selects a head based on predicted future load
+func applyPredictiveLoadBalancing(heads []HeadService) *HeadService {
+	if len(heads) == 0 {
+		return nil
+	}
+
+	// Find the head with the best predicted future load
+	var bestHead *HeadService
+	var lowestPredictedLoad int32 = -1
+
+	for i, head := range heads {
+		// Predict future load for this head
+		predictedLoad := predictFutureLoad(head)
+
+		// Initialize with first head
+		if bestHead == nil || predictedLoad < lowestPredictedLoad {
+			bestHead = &heads[i]
+			lowestPredictedLoad = predictedLoad
+		}
+	}
+
+	return bestHead
+}
+
+// predictFutureLoad predicts future load based on historical data
+func predictFutureLoad(head HeadService) int32 {
+	// Simple moving average prediction
+	if len(head.LoadHistory) == 0 {
+		return head.CurrentLoad
+	}
+
+	// Calculate moving average (last 5 data points or all available)
+	start := 0
+	if len(head.LoadHistory) > 5 {
+		start = len(head.LoadHistory) - 5
+	}
+
+	sum := int64(0)
+	count := 0
+	for i := start; i < len(head.LoadHistory); i++ {
+		sum += int64(head.LoadHistory[i])
+		count++
+	}
+
+	if count == 0 {
+		return head.CurrentLoad
+	}
+
+	average := sum / int64(count)
+
+	// Apply growth factor from policy configuration
+	growthFactor := routingPolicy.LoadGrowthFactor
+	if growthFactor == 0 {
+		growthFactor = 1.1 // Default to 10% growth if not configured
+	}
+	predicted := int32(float64(average) * growthFactor)
+
+	// Don't predict lower than current load
+	if predicted < head.CurrentLoad {
+		return head.CurrentLoad
+	}
+
+	return predicted
+}
+
+// applyAdaptiveRouting selects a head based on real-time conditions and performance
+func applyAdaptiveRouting(heads []HeadService, req *pb.GetRoutingDecisionRequest) *HeadService {
+	if len(heads) == 0 {
+		return nil
+	}
+
+	// First check for model-specific requirements
+	modelHead := applyEnhancedModelSpecificStrategy(heads, req.Metadata)
+	if modelHead != nil && canHandleLoad(modelHead) {
+		return modelHead
+	}
+
+	// Check geo-preference
+	geoHead := applyGeoPreferredStrategy(heads, req.RegionPreference)
+	if geoHead != nil && canHandleLoad(geoHead) {
 		return geoHead
 	}
 
-	return applyLeastLoadedStrategy(heads)
+	// Use predictive load balancing
+	return applyPredictiveLoadBalancing(heads)
+}
+
+// applyEnhancedModelSpecificStrategy selects based on detailed model-specific criteria
+func applyEnhancedModelSpecificStrategy(heads []HeadService, metadata map[string]string) *HeadService {
+	if len(heads) == 0 {
+		return nil
+	}
+
+	// Extract model-specific requirements from metadata
+	modelVersion := metadata["model_version"]
+	modelSize := metadata["model_size"]
+	requiredCapabilities := metadata["capabilities"]
+
+	// Score heads based on model compatibility
+	var bestHead *HeadService
+	var highestScore int
+
+	for i, head := range heads {
+		score := 0
+
+		// Check version compatibility
+		if head.Version == modelVersion {
+			score += 3
+		} else if strings.HasPrefix(head.Version, modelVersion) {
+			score += 2
+		}
+
+		// Check capacity for model size
+		if head.Metadata["max_model_size"] >= modelSize {
+			score += 2
+		}
+
+		// Check required capabilities
+		if strings.Contains(head.Metadata["capabilities"], requiredCapabilities) {
+			score += 2
+		}
+
+		// Check current load
+		if canHandleLoad(&head) {
+			score += 1
+		}
+
+		if score > highestScore {
+			bestHead = &heads[i]
+			highestScore = score
+		}
+	}
+
+	return bestHead
 }
 
 // External service integration

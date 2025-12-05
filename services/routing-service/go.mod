@@ -1,6 +1,3 @@
-
-
-
 module github.com/MaksimVF/ZB/services/routing-service
 
 go 1.21
@@ -12,8 +9,4 @@ require (
 	google.golang.org/grpc v1.44.0
 )
 
-replace (
-	github.com/MaksimVF/ZB => ../../..
-)
-
-
+replace github.com/MaksimVF/ZB => ../../..
