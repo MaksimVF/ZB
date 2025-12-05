@@ -77,8 +77,8 @@
 - [x] Add webhook security with JWT and application signature validation
 
 ### 5.2 Resilience
-- [ ] Add retry logic
-- [ ] Implement circuit breakers
+- [x] Add retry logic
+- [x] Implement circuit breakers
 - [x] Add rate limiting for webhook endpoints
 
 ### 5.3 Optimization
