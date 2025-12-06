@@ -16,6 +16,7 @@ const RateLimits = lazy(() => import('./pages/RateLimits'))
 const Logs = lazy(() => import('./pages/Logs'))
 const Revenue = lazy(() => import('./pages/Revenue'))
 const Routing = lazy(() => import('./pages/Routing'))
+const Models = lazy(() => import('./pages/Models'))
 const Login = lazy(() => import('./pages/Login'))
 
 function App() {
@@ -91,6 +92,11 @@ function App() {
               <Route path="/admin/routing" element={
                 <Suspense fallback={<div>Loading...</div>}>
                   <PrivateRoute><Routing /></PrivateRoute>
+                </Suspense>
+              } />
+              <Route path="/admin/models" element={
+                <Suspense fallback={<div>Loading...</div>}>
+                  <PrivateRoute><Models /></PrivateRoute>
                 </Suspense>
               } />
             </Routes>
