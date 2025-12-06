@@ -61,6 +61,39 @@ export default function Secrets() {
                 </div>
               </div>
             ))}
+
+            {/* Telegram Token Section */}
+            <div className="bg-gray-50 dark:bg-gray-700 p-6 rounded-xl">
+              <h3 className="text-xl font-bold mb-4 dark:text-white">Telegram Bot Token</h3>
+
+              <div className="mb-4">
+                <label className="block text-gray-700 dark:text-gray-300 mb-2">Telegram Bot Token</label>
+                <input
+                  type="text"
+                  {...register('TELEGRAM_BOT_TOKEN', {
+                    required: 'Telegram Bot Token обязателен'
+                  })}
+                  className="w-full p-3 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-600 dark:text-white"
+                />
+                {errors['TELEGRAM_BOT_TOKEN'] && (
+                  <p className="text-red-500 text-sm mt-1">{errors['TELEGRAM_BOT_TOKEN'].message}</p>
+                )}
+              </div>
+
+              <div className="mb-4">
+                <label className="block text-gray-700 dark:text-gray-300 mb-2">Admin Chat ID</label>
+                <input
+                  type="text"
+                  {...register('ADMIN_CHAT_ID', {
+                    required: 'Admin Chat ID обязателен'
+                  })}
+                  className="w-full p-3 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-600 dark:text-white"
+                />
+                {errors['ADMIN_CHAT_ID'] && (
+                  <p className="text-red-500 text-sm mt-1">{errors['ADMIN_CHAT_ID'].message}</p>
+                )}
+              </div>
+            </div>
           </div>
 
           <button
