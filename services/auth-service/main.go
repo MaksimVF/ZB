@@ -14,8 +14,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/golang-jwt/jwt/v5"
@@ -143,6 +145,7 @@ func main() {
 	}
 
 	r := mux.NewRouter()
+    r.Use(securityHeadersMiddleware)
 	r.HandleFunc("/register", Register).Methods("POST")
 	r.HandleFunc("/login", rateLimitMiddleware(Login)).Methods("POST")
 	r.HandleFunc("/me", AuthMiddleware(Me)).Methods("GET")
@@ -214,7 +217,7 @@ func Register(w http.ResponseWriter, r *http.Request) {
 
 	// Validate email
 	if !isValidEmail(req.Email) {
-		logger.Warn().Str("email", req.Email).Msg("Invalid email format")
+		logger.Warn().Str("email", logSafeEmail(req.Email)).Msg("Invalid email format")
 		http.Error(w, InvalidEmailError, 400)
 		httpDuration.WithLabelValues("POST", "/register", "400").Observe(time.Since(start).Seconds())
 		return
@@ -231,7 +234,7 @@ func Register(w http.ResponseWriter, r *http.Request) {
 	// Check if user already exists
 	var existingUser User
 	if err := db.Where("email = ?", req.Email).First(&existingUser).Error; err == nil {
-		logger.Warn().Str("email", req.Email).Msg("User already exists")
+		logger.Warn().Str("email", logSafeEmail(req.Email)).Msg("User already exists")
 		http.Error(w, "user already exists", 409)
 		httpDuration.WithLabelValues("POST", "/register", "409").Observe(time.Since(start).Seconds())
 		return
@@ -411,6 +414,60 @@ func createAPIKeyForUser(userID, name string) {
 	}
 }
 
+func maskAPIKey(key string) string {
+	if len(key) < 8 {
+		return "****"
+	}
+	return key[:4] + strings.Repeat("*", len(key)-8) + key[len(key)-4:]
+}
+
+func logSafeEmail(email string) string {
+	if email == "" {
+		return ""
+	}
+	parts := strings.Split(email, "@")
+	if len(parts) != 2 {
+		return "invalid-email"
+	}
+	username := parts[0]
+	domain := parts[1]
+
+	if len(username) <= 3 {
+		return username + "@" + domain
+	}
+	return username[:2] + strings.Repeat("*", len(username)-2) + "@" + domain
+}
+
+// Security headers middleware
+func securityHeadersMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Content Security Policy
+		w.Header().Set("Content-Security-Policy",
+			"default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;")
+
+		// XSS Protection
+		w.Header().Set("X-XSS-Protection", "1; mode=block")
+
+		// Clickjacking protection
+		w.Header().Set("X-Frame-Options", "DENY")
+
+		// MIME type sniffing protection
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+
+		// Referrer Policy
+		w.Header().Set("Referrer-Policy", "no-referrer")
+
+		// Permissions Policy
+		w.Header().Set("Permissions-Policy",
+			"geolocation=(), microphone=(), camera=(), payment=()")
+
+		// Strict Transport Security
+		w.Header().Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 func getUserAPIKeys(userID string) []map[string]interface{} {
 	var keys []APIKey
 	if err := db.Where("user_id = ?", userID).Find(&keys).Error; err != nil {
@@ -423,7 +480,7 @@ func getUserAPIKeys(userID string) []map[string]interface{} {
 		result = append(result, map[string]interface{}{
 			"id":      k.ID,
 			"name":    k.Name,
-			"key":     k.Key,
+			"key":     maskAPIKey(k.Key), // Mask the key
 			"prefix":  k.Prefix,
 			"created": k.Created,
 		})
@@ -560,16 +617,37 @@ func HealthCheck(w http.ResponseWriter, r *http.Request) {
 
 // === Helper Functions ===
 func isValidEmail(email string) bool {
-	// Simple email validation
-	return strings.Contains(email, "@") && len(email) > 5
+	// RFC 5322 compliant regex
+	emailRegex := `^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`
+	matched, err := regexp.MatchString(emailRegex, email)
+	return matched && err == nil
 }
 
 func isStrongPassword(password string) bool {
-	// Simple password strength check
-	return len(password) >= 8 &&
-		strings.ContainsAny(password, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") &&
-		strings.ContainsAny(password, "abcdefghijklmnopqrstuvwxyz") &&
-		strings.ContainsAny(password, "0123456789")
+	// Enhanced password strength check
+	if len(password) < 12 {
+		return false
+	}
+
+	hasUpper := false
+	hasLower := false
+	hasNumber := false
+	hasSpecial := false
+
+	for _, char := range password {
+		switch {
+		case unicode.IsUpper(char):
+			hasUpper = true
+		case unicode.IsLower(char):
+			hasLower = true
+		case unicode.IsNumber(char):
+			hasNumber = true
+		case unicode.IsPunct(char) || unicode.IsSymbol(char):
+			hasSpecial = true
+		}
+	}
+
+	return hasUpper && hasLower && hasNumber && hasSpecial
 }
 
 func loadTLSCredentials() (credentials.TransportCredentials, error) {
