@@ -98,15 +98,34 @@ func logAuditToFile(r *http.Request) {
 	// For POST/PUT requests, log body content (truncated)
 	if r.Method == http.MethodPost || r.Method == http.MethodPut {
 		body := make([]byte, 1024) // Limit to 1KB
-		_, _ = r.Body.Read(body)
+		n, err := r.Body.Read(body)
+		if err != nil && err != io.EOF {
+			logger.Error("Failed to read request body for audit log", zap.Error(err))
+		}
 		r.Body.Close()
-		r.Body = io.NopCloser(bytes.NewBuffer(body))
-		entry.Body = string(body)
+		r.Body = io.NopCloser(io.MultiReader(bytes.NewBuffer(body[:n]), r.Body))
+
+		// Mask sensitive information in body
+		entry.Body = maskSensitiveData(string(body[:n]))
+	}
+
+	// Validate audit log entry
+	if err := validateAuditLogEntry(entry); err != nil {
+		logger.Error("Invalid audit log entry", zap.Error(err))
+		return
 	}
 
 	// Write to log file
-	logEntry, _ := json.Marshal(entry)
-	fmt.Fprintln(auditLogFile, string(logEntry))
+	logEntry, err := json.Marshal(entry)
+	if err != nil {
+		logger.Error("Failed to marshal audit log entry", zap.Error(err))
+		return
+	}
+
+	_, err = fmt.Fprintln(auditLogFile, string(logEntry))
+	if err != nil {
+		logger.Error("Failed to write audit log to file", zap.Error(err))
+	}
 }
 
 // logAuditToRedis logs audit information to Redis
@@ -139,6 +158,58 @@ func logAuditToRedis(r *http.Request) {
 	if err != nil {
 		logger.Error("Failed to publish audit log to Redis", zap.Error(err))
 	}
+}
+
+// maskSensitiveData masks sensitive information in request data
+func maskSensitiveData(data string) string {
+	// Mask common sensitive patterns
+	sensitivePatterns := []string{
+		"password",
+		"api_key",
+		"secret",
+		"token",
+		"auth",
+		"authorization",
+	}
+
+	for _, pattern := range sensitivePatterns {
+		// Simple pattern matching - in production, use proper regex
+		if strings.Contains(strings.ToLower(data), pattern) {
+			// Replace the value with asterisks, keeping the key structure
+			replacement := strings.ReplaceAll(data, pattern, strings.Repeat("*", len(pattern)))
+			return replacement
+		}
+	}
+
+	return data
+}
+
+// validateAuditLogEntry validates the audit log entry
+func validateAuditLogEntry(entry AuditLogEntry) error {
+	if entry.Timestamp == "" {
+		return fmt.Errorf("timestamp is required")
+	}
+
+	if entry.Method == "" {
+		return fmt.Errorf("method is required")
+	}
+
+	if entry.Path == "" {
+		return fmt.Errorf("path is required")
+	}
+
+	if entry.ClientIP == "" {
+		return fmt.Errorf("client IP is required")
+	}
+
+	// Validate that body doesn't contain sensitive information
+	if strings.Contains(strings.ToLower(entry.Body), "password") ||
+		strings.Contains(strings.ToLower(entry.Body), "api_key") ||
+		strings.Contains(strings.ToLower(entry.Body), "secret") {
+		return fmt.Errorf("body contains sensitive information")
+	}
+
+	return nil
 }
 
 // AuditLogEntry represents an audit log entry

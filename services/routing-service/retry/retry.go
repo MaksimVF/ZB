@@ -7,6 +7,8 @@ package retry
 import (
 	"math"
 	"math/rand"
+	"net"
+	"strings"
 	"time"
 )
 
@@ -62,7 +64,33 @@ func (c RetryConfig) IsRetryable(err error) bool {
 		// If no specific errors are configured, retry all errors
 		return true
 	}
-	return c.RetryableErrors[err]
+
+	// Check if the error is in the retryable list
+	if _, ok := c.RetryableErrors[err]; ok {
+		return c.RetryableErrors[err]
+	}
+
+	// Default to retrying common retryable errors
+	switch err.(type) {
+	case *net.OpError, *net.DNSError, *net.AddrError:
+		return true
+	case *url.Error:
+		return true
+	default:
+		// Check error message for common retryable patterns
+		if err != nil {
+			errorStr := err.Error()
+			if strings.Contains(errorStr, "timeout") ||
+				strings.Contains(errorStr, "connection refused") ||
+				strings.Contains(errorStr, "connection reset") ||
+				strings.Contains(errorStr, "i/o timeout") ||
+				strings.Contains(errorStr, "temporary failure") {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // calculateDelay calculates the delay with exponential backoff and jitter

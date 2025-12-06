@@ -47,7 +47,7 @@ var (
 	configMutex   sync.RWMutex
 
 	// Performance optimization
-	routingCache = make(map[string]string) // Cache for routing decisions
+	routingCache = make(map[string]CacheEntry) // Cache for routing decisions
 	cacheMutex   sync.RWMutex
 
 	// External service integration
@@ -266,6 +266,9 @@ func main() {
 
 	// Start HTTP server
 	go startHTTPServer()
+
+	// Initialize cache cleanup
+	initCacheCleanup()
 
 	// Wait for shutdown signal
 	waitForShutdown()
@@ -1980,9 +1983,7 @@ func (s *RoutingServer) GetRoutingDecision(ctx context.Context, req *pb.GetRouti
 
 	// Check cache first
 	cacheKey := fmt.Sprintf("%s-%s-%s-%s", req.ModelType, req.RegionPreference, req.RoutingStrategy, req.Metadata["model"])
-	cacheMutex.RLock()
-	cachedHeadID, found := routingCache[cacheKey]
-	cacheMutex.RUnlock()
+	cachedHeadID, found := getFromCache(cacheKey)
 
 	if found {
 		// Cache hit
@@ -2075,9 +2076,7 @@ func (s *RoutingServer) GetRoutingDecision(ctx context.Context, req *pb.GetRouti
 	}
 
 	// Update cache
-	cacheMutex.Lock()
-	routingCache[cacheKey] = selectedHead.HeadID
-	cacheMutex.Unlock()
+	setInCache(cacheKey, selectedHead.HeadID)
 
 	// Update head metrics for predictive algorithms
 	updateHeadMetrics(selectedHead, req.ModelType, strategy)
@@ -3017,5 +3016,101 @@ func (cb *CircuitBreaker) SetGlobalRecoveryErrorRate(recoveryErrorRate float64) 
 	// Set global recovery error rate
 	cb.recoveryErrorRate = recoveryErrorRate
 	logger.Info("Setting global circuit breaker recovery error rate", zap.Float64("recovery_error_rate", recoveryErrorRate))
+}
+
+// Cache configuration
+var cacheConfig = CacheConfig{
+	MaxSize:        1000,           // Maximum number of cache entries
+	TTL:            5 * time.Minute, // Time-to-live for cache entries
+	CleanupInterval: 1 * time.Minute, // Interval for cache cleanup
+}
+
+// CacheConfig holds the configuration for the routing cache
+type CacheConfig struct {
+	MaxSize        int
+	TTL            time.Duration
+	CleanupInterval time.Duration
+}
+
+// CacheEntry represents a single cache entry
+type CacheEntry struct {
+	Value       string
+	CreatedAt   time.Time
+	AccessCount int
+}
+
+// Initialize cache cleanup
+func initCacheCleanup() {
+	go func() {
+		ticker := time.NewTicker(cacheConfig.CleanupInterval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			cleanupCache()
+		}
+	}()
+}
+
+// cleanupCache removes expired entries from the cache
+func cleanupCache() {
+	cacheMutex.Lock()
+	defer cacheMutex.Unlock()
+
+	now := time.Now()
+	for key, entry := range routingCache {
+		if now.Sub(entry.CreatedAt) > cacheConfig.TTL {
+			delete(routingCache, key)
+		}
+	}
+}
+
+// getFromCache retrieves a value from the cache
+func getFromCache(key string) (string, bool) {
+	cacheMutex.RLock()
+	defer cacheMutex.RUnlock()
+
+	entry, found := routingCache[key]
+	if found {
+		cacheHits.Inc()
+		return entry.Value, true
+	}
+
+	cacheMisses.Inc()
+	return "", false
+}
+
+// setInCache stores a value in the cache
+func setInCache(key, value string) {
+	cacheMutex.Lock()
+	defer cacheMutex.Unlock()
+
+	// Check if cache is full
+	if len(routingCache) >= cacheConfig.MaxSize {
+		// Remove least recently used entry
+		removeLRUEntry()
+	}
+
+	routingCache[key] = CacheEntry{
+		Value:       value,
+		CreatedAt:   time.Now(),
+		AccessCount: 0,
+	}
+}
+
+// removeLRUEntry removes the least recently used entry from the cache
+func removeLRUEntry() {
+	var oldestKey string
+	var oldestTime time.Time
+
+	for key, entry := range routingCache {
+		if oldestKey == "" || entry.CreatedAt.Before(oldestTime) {
+			oldestKey = key
+			oldestTime = entry.CreatedAt
+		}
+	}
+
+	if oldestKey != "" {
+		delete(routingCache, oldestKey)
+	}
 }
 
