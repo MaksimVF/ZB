@@ -56,6 +56,7 @@ Create a `.env` file with your configuration:
 TELEGRAM_BOT_TOKEN=your-telegram-bot-token-here
 ADMIN_CHAT_ID=your-admin-chat-id-here
 PORT=3000
+REDIS_URL=redis://localhost:6379
 ```
 
 ### 2. Installation

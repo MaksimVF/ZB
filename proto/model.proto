@@ -2,31 +2,74 @@ syntax = "proto3";
 option go_package = "./services/head-go/gen_model";
 package model;
 
+// GenRequest represents a request to generate text from a model
 message GenRequest {
+  // Unique identifier for the request
   string request_id = 1;
+
+  // Model identifier in format "provider/model_name" (e.g., "openai/gpt-4")
   string model = 2;
+
+  // List of messages for the model (alternating user/assistant format)
   repeated string messages = 3;
+
+  // Temperature parameter for response randomness (0.0 to 1.0)
   float temperature = 4;
+
+  // Maximum number of tokens to generate
   int32 max_tokens = 5;
+
+  // Whether to stream the response
   bool stream = 6;
+
+  // Optional metadata about the request
+  map<string, string> metadata = 7;
 }
 
+// GenResponse represents the response from a generation request
 message GenResponse {
+  // Unique identifier for the request (echoed from GenRequest)
   string request_id = 1;
+
+  // Generated text from the model
   string text = 2;
+
+  // Number of tokens used in the response
   int32 tokens_used = 3;
+
+  // Optional metadata about the response
+  map<string, string> metadata = 4;
+
+  // Optional error information
+  string error = 5;
 }
 
+// BatchGenRequest represents a batch of generation requests
 message BatchGenRequest {
+  // List of individual generation requests
   repeated GenRequest requests = 1;
+
+  // Optional batch metadata
+  map<string, string> batch_metadata = 2;
 }
 
+// BatchGenResponse represents the response from a batch generation request
 message BatchGenResponse {
+  // List of individual generation responses
   repeated GenResponse responses = 1;
+
+  // Optional batch metadata
+  map<string, string> batch_metadata = 2;
 }
 
+// ModelService provides methods for interacting with language models
 service ModelService {
+  // Generate a single response from a model
   rpc Generate (GenRequest) returns (GenResponse);
+
+  // Generate a streaming response from a model
   rpc GenerateStream (GenRequest) returns (stream GenResponse);
+
+  // Process multiple generation requests in a single batch
   rpc BatchGenerate (BatchGenRequest) returns (BatchGenResponse);
 }
