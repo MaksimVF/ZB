@@ -6,6 +6,7 @@
 
 import { BrowserRouter as Router, Routes, Route, Suspense, lazy } from 'react-router-dom'
 import { AuthProvider } from './context/AuthContext'
+import { NotificationProvider } from './context/NotificationContext'
 import PrivateRoute from './components/PrivateRoute'
 import ErrorBoundary from './components/ErrorBoundary'
 import { useState, useEffect } from 'react'
@@ -51,70 +52,72 @@ function App() {
 
       <ErrorBoundary>
         <AuthProvider>
-          <Router>
-            <Routes>
-              <Route path="/login" element={
-                <Suspense fallback={<div>Loading...</div>}>
-                  <Login />
-                </Suspense>
-              } />
-              <Route path="/register" element={
-                <Suspense fallback={<div>Loading...</div>}>
-                  <Register />
-                </Suspense>
-              } />
-              <Route path="/forgot-password" element={
-                <Suspense fallback={<div>Loading...</div>}>
-                  <ForgotPassword />
-                </Suspense>
-              } />
-              <Route path="/" element={
-                <Suspense fallback={<div>Loading...</div>}>
-                  <PrivateRoute><Dashboard /></PrivateRoute>
-                </Suspense>
-              } />
-              <Route path="/dashboard" element={
-                <Suspense fallback={<div>Loading...</div>}>
-                  <PrivateRoute><Dashboard /></PrivateRoute>
-                </Suspense>
-              } />
-              <Route path="/topup" element={
-                <Suspense fallback={<div>Loading...</div>}>
-                  <PrivateRoute><TopUp /></PrivateRoute>
-                </Suspense>
-              } />
-              <Route path="/usage" element={
-                <Suspense fallback={<div>Loading...</div>}>
-                  <PrivateRoute><Usage /></PrivateRoute>
-                </Suspense>
-              } />
-              <Route path="/settings" element={
-                <Suspense fallback={<div>Loading...</div>}>
-                  <PrivateRoute><Settings /></PrivateRoute>
-                </Suspense>
-              } />
-              <Route path="/history" element={
-                <Suspense fallback={<div>Loading...</div>}>
-                  <PrivateRoute><History /></PrivateRoute>
-                </Suspense>
-              } />
-              <Route path="/api-keys" element={
-                <Suspense fallback={<div>Loading...</div>}>
-                  <PrivateRoute><ApiKeys /></PrivateRoute>
-                </Suspense>
-              } />
-              <Route path="/security" element={
-                <Suspense fallback={<div>Loading...</div>}>
-                  <PrivateRoute><Security /></PrivateRoute>
-                </Suspense>
-              } />
-              <Route path="/help" element={
-                <Suspense fallback={<div>Loading...</div>}>
-                  <PrivateRoute><HelpCenter /></PrivateRoute>
-                </Suspense>
-              } />
-            </Routes>
-          </Router>
+          <NotificationProvider>
+            <Router>
+              <Routes>
+                <Route path="/login" element={
+                  <Suspense fallback={<div>Loading...</div>}>
+                    <Login />
+                  </Suspense>
+                } />
+                <Route path="/register" element={
+                  <Suspense fallback={<div>Loading...</div>}>
+                    <Register />
+                  </Suspense>
+                } />
+                <Route path="/forgot-password" element={
+                  <Suspense fallback={<div>Loading...</div>}>
+                    <ForgotPassword />
+                  </Suspense>
+                } />
+                <Route path="/" element={
+                  <Suspense fallback={<div>Loading...</div>}>
+                    <PrivateRoute><Dashboard /></PrivateRoute>
+                  </Suspense>
+                } />
+                <Route path="/dashboard" element={
+                  <Suspense fallback={<div>Loading...</div>}>
+                    <PrivateRoute><Dashboard /></PrivateRoute>
+                  </Suspense>
+                } />
+                <Route path="/topup" element={
+                  <Suspense fallback={<div>Loading...</div>}>
+                    <PrivateRoute><TopUp /></PrivateRoute>
+                  </Suspense>
+                } />
+                <Route path="/usage" element={
+                  <Suspense fallback={<div>Loading...</div>}>
+                    <PrivateRoute><Usage /></PrivateRoute>
+                  </Suspense>
+                } />
+                <Route path="/settings" element={
+                  <Suspense fallback={<div>Loading...</div>}>
+                    <PrivateRoute><Settings /></PrivateRoute>
+                  </Suspense>
+                } />
+                <Route path="/history" element={
+                  <Suspense fallback={<div>Loading...</div>}>
+                    <PrivateRoute><History /></PrivateRoute>
+                  </Suspense>
+                } />
+                <Route path="/api-keys" element={
+                  <Suspense fallback={<div>Loading...</div>}>
+                    <PrivateRoute><ApiKeys /></PrivateRoute>
+                  </Suspense>
+                } />
+                <Route path="/security" element={
+                  <Suspense fallback={<div>Loading...</div>}>
+                    <PrivateRoute><Security /></PrivateRoute>
+                  </Suspense>
+                } />
+                <Route path="/help" element={
+                  <Suspense fallback={<div>Loading...</div>}>
+                    <PrivateRoute><HelpCenter /></PrivateRoute>
+                  </Suspense>
+                } />
+              </Routes>
+            </Router>
+          </NotificationProvider>
         </AuthProvider>
       </ErrorBoundary>
     </div>
