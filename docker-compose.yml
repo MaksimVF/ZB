@@ -176,3 +176,32 @@ services:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/routing-service.json
+
+  # Telegram Bot Service
+  # -------------------
+  # Telegram bot for user registration, alerts, and TON payments
+  telegram-bot:
+    build: ./services/telegram-bot
+    ports:
+      - "3003:3000"
+    networks:
+      - client_network
+      - server_network
+    environment:
+      - TELEGRAM_BOT_TOKEN=${Telegram_Token}
+      - ADMIN_CHAT_ID=${ADMIN_CHAT_ID}
+    depends_on:
+      - secret-service
+      - head
+
+  # Telegram Mini App
+  # -----------------
+  # Web interface for Telegram Mini App
+  telegram-app:
+    build: ./ui/telegram-app
+    ports:
+      - "3004:80"
+    networks:
+      - client_network
+    depends_on:
+      - telegram-bot
