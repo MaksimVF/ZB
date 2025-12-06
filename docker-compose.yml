@@ -190,9 +190,11 @@ services:
     environment:
       - TELEGRAM_BOT_TOKEN=${Telegram_Token}
       - ADMIN_CHAT_ID=${ADMIN_CHAT_ID}
+      - REDIS_URL=redis://redis:6379
     depends_on:
       - secret-service
       - head
+      - redis
 
   # Telegram Mini App
   # -----------------
