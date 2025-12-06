@@ -146,6 +146,38 @@ export const admin = {
       handleApiError(error)
     }
   },
+  models: async () => {
+    try {
+      const response = await api.get('/admin/models')
+      return response
+    } catch (error) {
+      handleApiError(error)
+    }
+  },
+  createModel: async (model) => {
+    try {
+      const response = await api.post('/admin/models', model)
+      return response
+    } catch (error) {
+      handleApiError(error)
+    }
+  },
+  updateModel: async (model) => {
+    try {
+      const response = await api.put(`/admin/models/${model.model_id}`, model)
+      return response
+    } catch (error) {
+      handleApiError(error)
+    }
+  },
+  deleteModel: async (model_id) => {
+    try {
+      const response = await api.delete(`/admin/models/${model_id}`)
+      return response
+    } catch (error) {
+      handleApiError(error)
+    }
+  },
   login: async (username, password) => {
     try {
       const response = await api.post('/admin/login', { username, password })
