@@ -114,6 +114,38 @@ export const admin = {
       handleApiError(error)
     }
   },
+  routingPolicy: async () => {
+    try {
+      const response = await api.get('/admin/routing/policy')
+      return response
+    } catch (error) {
+      handleApiError(error)
+    }
+  },
+  updateRoutingPolicy: async (policy) => {
+    try {
+      const response = await api.put('/admin/routing/policy', policy)
+      return response
+    } catch (error) {
+      handleApiError(error)
+    }
+  },
+  headServices: async () => {
+    try {
+      const response = await api.get('/admin/routing/heads')
+      return response
+    } catch (error) {
+      handleApiError(error)
+    }
+  },
+  registerHead: async (head) => {
+    try {
+      const response = await api.post('/admin/routing/heads', head)
+      return response
+    } catch (error) {
+      handleApiError(error)
+    }
+  },
   login: async (username, password) => {
     try {
       const response = await api.post('/admin/login', { username, password })

@@ -82,6 +82,7 @@ export default function Dashboard() {
         <a href="/admin/pricing" className="bg-indigo-600 text-white p-8 rounded-2xl text-center hover:bg-indigo-700 transition text-2xl font-bold">Тарифы</a>
         <a href="/admin/secrets" className="bg-red-600 text-white p-8 rounded-2xl text-center hover:bg-red-700 transition text-2xl font-bold">Секреты</a>
         <a href="/admin/logs" className="bg-teal-600 text-white p-8 rounded-2xl text-center hover:bg-teal-700 transition text-2xl font-bold">Логи</a>
+        <a href="/admin/routing" className="bg-yellow-600 text-white p-8 rounded-2xl text-center hover:bg-yellow-700 transition text-2xl font-bold">Маршрутизация</a>
       </div>
     </div>
   )
