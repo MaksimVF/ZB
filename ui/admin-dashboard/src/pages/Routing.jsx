@@ -2,6 +2,22 @@
 import { useState, useEffect } from 'react'
 import { admin } from '../api'
 
+// Common region codes
+const REGIONS = [
+  { code: 'us', name: 'United States' },
+  { code: 'eu', name: 'Europe' },
+  { code: 'ru', name: 'Russia' },
+  { code: 'cn', name: 'China' },
+  { code: 'br', name: 'Brazil' },
+  { code: 'in', name: 'India' },
+  { code: 'jp', name: 'Japan' },
+  { code: 'au', name: 'Australia' },
+  { code: 'es', name: 'Spain' },
+  { code: 'de', name: 'Germany' },
+  { code: 'fr', name: 'France' },
+  { code: 'uk', name: 'United Kingdom' }
+]
+
 export default function Routing() {
   const [policy, setPolicy] = useState({
     default_strategy: 'round_robin',
@@ -11,6 +27,7 @@ export default function Routing() {
     strategy_config: {}
   })
   const [heads, setHeads] = useState([])
+  const [regionFilter, setRegionFilter] = useState('')
   const [newHead, setNewHead] = useState({
     head_id: '',
     endpoint: '',
@@ -19,6 +36,11 @@ export default function Routing() {
     version: '',
     metadata: {}
   })
+
+  // Filter heads by region
+  const filteredHeads = regionFilter
+    ? heads.filter(head => head.region === regionFilter)
+    : heads
 
   useEffect(() => {
     loadRoutingPolicy()
@@ -151,6 +173,26 @@ export default function Routing() {
             </div>
 
             <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Приоритет регионов (через запятую)</label>
+              <input
+                type="text"
+                name="region_priority"
+                value={policy.strategy_config?.region_priority || ''}
+                onChange={(e) => {
+                  setPolicy(prev => ({
+                    ...prev,
+                    strategy_config: {
+                      ...prev.strategy_config,
+                      region_priority: e.target.value
+                    }
+                  }))
+                }}
+                placeholder="e.g., us,eu,ru,cn,br"
+                className="w-full p-3 border border-gray-300 dark:border-gray-600 rounded-md dark:bg-gray-700 dark:text-white"
+              />
+            </div>
+
+            <div>
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Конфигурация стратегии (JSON)</label>
               <textarea
                 name="strategy_config"
@@ -183,14 +225,43 @@ export default function Routing() {
       {/* Head Services */}
       <div className="bg-white dark:bg-gray-800 p-8 rounded-2xl shadow-xl mb-8">
         <h2 className="text-3xl font-bold mb-6 dark:text-white">Сервисы Head</h2>
+
+        {/* Region filter */}
+        <div className="mb-6">
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Фильтр по региону</label>
+          <select
+            onChange={(e) => setRegionFilter(e.target.value)}
+            className="w-full max-w-xs p-3 border border-gray-300 dark:border-gray-600 rounded-md dark:bg-gray-700 dark:text-white"
+          >
+            <option value="">Все регионы</option>
+            {REGIONS.map(region => (
+              <option key={region.code} value={region.code}>
+                {region.name} ({region.code})
+              </option>
+            ))}
+          </select>
+        </div>
+
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {heads.map(head => (
+          {filteredHeads.map(head => (
             <div key={head.head_id} className="bg-gray-50 dark:bg-gray-700 p-6 rounded-xl shadow-md">
-              <h3 className="text-xl font-semibold mb-3 dark:text-white">{head.head_id}</h3>
+              {/* Show region prominently with flag */}
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-xl font-semibold dark:text-white">
+                  {head.head_id}
+                  {head.region && (
+                    <span className="ml-2 px-2 py-1 text-xs font-bold text-white bg-blue-500 rounded-full">
+                      {head.region.toUpperCase()}
+                    </span>
+                  )}
+                </h3>
+                <span className={`text-sm ${head.status === 'active' ? 'text-green-500' : head.status === 'draining' ? 'text-yellow-500' : 'text-red-500'}`}>
+                  ● {head.status}
+                </span>
+              </div>
+
               <p className="text-gray-600 dark:text-gray-300 mb-1"><strong>Endpoint:</strong> {head.endpoint}</p>
-              <p className="text-gray-600 dark:text-gray-300 mb-1"><strong>Статус:</strong> {head.status}</p>
               <p className="text-gray-600 dark:text-gray-300 mb-1"><strong>Нагрузка:</strong> {head.current_load}%</p>
-              <p className="text-gray-600 dark:text-gray-300 mb-1"><strong>Регион:</strong> {head.region}</p>
               <p className="text-gray-600 dark:text-gray-300 mb-1"><strong>Тип модели:</strong> {head.model_type}</p>
               <p className="text-gray-600 dark:text-gray-300 mb-1"><strong>Версия:</strong> {head.version}</p>
               <p className="text-gray-600 dark:text-gray-300 mb-1"><strong>Последний heartbeat:</strong> {new Date(head.last_heartbeat * 1000).toLocaleString()}</p>
@@ -209,10 +280,26 @@ export default function Routing() {
               type="text"
               name="head_id"
               value={newHead.head_id}
-              onChange={handleNewHeadChange}
+              onChange={(e) => {
+                handleNewHeadChange(e)
+                // Auto-suggest region from head_id suffix
+                const headId = e.target.value
+                const regionMatch = headId.match(/-([a-z]{2})$/i)
+                if (regionMatch && REGIONS.some(r => r.code.toLowerCase() === regionMatch[1].toLowerCase())) {
+                  setNewHead(prev => ({
+                    ...prev,
+                    region: regionMatch[1].toLowerCase()
+                  }))
+                }
+              }}
               className="w-full p-3 border border-gray-300 dark:border-gray-600 rounded-md dark:bg-gray-700 dark:text-white"
               required
             />
+            {newHead.head_id && (
+              <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                Пример: head-service-{REGIONS[0].code}, head-service-{REGIONS[1].code}
+              </p>
+            )}
           </div>
 
           <div>
@@ -229,14 +316,20 @@ export default function Routing() {
 
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Регион</label>
-            <input
-              type="text"
+            <select
               name="region"
               value={newHead.region}
               onChange={handleNewHeadChange}
               className="w-full p-3 border border-gray-300 dark:border-gray-600 rounded-md dark:bg-gray-700 dark:text-white"
               required
-            />
+            >
+              <option value="">Выберите регион</option>
+              {REGIONS.map(region => (
+                <option key={region.code} value={region.code}>
+                  {region.name} ({region.code})
+                </option>
+              ))}
+            </select>
           </div>
 
           <div>
