@@ -4,39 +4,33 @@
 
 # Use a multi-stage build to keep the final image small
 
-# Stage 1: Build all services
-FROM golang:1.21 AS builder
+# Use multi-stage build for each service
 
-# Set environment variables
-ENV CGO_ENABLED=0 \
-    GOOS=linux \
-    GOARCH=amd64
-
-# Create directories
-RUN mkdir -p /app/routing-service /app/secrets-service /app/network-config-admin /app/telegram-bot /app/monitoring
-
-# Build routing-service
-WORKDIR /app/routing-service
+# Stage 1: Build routing-service
+FROM golang:1.21 AS routing-service-builder
+WORKDIR /app
 COPY services/routing-service/ ./
 RUN go mod tidy && go build -o routing-service ./...
 
-# Build secrets-service
-WORKDIR /app/secrets-service
+# Stage 2: Build secrets-service
+FROM golang:1.21 AS secrets-service-builder
+WORKDIR /app
 COPY services/secrets-service/ ./
 RUN go mod tidy && go build -o secrets-service ./...
 
-# Build network-config-admin
-WORKDIR /app/network-config-admin
+# Stage 3: Build network-config-admin
+FROM golang:1.21 AS network-config-builder
+WORKDIR /app
 COPY services/network-config/ ./
 RUN go mod tidy && go build -o network-config-admin ./...
 
-# Build telegram-bot (Node.js)
-FROM node:18 AS telegram-bot-builder
-WORKDIR /app/telegram-bot
+# Stage 4: Build telegram-bot
+FROM node:20-alpine AS telegram-bot-builder
+WORKDIR /app
 COPY services/telegram-bot/ ./
-RUN npm install && npm run build
+RUN npm install
 
-# Stage 2: Final image with all services
+# Final stage: Combine all services
 FROM ubuntu:22.04
 
 # Install dependencies
@@ -49,13 +43,13 @@ RUN apt-get update && apt-get install -y \
 # Create directories
 RUN mkdir -p /app/routing-service /app/secrets-service /app/network-config-admin /app/telegram-bot /app/monitoring /app/certs
 
-# Copy binaries from builder
-COPY --from=builder /app/routing-service/routing-service /usr/local/bin/routing-service
-COPY --from=builder /app/secrets-service/secrets-service /usr/local/bin/secrets-service
-COPY --from=builder /app/network-config-admin/network-config-admin /usr/local/bin/network-config-admin
+# Copy binaries from builders
+COPY --from=routing-service-builder /app/routing-service /usr/local/bin/routing-service
+COPY --from=secrets-service-builder /app/secrets-service /usr/local/bin/secrets-service
+COPY --from=network-config-builder /app/network-config-admin /usr/local/bin/network-config-admin
 
 # Copy telegram-bot
-COPY --from=telegram-bot-builder /app/telegram-bot /app/telegram-bot
+COPY --from=telegram-bot-builder /app /app/telegram-bot
 
 # Copy configuration files
 COPY certs/ /app/certs/
