@@ -1,0 +1,71 @@
+
+
+
+version: "3.8"
+
+services:
+  routing-service:
+    build:
+      context: .
+      dockerfile: services/routing-service/Dockerfile
+    ports:
+      - "8083:8083"   # Routing service HTTP
+    volumes:
+      - ./certs:/app/certs:ro
+    networks:
+      - server-network
+      - client-network
+    depends_on:
+      - redis
+
+  secrets-service:
+    build:
+      context: .
+      dockerfile: services/secrets-service/Dockerfile
+    ports:
+      - "50053:50053" # Secrets service gRPC
+    volumes:
+      - ./certs:/app/certs:ro
+    networks:
+      - server-network
+
+  network-config-admin:
+    build:
+      context: .
+      dockerfile: services/network-config/Dockerfile
+    ports:
+      - "8082:8080"   # Network config admin
+    networks:
+      - server-network
+    depends_on:
+      - redis
+
+  telegram-bot:
+    build:
+      context: .
+      dockerfile: services/telegram-bot/Dockerfile
+    ports:
+      - "3003:3000"   # Telegram bot
+    environment:
+      - TELEGRAM_BOT_TOKEN=${Telegram_Token}
+      - ADMIN_CHAT_ID=${ADMIN_CHAT_ID}
+      - REDIS_URL=redis://redis:6379
+    networks:
+      - client-network
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    networks:
+      - server-network
+
+networks:
+  server-network:
+    name: server-network
+  client-network:
+    name: client-network
+
+
