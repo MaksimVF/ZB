@@ -1,0 +1,76 @@
+
+# Dockerfile for Routing Server
+# This server will host: routing-service, telegram-bot, secrets-service, network-config-admin, and monitoring tools
+
+# Use a multi-stage build to keep the final image small
+
+# Stage 1: Build all services
+FROM golang:1.21 AS builder
+
+# Set environment variables
+ENV CGO_ENABLED=0 \
+    GOOS=linux \
+    GOARCH=amd64
+
+# Create directories
+RUN mkdir -p /app/routing-service /app/secrets-service /app/network-config-admin /app/telegram-bot /app/monitoring
+
+# Build routing-service
+WORKDIR /app/routing-service
+COPY services/routing-service/ ./
+RUN go mod tidy && go build -o routing-service ./...
+
+# Build secrets-service
+WORKDIR /app/secrets-service
+COPY services/secrets-service/ ./
+RUN go mod tidy && go build -o secrets-service ./...
+
+# Build network-config-admin
+WORKDIR /app/network-config-admin
+COPY services/network-config/ ./
+RUN go mod tidy && go build -o network-config-admin ./...
+
+# Build telegram-bot (Node.js)
+FROM node:18 AS telegram-bot-builder
+WORKDIR /app/telegram-bot
+COPY services/telegram-bot/ ./
+RUN npm install && npm run build
+
+# Stage 2: Final image with all services
+FROM ubuntu:22.04
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    sudo \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create directories
+RUN mkdir -p /app/routing-service /app/secrets-service /app/network-config-admin /app/telegram-bot /app/monitoring /app/certs
+
+# Copy binaries from builder
+COPY --from=builder /app/routing-service/routing-service /usr/local/bin/routing-service
+COPY --from=builder /app/secrets-service/secrets-service /usr/local/bin/secrets-service
+COPY --from=builder /app/network-config-admin/network-config-admin /usr/local/bin/network-config-admin
+
+# Copy telegram-bot
+COPY --from=telegram-bot-builder /app/telegram-bot /app/telegram-bot
+
+# Copy configuration files
+COPY certs/ /app/certs/
+COPY services/routing-service/prometheus/ /app/monitoring/prometheus/
+COPY services/routing-service/grafana/ /app/monitoring/grafana/
+
+# Copy entrypoint script
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Expose ports
+EXPOSE 8083 50053 8082 9090 3000 3003
+
+# Set entrypoint
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+
+# Set default command
+CMD ["start"]

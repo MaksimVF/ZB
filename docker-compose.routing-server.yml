@@ -1,0 +1,43 @@
+
+
+version: "3.8"
+
+services:
+  routing-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.routing-server
+    ports:
+      - "8083:8083"   # Routing service HTTP
+      - "50053:50053" # Secrets service gRPC
+      - "8082:8082"   # Network config admin
+      - "3000:3000"   # Telegram bot
+      - "3003:3003"   # Telegram bot (alternative)
+      - "9090:9090"   # Prometheus (if included)
+    volumes:
+      - ./certs:/app/certs:ro
+      - ./services/routing-service/prometheus:/app/monitoring/prometheus:ro
+      - ./services/routing-service/grafana:/app/monitoring/grafana:ro
+    environment:
+      - TELEGRAM_BOT_TOKEN=${Telegram_Token}
+      - ADMIN_CHAT_ID=${ADMIN_CHAT_ID}
+      - REDIS_URL=redis://redis:6379
+    networks:
+      - server-network
+      - client-network
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    networks:
+      - server-network
+
+networks:
+  server-network:
+    name: server-network
+  client-network:
+    name: client-network
+
