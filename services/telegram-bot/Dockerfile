@@ -19,10 +19,10 @@ RUN npm install
 # Copy source code
 COPY . .
 
-# Expose port
+# Expose the port the app runs on
 EXPOSE 3000
 
-# Start the bot
+# Start the application
 CMD ["npm", "start"]
 
 
