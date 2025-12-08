@@ -1,22 +1,209 @@
+
 version: "3.8"
+
+networks:
+  client_network:
+    name: client-network
+  server_network:
+    name: server-network
+
 services:
   redis:
     image: redis:7
     ports: ["6379:6379"]
+    networks:
+      - server_network
   cache:
     image: ghcr.io/redis/redis:7
     command: ["redis-server"]
+    networks:
+      - server_network
   model-proxy:
     build: ./services/model-proxy
-    ports: ["8100:8100"]
+    ports: ["8100:8100", "50061:50061", "50062:50062"]
+    networks:
+      - server_network
   head:
     build: ./services/head-go
     ports: ["50055:50055","9001:9001"]
     depends_on: ["model-proxy","cache"]
+    networks:
+      - server_network
+      - client_network
+  # Tail Service (Main Service)
+  # --------------------------
+  # This is the core working service that handles the main business logic and API functionality.
+  # It serves as the primary backend service in our architecture.
   tail:
     build: ./services/tail-go
     ports: ["8000:8000"]
-    depends_on: ["head"]
+    depends_on: ["head", "rate-limiter"]
+    volumes:
+      - ./certs:/certs:ro
+    networks:
+      - client_network
   ui:
-    build: ./ui
+    build: ./ui/admin-dashboard
     ports: ["3000:5173"]
+    networks:
+      - client_network
+      - server_network
+    environment:
+      - ADMIN_KEY=superadmin2025
+      - VITE_API_URL=http://localhost:3000
+    depends_on:
+      - secret-service
+      - routing-service
+
+  user-dashboard:
+    build: ./ui/user-dashboard
+    ports: ["3001:5174"]
+    networks:
+      - client_network
+    depends_on:
+      - secret-service
+
+  rate-limiter:
+    build:
+      context: .
+      dockerfile: services/rate-limiter/Dockerfile
+    ports:
+      - "50051:50051"
+    networks:
+      - client_network
+    volumes:
+      - ./certs:/certs:ro
+
+  # Gateway Service (Agent Gateway)
+  # ----------------------------
+  # This service provides a unified gateway for LLM APIs with special support for
+  # LangChain integration and agent-related functionality. It serves as the agent-focused
+  # API gateway in our architecture.
+  gateway:
+    build: ./services/gateway
+    ports:
+      - "8080:8080"
+    networks:
+      - client_network
+      - server_network
+    volumes:
+      - ./certs:/certs:ro
+    depends_on:
+      - head
+      - secret-service
+      - agentic-service
+
+  # Agentic Service
+  # ---------------
+  # Dedicated service for advanced agentic operations with specialized billing
+  agentic-service:
+    build: ./services/agentic-service
+    ports:
+      - "8081:8081"
+    networks:
+      - client_network
+      - server_network
+    volumes:
+      - ./certs:/certs:ro
+    depends_on:
+      - secret-service
+      - head
+
+  secret-service:
+    build: ./services/secrets-service
+    ports:
+      - "50053:50053"
+      - "8082:8082"
+    networks:
+      - server_network
+    volumes:
+      - ./certs:/certs:ro
+
+  # Routing Service
+  # --------------
+  # Dynamic routing service for head services
+  routing-service:
+    build: ./services/routing-service
+    ports:
+      - "50061:50061"  # gRPC port
+      - "8083:8080"     # HTTP admin port
+    depends_on:
+      - redis
+    networks:
+      - server_network
+    environment:
+      - REDIS_ADDR=redis:6379
+
+  # Network Configuration Admin UI
+  # ------------------------------
+  # Web-based admin interface for managing network configuration
+  network-config-admin:
+    build: ./services/network-config-admin
+    ports:
+      - "8082:8080"
+    depends_on:
+      - redis
+    networks:
+      - server_network
+    environment:
+      - REDIS_ADDR=redis:6379
+
+  # Monitoring Services
+  # -------------------
+  # Prometheus and Grafana for monitoring the routing service
+  prometheus:
+    image: prom/prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./services/routing-service/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - server_network
+    depends_on:
+      - routing-service
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3002:3000"
+    volumes:
+      - ./services/routing-service/grafana/dashboards:/var/lib/grafana/dashboards
+    networks:
+      - server_network
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/routing-service.json
+
+  # Telegram Bot Service
+  # -------------------
+  # Telegram bot for user registration, alerts, and TON payments
+  telegram-bot:
+    build: ./services/telegram-bot
+    ports:
+      - "3003:3000"
+    networks:
+      - client_network
+      - server_network
+    environment:
+      - TELEGRAM_BOT_TOKEN=${Telegram_Token}
+      - ADMIN_CHAT_ID=${ADMIN_CHAT_ID}
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - secret-service
+      - head
+      - redis
+
+  # Telegram Mini App
+  # -----------------
+  # Web interface for Telegram Mini App
+  telegram-app:
+    build: ./ui/telegram-app
+    ports:
+      - "3004:80"
+    networks:
+      - client_network
+    depends_on:
+      - telegram-bot

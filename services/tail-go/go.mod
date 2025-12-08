@@ -1,3 +1,3 @@
-module github.com/yourorg/tail
+module github.com/MaksimVF/ZB/services/tail-go
 
 go 1.21

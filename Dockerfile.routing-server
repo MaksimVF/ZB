@@ -1,0 +1,70 @@
+
+# Dockerfile for Routing Server
+# This server will host: routing-service, telegram-bot, secrets-service, network-config-admin, and monitoring tools
+
+# Use a multi-stage build to keep the final image small
+
+# Use multi-stage build for each service
+
+# Stage 1: Build routing-service
+FROM golang:1.25 AS routing-service-builder
+WORKDIR /app
+COPY services/routing-service/ ./
+RUN go mod tidy && go build -o routing-service ./...
+
+# Stage 2: Build secrets-service
+FROM golang:1.25 AS secrets-service-builder
+WORKDIR /app
+COPY services/secrets-service/ ./
+RUN go mod tidy && go build -o secrets-service ./...
+
+# Stage 3: Build network-config-admin
+FROM golang:1.25 AS network-config-builder
+WORKDIR /app
+COPY services/network-config/ ./
+RUN go mod tidy && go build -o network-config-admin ./...
+
+# Stage 4: Build telegram-bot
+FROM node:20-alpine AS telegram-bot-builder
+WORKDIR /app
+COPY services/telegram-bot/ ./
+RUN npm install
+
+# Final stage: Combine all services
+FROM ubuntu:22.04
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    sudo \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create directories
+RUN mkdir -p /app/routing-service /app/secrets-service /app/network-config-admin /app/telegram-bot /app/monitoring /app/certs
+
+# Copy binaries from builders
+COPY --from=routing-service-builder /app/routing-service /usr/local/bin/routing-service
+COPY --from=secrets-service-builder /app/secrets-service /usr/local/bin/secrets-service
+COPY --from=network-config-builder /app/network-config-admin /usr/local/bin/network-config-admin
+
+# Copy telegram-bot
+COPY --from=telegram-bot-builder /app /app/telegram-bot
+
+# Copy configuration files
+COPY certs/ /app/certs/
+COPY services/routing-service/prometheus/ /app/monitoring/prometheus/
+COPY services/routing-service/grafana/ /app/monitoring/grafana/
+
+# Copy entrypoint script
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Expose ports
+EXPOSE 8083 50053 8082 9090 3000 3003
+
+# Set entrypoint
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+
+# Set default command
+CMD ["start"]

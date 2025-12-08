@@ -24,25 +24,34 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\rbilling.proto\x12\x07\x62illing\"d\n\x0b\x42illRequest\x12\x0f\n\x07user_id\x18\x01 \x01(\t\x12\x12\n\nrequest_id\x18\x02 \x01(\t\x12\r\n\x05model\x18\x03 \x01(\t\x12\x13\n\x0btokens_used\x18\x04 \x01(\x05\x12\x0c\n\x04\x63ost\x18\x05 \x01(\x01\"C\n\x0c\x42illResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x13\n\x0bnew_balance\x18\x02 \x01(\x01\x12\r\n\x05\x65rror\x18\x03 \x01(\t\"e\n\x0eReserveRequest\x12\x0f\n\x07user_id\x18\x01 \x01(\t\x12\x12\n\nrequest_id\x18\x02 \x01(\t\x12\x17\n\x0ftokens_estimate\x18\x03 \x01(\x05\x12\x15\n\rcost_estimate\x18\x04 \x01(\x01\"d\n\x0fReserveResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x16\n\x0ereservation_id\x18\x02 \x01(\t\x12\x19\n\x11remaining_balance\x18\x03 \x01(\x01\x12\r\n\x05\x65rror\x18\x04 \x01(\t\"S\n\rCommitRequest\x12\x16\n\x0ereservation_id\x18\x01 \x01(\t\x12\x15\n\rtokens_actual\x18\x02 \x01(\x05\x12\x13\n\x0b\x63ost_actual\x18\x03 \x01(\x01\"K\n\x0e\x43ommitResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x19\n\x11remaining_balance\x18\x02 \x01(\x01\x12\r\n\x05\x65rror\x18\x03 \x01(\t2\xc0\x01\n\x0e\x42illingService\x12\x35\n\x06\x43harge\x12\x14.billing.BillRequest\x1a\x15.billing.BillResponse\x12<\n\x07Reserve\x12\x17.billing.ReserveRequest\x1a\x18.billing.ReserveResponse\x12\x39\n\x06\x43ommit\x12\x16.billing.CommitRequest\x1a\x17.billing.CommitResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\rbilling.proto\x12\x07\x62illing\"d\n\x0b\x42illRequest\x12\x0f\n\x07user_id\x18\x01 \x01(\t\x12\x12\n\nrequest_id\x18\x02 \x01(\t\x12\r\n\x05model\x18\x03 \x01(\t\x12\x13\n\x0btokens_used\x18\x04 \x01(\x05\x12\x0c\n\x04\x63ost\x18\x05 \x01(\x01\"C\n\x0c\x42illResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x13\n\x0bnew_balance\x18\x02 \x01(\x01\x12\r\n\x05\x65rror\x18\x03 \x01(\t\"\x95\x01\n\x0eReserveRequest\x12\x0f\n\x07user_id\x18\x01 \x01(\t\x12\x12\n\nrequest_id\x18\x02 \x01(\t\x12\r\n\x05model\x18\x03 \x01(\t\x12\x10\n\x08\x65ndpoint\x18\x04 \x01(\t\x12\x1d\n\x15input_tokens_estimate\x18\x05 \x01(\x05\x12\x1e\n\x16output_tokens_estimate\x18\x06 \x01(\x05\"}\n\x0fReserveResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x16\n\x0ereservation_id\x18\x02 \x01(\t\x12\x17\n\x0freserved_amount\x18\x03 \x01(\x01\x12\x19\n\x11remaining_balance\x18\x04 \x01(\x01\x12\r\n\x05\x65rror\x18\x05 \x01(\t\"b\n\rCommitRequest\x12\x16\n\x0ereservation_id\x18\x01 \x01(\t\x12\x1b\n\x13input_tokens_actual\x18\x02 \x01(\x05\x12\x1c\n\x14output_tokens_actual\x18\x03 \x01(\x05\"_\n\x0e\x43ommitResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x12\n\nfinal_cost\x18\x02 \x01(\x01\x12\x19\n\x11remaining_balance\x18\x03 \x01(\x01\x12\r\n\x05\x65rror\x18\x04 \x01(\t\"$\n\x11GetBalanceRequest\x12\x0f\n\x07user_id\x18\x01 \x01(\t\"S\n\x12GetBalanceResponse\x12\x13\n\x0b\x62\x61lance_usd\x18\x01 \x01(\x01\x12\x13\n\x0b\x62\x61lance_rub\x18\x02 \x01(\x01\x12\x13\n\x0b\x62\x61lance_eur\x18\x03 \x01(\x01\"K\n\x14\x41\x64justBalanceRequest\x12\x0f\n\x07user_id\x18\x01 \x01(\t\x12\x12\n\namount_usd\x18\x02 \x01(\x01\x12\x0e\n\x06reason\x18\x03 \x01(\t\"A\n\x15\x41\x64justBalanceResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x17\n\x0fnew_balance_usd\x18\x02 \x01(\x01\x32\xd7\x02\n\x0e\x42illingService\x12\x35\n\x06\x43harge\x12\x14.billing.BillRequest\x1a\x15.billing.BillResponse\x12<\n\x07Reserve\x12\x17.billing.ReserveRequest\x1a\x18.billing.ReserveResponse\x12\x39\n\x06\x43ommit\x12\x16.billing.CommitRequest\x1a\x17.billing.CommitResponse\x12\x45\n\nGetBalance\x12\x1a.billing.GetBalanceRequest\x1a\x1b.billing.GetBalanceResponse\x12N\n\rAdjustBalance\x12\x1d.billing.AdjustBalanceRequest\x1a\x1e.billing.AdjustBalanceResponseB\x07Z\x05./genb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'billing_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
-  DESCRIPTOR._loaded_options = None
+  _globals['DESCRIPTOR']._loaded_options = None
+  _globals['DESCRIPTOR']._serialized_options = b'Z\005./gen'
   _globals['_BILLREQUEST']._serialized_start=26
   _globals['_BILLREQUEST']._serialized_end=126
   _globals['_BILLRESPONSE']._serialized_start=128
   _globals['_BILLRESPONSE']._serialized_end=195
-  _globals['_RESERVEREQUEST']._serialized_start=197
-  _globals['_RESERVEREQUEST']._serialized_end=298
-  _globals['_RESERVERESPONSE']._serialized_start=300
-  _globals['_RESERVERESPONSE']._serialized_end=400
-  _globals['_COMMITREQUEST']._serialized_start=402
-  _globals['_COMMITREQUEST']._serialized_end=485
-  _globals['_COMMITRESPONSE']._serialized_start=487
-  _globals['_COMMITRESPONSE']._serialized_end=562
-  _globals['_BILLINGSERVICE']._serialized_start=565
-  _globals['_BILLINGSERVICE']._serialized_end=757
+  _globals['_RESERVEREQUEST']._serialized_start=198
+  _globals['_RESERVEREQUEST']._serialized_end=347
+  _globals['_RESERVERESPONSE']._serialized_start=349
+  _globals['_RESERVERESPONSE']._serialized_end=474
+  _globals['_COMMITREQUEST']._serialized_start=476
+  _globals['_COMMITREQUEST']._serialized_end=574
+  _globals['_COMMITRESPONSE']._serialized_start=576
+  _globals['_COMMITRESPONSE']._serialized_end=671
+  _globals['_GETBALANCEREQUEST']._serialized_start=673
+  _globals['_GETBALANCEREQUEST']._serialized_end=709
+  _globals['_GETBALANCERESPONSE']._serialized_start=711
+  _globals['_GETBALANCERESPONSE']._serialized_end=794
+  _globals['_ADJUSTBALANCEREQUEST']._serialized_start=796
+  _globals['_ADJUSTBALANCEREQUEST']._serialized_end=871
+  _globals['_ADJUSTBALANCERESPONSE']._serialized_start=873
+  _globals['_ADJUSTBALANCERESPONSE']._serialized_end=938
+  _globals['_BILLINGSERVICE']._serialized_start=941
+  _globals['_BILLINGSERVICE']._serialized_end=1284
 # @@protoc_insertion_point(module_scope)

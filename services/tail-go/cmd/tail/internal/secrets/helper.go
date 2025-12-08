@@ -7,7 +7,7 @@ import (
 "sync"
 "time"
 
-pb "llm-gateway-pro/services/secret-service/pb"
+pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
 "google.golang.org/grpc"
 )
 

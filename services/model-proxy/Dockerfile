@@ -1,6 +1,18 @@
 FROM python:3.11-slim
+
 WORKDIR /app
-COPY app.py .
-RUN pip install fastapi uvicorn
-EXPOSE 8100
-CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8100"]
+
+# Copy requirements first for better layer caching
+COPY requirements.txt .
+
+# Install dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the application
+COPY . .
+
+# Expose ports
+EXPOSE 8100 50061 50062
+
+# Start the server
+CMD ["python", "server.py"]

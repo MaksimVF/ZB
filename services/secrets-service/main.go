@@ -1,136 +1,540 @@
+
+
 package main
 
 import (
-"context"
-"crypto/aes"
-"crypto/cipher"
-"crypto/rand"
-"encoding/base64"
-"encoding/json"
-"log"
-"net"
-"net/http"
-"os"
-"sync"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"regexp"
+	"time"
 
-"github.com/go-redis/redis/v8"
-"google.golang.org/grpc"
-"google.golang.org/grpc/credentials"
-pb "llm-gateway-pro/services/secret-service/pb"
+	"github.com/hashicorp/vault/api"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/rs/zerolog"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
+	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
 )
 
 var (
-rdb        *redis.Client
-aesgcm     cipher.AEAD
-encryptOnce sync.Once
-masterKey   []byte
+	vaultClient   *api.Client
+	logger        zerolog.Logger
+	secretCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "secret_operations_total",
+			Help: "Total number of secret operations",
+		},
+		[]string{"operation", "status"},
+	)
+	httpDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "http_request_duration_seconds",
+			Help:    "HTTP request duration in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method", "path", "status"},
+	)
 )
 
-type server struct{ pb.UnimplementedSecretServiceServer }
+const (
+	SecretNotFoundError    = "secret not found"
+	PermissionDeniedError  = "permission denied"
+	VaultConnectionError  = "vault connection error"
+	InvalidInputError     = "invalid input"
+	InternalServerError   = "internal server error"
+)
 
-func initEncryption() {
-key := os.Getenv("ENCRYPTION_MASTER_KEY")
-if key == "" {
-log.Fatal("ENCRYPTION_MASTER_KEY required")
+func init() {
+	// Initialize structured logger
+	logger = zerolog.New(os.Stdout).With().
+		Timestamp().
+		Str("service", "secret-service").
+		Logger()
+
+	// Register Prometheus metrics
+	prometheus.MustRegister(secretCounter, httpDuration)
+
+	// Initialize Vault client
+	config := api.DefaultConfig()
+	config.Address = os.Getenv("VAULT_ADDR") // http://vault:8200
+	client, err := api.NewClient(config)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("Failed to initialize Vault client")
+	}
+	client.SetToken(os.Getenv("VAULT_TOKEN")) // token with proper rights
+
+	// Test Vault connection
+	_, err = client.Sys().Health()
+	if err != nil {
+		logger.Fatal().Err(err).Msg("Vault health check failed")
+	}
+
+	vaultClient = client
+	logger.Info().Msg("Vault client initialized successfully")
 }
-var err error
-masterKey, err = base64.StdEncoding.DecodeString(key)
-if err != nil || len(masterKey) != 32 {
-log.Fatal("ENCRYPTION_MASTER_KEY must be 32-byte base64")
+
+// Custom error types
+type SecretError struct {
+	Code    codes.Code
+	Message string
+	Details string
 }
-block, _ := aes.NewCipher(masterKey)
-aesgcm, _ = cipher.NewGCM(block)
+
+func (e *SecretError) Error() string {
+	return fmt.Sprintf("%s: %s", e.Message, e.Details)
+}
+
+func newSecretError(code codes.Code, message, details string) *SecretError {
+	return &SecretError{Code: code, Message: message, Details: details}
+}
+
+// isValidSecretName validates the format of a secret name
+func isValidSecretName(name string) bool {
+	// Basic validation: must contain only alphanumeric, dashes, underscores, and slashes
+	// and should not contain sensitive patterns
+	validPattern := `^[a-zA-Z0-9_\-\/]+$`
+	return regexMatch(validPattern, name)
+}
+
+// maskSensitiveValue masks sensitive information in values
+func maskSensitiveValue(value string) string {
+	if value == "" {
+		return ""
+	}
+
+	// If the value looks like an API key (long alphanumeric string), mask it
+	if len(value) > 16 && isAlphanumeric(value) {
+		return "*****" + value[len(value)-4:]
+	}
+
+	// For other values, return first 2 and last 2 characters
+	if len(value) > 4 {
+		return value[:2] + "****" + value[len(value)-2:]
+	}
+
+	return "****"
+}
+
+// isAlphanumeric checks if a string contains only alphanumeric characters
+func isAlphanumeric(s string) bool {
+	for _, r := range s {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return true
+}
+
+// regexMatch checks if a string matches a regex pattern
+func regexMatch(pattern, s string) bool {
+	matched, err := regexp.MatchString(pattern, s)
+	return matched && err == nil
 }
 
 // ===================== gRPC =====================
 func (s *server) GetSecret(ctx context.Context, req *pb.GetSecretRequest) (*pb.GetSecretResponse, error) {
-encrypted, err := rdb.HGet(ctx, "secrets", req.Name).Result()
-if err != nil {
-return nil, err
+	logger.Info().
+		Str("method", "GetSecret").
+		Str("secret_name", req.Name).
+		Msg("Received GetSecret request")
+
+	// Validate input
+	if req.Name == "" {
+		err := newSecretError(codes.InvalidArgument, InvalidInputError, "secret name is required")
+		secretCounter.WithLabelValues("get_secret", "error").Inc()
+		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+	}
+
+	// Validate secret name format
+	if !isValidSecretName(req.Name) {
+		err := newSecretError(codes.InvalidArgument, InvalidInputError, "invalid secret name format")
+		secretCounter.WithLabelValues("get_secret", "error").Inc()
+		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+	}
+
+	// Get secret from Vault
+	secret, err := vaultClient.Logical().Read("secret/data/" + req.Name)
+	if err != nil {
+		logger.Error().
+			Err(err).
+			Str("method", "GetSecret").
+			Str("secret_name", req.Name).
+			Msg("Vault read error")
+		secretCounter.WithLabelValues("get_secret", "error").Inc()
+		return nil, status.Errorf(codes.Internal, "%s: %s", VaultConnectionError, err.Error())
+	}
+
+	if secret == nil {
+		err := newSecretError(codes.NotFound, SecretNotFoundError, fmt.Sprintf("secret %s not found", req.Name))
+		secretCounter.WithLabelValues("get_secret", "not_found").Inc()
+		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+	}
+
+	data, ok := secret.Data["data"].(map[string]interface{})
+	if !ok {
+		err := newSecretError(codes.Internal, InternalServerError, "invalid data format in vault response")
+		secretCounter.WithLabelValues("get_secret", "error").Inc()
+		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+	}
+
+	value, ok := data["value"].(string)
+	if !ok {
+		err := newSecretError(codes.Internal, InternalServerError, "invalid value format in vault response")
+		secretCounter.WithLabelValues("get_secret", "error").Inc()
+		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+	}
+
+	// Mask sensitive information in logs
+	maskedValue := maskSensitiveValue(value)
+	logger.Info().
+		Str("method", "GetSecret").
+		Str("secret_name", req.Name).
+		Str("value_length", fmt.Sprintf("%d", len(value))).
+		Msg("Secret retrieved successfully")
+
+	// Add metadata about the secret
+	metadata := map[string]string{
+		"secret_name":   req.Name,
+		"value_length":  fmt.Sprintf("%d", len(value)),
+		"last_updated":  time.Now().Format(time.RFC3339),
+		"secret_type":   "api_key", // Could be enhanced to detect type
+	}
+
+	secretCounter.WithLabelValues("get_secret", "success").Inc()
+	return &pb.GetSecretResponse{
+		Value:    value,
+		Metadata: metadata,
+	}, nil
 }
-plaintext, err := decrypt(encrypted)
-if err != nil {
-return nil, err
+
+func (s *server) GetUserSecret(ctx context.Context, req *pb.GetUserSecretRequest) (*pb.GetUserSecretResponse, error) {
+	logger.Info().
+		Str("method", "GetUserSecret").
+		Str("user_id", req.UserId).
+		Str("secret_name", req.SecretName).
+		Msg("Received GetUserSecret request")
+
+	// Validate input
+	if req.UserId == "" || req.SecretName == "" {
+		err := newSecretError(codes.InvalidArgument, InvalidInputError, "user_id and secret_name are required")
+		secretCounter.WithLabelValues("get_user_secret", "error").Inc()
+		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+	}
+
+	// Get user-specific secret from Vault
+	secretPath := fmt.Sprintf("user-secrets/data/%s/%s", req.UserId, req.SecretName)
+	secret, err := vaultClient.Logical().Read(secretPath)
+	if err != nil {
+		logger.Error().
+			Err(err).
+			Str("method", "GetUserSecret").
+			Str("user_id", req.UserId).
+			Str("secret_name", req.SecretName).
+			Msg("Vault read error")
+		secretCounter.WithLabelValues("get_user_secret", "error").Inc()
+		return nil, status.Errorf(codes.Internal, "%s: %s", VaultConnectionError, err.Error())
+	}
+
+	if secret == nil {
+		err := newSecretError(codes.NotFound, SecretNotFoundError, fmt.Sprintf("user secret %s/%s not found", req.UserId, req.SecretName))
+		secretCounter.WithLabelValues("get_user_secret", "not_found").Inc()
+		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+	}
+
+	data, ok := secret.Data["data"].(map[string]interface{})
+	if !ok {
+		err := newSecretError(codes.Internal, InternalServerError, "invalid data format in vault response")
+		secretCounter.WithLabelValues("get_user_secret", "error").Inc()
+		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+	}
+
+	value, ok := data["value"].(string)
+	if !ok {
+		err := newSecretError(codes.Internal, InternalServerError, "invalid value format in vault response")
+		secretCounter.WithLabelValues("get_user_secret", "error").Inc()
+		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+	}
+
+	logger.Info().
+		Str("method", "GetUserSecret").
+		Str("user_id", req.UserId).
+		Str("secret_name", req.SecretName).
+		Msg("User secret retrieved successfully")
+
+	secretCounter.WithLabelValues("get_user_secret", "success").Inc()
+	return &pb.GetUserSecretResponse{Value: value}, nil
 }
-return &pb.GetSecretResponse{Value: plaintext}, nil
+
+func (s *server) SetUserSecret(ctx context.Context, req *pb.SetUserSecretRequest) (*pb.SetUserSecretResponse, error) {
+	logger.Info().
+		Str("method", "SetUserSecret").
+		Str("user_id", req.UserId).
+		Str("secret_name", req.SecretName).
+		Msg("Received SetUserSecret request")
+
+	// Validate input
+	if req.UserId == "" || req.SecretName == "" || req.SecretValue == "" {
+		err := newSecretError(codes.InvalidArgument, InvalidInputError, "user_id, secret_name, and secret_value are required")
+		secretCounter.WithLabelValues("set_user_secret", "error").Inc()
+		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+	}
+
+	// Store user-specific secret in Vault
+	secretPath := fmt.Sprintf("user-secrets/data/%s/%s", req.UserId, req.SecretName)
+	_, err := vaultClient.Logical().Write(secretPath, map[string]interface{}{
+		"data": map[string]interface{}{"value": req.SecretValue},
+	})
+	if err != nil {
+		logger.Error().
+			Err(err).
+			Str("method", "SetUserSecret").
+			Str("user_id", req.UserId).
+			Str("secret_name", req.SecretName).
+			Msg("Vault write error")
+		secretCounter.WithLabelValues("set_user_secret", "error").Inc()
+		return nil, status.Errorf(codes.Internal, "%s: %s", VaultConnectionError, err.Error())
+	}
+
+	logger.Info().
+		Str("method", "SetUserSecret").
+		Str("user_id", req.UserId).
+		Str("secret_name", req.SecretName).
+		Msg("User secret saved successfully")
+
+	secretCounter.WithLabelValues("set_user_secret", "success").Inc()
+	return &pb.SetUserSecretResponse{Status: "saved"}, nil
 }
 
 // ===================== HTTP Admin API =====================
 func adminHandler(w http.ResponseWriter, r *http.Request) {
-if r.Header.Get("X-Admin-Key") != os.Getenv("ADMIN_KEY") {
-http.Error(w, "forbidden", 403)
-return
-}
-w.Header().Set("Access-Control-Allow-Origin", "*")
-w.Header().Set("Access-Control-Allow-Methods", "GET,POST,DELETE")
-w.Header().Set("Access-Control-Allow-Headers", "Content-Type,X-Admin-Key")
+	start := time.Now()
 
-if r.Method == http.MethodOptions {
-return
+	logger.Info().
+		Str("method", "adminHandler").
+		Str("http_method", r.Method).
+		Str("path", r.URL.Path).
+		Msg("Received admin API request")
+
+	// CORS handling
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type,X-Admin-Key")
+
+	if r.Method == http.MethodOptions {
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "200").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	// Authentication check
+	adminKey := r.Header.Get("X-Admin-Key")
+	if adminKey == "" {
+		logger.Warn().Str("method", "adminHandler").Msg("Missing admin key")
+		http.Error(w, "forbidden: missing admin key", 403)
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "403").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	if adminKey != os.Getenv("ADMIN_KEY") {
+		logger.Warn().Str("method", "adminHandler").Msg("Invalid admin key")
+		http.Error(w, "forbidden: invalid admin key", 403)
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "403").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		handleGetSecrets(w, r, start)
+
+	case http.MethodPost:
+		handlePostSecret(w, r, start)
+
+	case http.MethodDelete:
+		handleDeleteSecret(w, r, start)
+
+	default:
+		logger.Warn().Str("method", "adminHandler").Str("http_method", r.Method).Msg("Invalid HTTP method")
+		http.Error(w, "invalid method", 405)
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "405").Observe(time.Since(start).Seconds())
+	}
 }
 
-switch r.Method {
-case http.MethodGet:
-secrets, _ := rdb.HGetAll(r.Context(), "secrets").Result()
-visible := map[string]string{}
-for k, v := range secrets {
-if dec, err := decrypt(v); err == nil && len(dec) > 8 {
-visible[k] = "sk-... " + dec[len(dec)-8:]
-} else {
-visible[k] = "invalid"
-}
-}
-json.NewEncoder(w).Encode(visible)
+func handleGetSecrets(w http.ResponseWriter, r *http.Request, start time.Time) {
+	logger.Info().Str("method", "handleGetSecrets").Msg("Listing secrets")
 
-case http.MethodPost:
-var input struct {
-Name  string `json:"name"`  // "openai.api_key"
-Value string `json:"value"`
-}
-json.NewDecoder(r.Body).Decode(&input)
-encrypted := encrypt(input.Value)
-rdb.HSet(r.Context(), "secrets", input.Name, encrypted)
-rdb.Publish(r.Context(), "secrets:updated", input.Name)
-json.NewEncoder(w).Encode(map[string]string{"status": "saved"})
+	secrets, err := vaultClient.Logical().List("secret/metadata/llm")
+	if err != nil {
+		logger.Error().Err(err).Msg("Failed to list secrets")
+		http.Error(w, fmt.Sprintf("failed to list secrets: %v", err), 500)
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "500").Observe(time.Since(start).Seconds())
+		return
+	}
 
-case http.MethodDelete:
-name := r.URL.Path[len("/admin/api/secrets/"):]
-rdb.HDel(r.Context(), "secrets", name)
-json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
-}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(secrets); err != nil {
+		logger.Error().Err(err).Msg("Failed to encode response")
+		http.Error(w, "failed to encode response", 500)
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "500").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	logger.Info().Int("count", len(secrets.Data["keys"].([]string))).Msg("Secrets listed successfully")
+	httpDuration.WithLabelValues(r.Method, r.URL.Path, "200").Observe(time.Since(start).Seconds())
 }
 
-func encrypt(plain string) string {
-encryptOnce.Do(initEncryption)
-nonce := make([]byte, aesgcm.NonceSize())
-rand.Read(nonce)
-ciphertext := aesgcm.Seal(nonce, nonce, []byte(plain), nil)
-return base64.StdEncoding.EncodeToString(ciphertext)
+func handlePostSecret(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	logger.Info().Str("method", "handlePostSecret").Msg("Creating/updating secret")
+
+	var input struct {
+		Path  string `json:"path"`  // "llm/openai/api_key"
+		Value string `json:"value"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		logger.Error().Err(err).Msg("Failed to decode request body")
+		http.Error(w, fmt.Sprintf("invalid input: %v", err), 400)
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "400").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	if input.Path == "" || input.Value == "" {
+		logger.Error().Msg("Missing required fields in request")
+		http.Error(w, "path and value are required", 400)
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "400").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	_, err := vaultClient.Logical().Write("secret/data/"+input.Path, map[string]interface{}{
+		"data": map[string]interface{}{"value": input.Value},
+	})
+	if err != nil {
+		logger.Error().Err(err).Str("path", input.Path).Msg("Failed to write secret to Vault")
+		http.Error(w, fmt.Sprintf("failed to save secret: %v", err), 500)
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "500").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "saved"}); err != nil {
+		logger.Error().Err(err).Msg("Failed to encode response")
+		http.Error(w, "failed to encode response", 500)
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "500").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	logger.Info().Str("path", input.Path).Msg("Secret saved successfully")
+	httpDuration.WithLabelValues(r.Method, r.URL.Path, "200").Observe(time.Since(start).Seconds())
 }
 
-func decrypt(encrypted string) (string, error) {
-encryptOnce.Do(initEncryption)
-data, _ := base64.StdEncoding.DecodeString(encrypted)
-nonceSize := aesgcm.NonceSize()
-nonce, ciphertext := data[:nonceSize], data[nonceSize:]
-plain, err := aesgcm.Open(nil, nonce, ciphertext, nil)
-return string(plain), err
+func handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	name := r.URL.Path[len("/admin/api/secrets/"):]
+	logger.Info().Str("method", "handleDeleteSecret").Str("secret_name", name).Msg("Deleting secret")
+
+	if name == "" {
+		logger.Error().Msg("Missing secret name in delete request")
+		http.Error(w, "secret name is required", 400)
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "400").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	_, err := vaultClient.Logical().Delete("secret/data/" + name)
+	if err != nil {
+		logger.Error().Err(err).Str("secret_name", name).Msg("Failed to delete secret")
+		http.Error(w, fmt.Sprintf("failed to delete secret: %v", err), 500)
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "500").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "deleted"}); err != nil {
+		logger.Error().Err(err).Msg("Failed to encode response")
+		http.Error(w, "failed to encode response", 500)
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "500").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	logger.Info().Str("secret_name", name).Msg("Secret deleted successfully")
+	httpDuration.WithLabelValues(r.Method, r.URL.Path, "200").Observe(time.Since(start).Seconds())
+}
+
+// Health check handler
+func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
+	// Check Vault health
+	health, err := vaultClient.Sys().Health()
+	if err != nil {
+		logger.Error().Err(err).Msg("Vault health check failed")
+		http.Error(w, "vault unhealthy", 503)
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "503").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	if !health.Initialized || health.Sealed {
+		logger.Error().Msg("Vault is not initialized or sealed")
+		http.Error(w, "vault not ready", 503)
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "503").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "healthy"}); err != nil {
+		logger.Error().Err(err).Msg("Failed to encode health response")
+		http.Error(w, "failed to encode response", 500)
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "500").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	logger.Info().Msg("Health check passed")
+	httpDuration.WithLabelValues(r.Method, r.URL.Path, "200").Observe(time.Since(start).Seconds())
 }
 
 func main() {
-rdb = redis.NewClient(&redis.Options{Addr: "redis:6379"})
-initEncryption()
+	init()
 
-// gRPC сервер (mTLS)
-lis, _ := net.Listen("tcp", ":50053")
-creds, _ := credentials.NewServerTLSFromFile("/certs/secret-service.pem", "/certs/secret-service-key.pem")
-grpcServer := grpc.NewServer(grpc.Creds(creds))
-pb.RegisterSecretServiceServer(grpcServer, &server{})
-go grpcServer.Serve(lis)
+	// gRPC (mTLS)
+	lis, err := net.Listen("tcp", ":50053")
+	if err != nil {
+		logger.Fatal().Err(err).Msg("Failed to listen on TCP port 50053")
+	}
 
-// HTTP Admin API
-http.HandleFunc("/admin/api/secrets", adminHandler)
-http.HandleFunc("/admin/api/secrets/", adminHandler)
-log.Println("secret-service: gRPC :50053 (mTLS), HTTP :8082")
-log.Fatal(http.ListenAndServe(":8082", nil))
+	creds, err := credentials.NewServerTLSFromFile("/certs/secret-service.pem", "/certs/secret-service-key.pem")
+	if err != nil {
+		logger.Fatal().Err(err).Msg("Failed to load TLS credentials")
+	}
+
+	grpcServer := grpc.NewServer(grpc.Creds(creds))
+	pb.RegisterSecretServiceServer(grpcServer, &server{})
+
+	go func() {
+		logger.Info().Msg("Starting gRPC server on :50053")
+		if err := grpcServer.Serve(lis); err != nil {
+			logger.Fatal().Err(err).Msg("gRPC server failed")
+		}
+	}()
+
+	// HTTP Admin API
+	http.HandleFunc("/admin/api/secrets", adminHandler)
+	http.HandleFunc("/admin/api/secrets/", adminHandler)
+
+	// Health check endpoint
+	http.HandleFunc("/health", healthCheckHandler)
+
+	// Prometheus metrics endpoint
+	http.Handle("/metrics", promhttp.Handler())
+
+	logger.Info().Msg("Starting HTTP server on :8082")
+	if err := http.ListenAndServe(":8082", nil); err != nil {
+		logger.Fatal().Err(err).Msg("HTTP server failed")
+	}
 }
+

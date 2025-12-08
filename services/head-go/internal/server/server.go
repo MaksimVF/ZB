@@ -1,192 +1,542 @@
 package server
 
 import (
-"context"
-"io"
-"log"
-"net"
-"time"
+    "crypto/tls"
+    "crypto/x509"
+    "fmt"
+    "context"
+    "io"
+    "log"
+    "net"
+    "net/http"
+    "os"
+    "sync"
+    "sync/atomic"
+    "time"
 
-gen "github.com/yourorg/head/gen" // сюда генерируются chat.proto
-model "github.com/yourorg/head/gen_model" // сюда генерируются model.proto
-"github.com/yourorg/head/internal/config"
-modelclient "github.com/yourorg/head/internal/providers"
+    gen "github.com/yourorg/head/gen" // сюда генерируются chat.proto
+    model "github.com/yourorg/head/gen_model" // сюда генерируются model.proto
+    "github.com/yourorg/head/internal/auth"
+    "github.com/yourorg/head/internal/config"
+    "github.com/yourorg/head/internal/docs"
+    "github.com/yourorg/head/internal/embedding"
+    "github.com/yourorg/head/internal/models"
+    modelclient "github.com/yourorg/head/internal/providers"
+    "github.com/yourorg/head/internal/metrics"
+    "github.com/yourorg/head/internal/webhook"
 
-"google.golang.org/grpc"
-"google.golang.org/grpc/codes"
-"google.golang.org/grpc/status"
-
-"github.com/prometheus/client_golang/prometheus"
-"github.com/prometheus/client_golang/prometheus/promauto"
+    "github.com/afex/hystrix-go/hystrix"
+    "github.com/grpc-ecosystem/go-grpc-middleware"
+    "github.com/grpc-ecosystem/go-grpc-prometheus"
+    "github.com/prometheus/client_golang/prometheus"
+    "github.com/prometheus/client_golang/prometheus/promauto"
+    "github.com/prometheus/client_golang/prometheus/promhttp"
+    "go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+    "go.opentelemetry.io/otel"
+    "go.opentelemetry.io/otel/attribute"
+    "go.opentelemetry.io/otel/codes"
+    "go.opentelemetry.io/otel/exporters/otlp/otlptrace"
+    "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+    "go.opentelemetry.io/otel/sdk/resource"
+    "go.opentelemetry.io/otel/sdk/trace"
+    "go.opentelemetry.io/otel/trace"
+    "go.opentelemetry.io/otel/trace/noop"
+    "google.golang.org/grpc"
+    "google.golang.org/grpc/credentials"
+    "google.golang.org/grpc/keepalive"
+    "google.golang.org/grpc/status"
+    "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 var (
-requestsTotal = promauto.NewCounterVec(
-prometheus.CounterOpts{Name: "head_requests_total", Help: "Total requests"},
-[]string{"model", "status"},
-)
-requestLatency = promauto.NewHistogramVec(
-prometheus.HistogramOpts{Name: "head_request_latency_seconds", Help: "Request latency"},
-[]string{"model"},
-)
+    requestsTotal = promauto.NewCounterVec(
+        prometheus.CounterOpts{Name: "head_requests_total", Help: "Total requests"},
+        []string{"model", "status"},
+    )
+    requestLatency = promauto.NewHistogramVec(
+        prometheus.HistogramOpts{Name: "head_request_latency_seconds", Help: "Request latency"},
+        []string{"model"},
+    )
+    requestErrors = promauto.NewCounterVec(
+        prometheus.CounterOpts{Name: "head_request_errors_total", Help: "Total request errors"},
+        []string{"model", "error_type"},
+    )
+    activeConnections = promauto.NewGauge(
+        prometheus.GaugeOpts{Name: "head_active_connections", Help: "Currently active connections"},
+    )
+    circuitBreakerState = promauto.NewGaugeVec(
+        prometheus.GaugeOpts{Name: "head_circuit_breaker_state", Help: "Circuit breaker state"},
+        []string{"circuit", "state"},
+    )
+
+    // Tracing setup
+    var tracer = setupTracer()
+
+    // Connection pool
+    var connectionPool = &sync.Pool{
+        New: func() interface{} {
+            return &grpc.ClientConn{}
+        },
+    }
 )
 
 type HeadServer struct {
-gen.UnimplementedChatServiceServer // встраиваем, чтобы не писать заглушки
-cfg   *config.Config
-model *modelclient.ModelClient
+    gen.UnimplementedChatServiceServer // встраиваем, чтобы не писать заглушки
+    gen.UnimplementedEmbeddingServiceServer // встраиваем, чтобы не писать заглушки
+    cfg                    *config.Config
+    model                  *modelclient.ModelClient
+    auth                   *auth.Authenticator
+    webhook                *webhook.WebhookClient
+    registry               *models.ModelRegistry
+    embedding              *embedding.EmbeddingService
+    networkConfigManager   *config.NetworkConfigManager
+    shutdown               bool
+    shutdownMutex          sync.RWMutex
+    activeRequests         int32
+    maxRequests            int
+    healthStatus           string
+    healthMutex            sync.RWMutex
 }
 
-func New(cfg *config.Config) *HeadServer {
-return &HeadServer{
-cfg:   cfg,
-model: modelclient.NewModelClient(cfg.ModelProxyAddr),
+func New(cfg *config.Config, networkConfigManager *config.NetworkConfigManager) *HeadServer {
+    // Get network config for model proxy address
+    networkConfig := networkConfigManager.GetConfig()
+    modelProxyAddr := networkConfig.HeadEndpoint
+    if modelProxyAddr == "" {
+        modelProxyAddr = cfg.ModelProxyAddr
+    }
+
+    modelClient := modelclient.NewModelClient(modelProxyAddr, networkConfigManager)
+    return &HeadServer{
+        cfg:            cfg,
+        model:          modelClient,
+        auth:           auth.NewAuthenticator(cfg.AuthConfig),
+        webhook:        webhook.NewWebhookClient(cfg.WebhookConfig),
+        registry:       cfg.ModelRegistry,
+        embedding:      embedding.NewEmbeddingService(cfg, modelClient),
+        networkConfigManager: networkConfigManager,
+        shutdown:       false,
+        activeRequests: 0,
+        maxRequests:    1000, // Default max concurrent requests
+        healthStatus:   "healthy",
+    }
 }
+
+func setupTracer() trace.Tracer {
+    ctx := context.Background()
+
+    // Create OTLP exporter
+    exporter, err := otlptracegrpc.New(ctx,
+        otlptracegrpc.WithInsecure(),
+        otlptracegrpc.WithEndpoint("otel-collector:4317"),
+    )
+    if err != nil {
+        log.Printf("Failed to create OTLP exporter: %v", err)
+        return noop.NewTracerProvider().Tracer("head")
+    }
+
+    // Create tracer provider
+    tp := trace.NewTracerProvider(
+        trace.WithBatcher(exporter),
+        trace.WithResource(resource.NewSchemaless(
+            attribute.String("service.name", "head"),
+            attribute.String("service.version", "1.0.0"),
+        )),
+    )
+
+    otel.SetTracerProvider(tp)
+    return tp.Tracer("head")
 }
 
 func (s *HeadServer) Run() error {
-ctx := context.Background()
-if err := s.model.Init(ctx); err != nil {
-return err
+    // Initialize tracing
+    ctx := context.Background()
+    if err := metrics.InitializeTracing(ctx); err != nil {
+        log.Printf("Failed to initialize tracing: %v", err)
+    }
+
+    // Start metrics server
+    go func() {
+        mux := http.NewServeMux()
+        mux.Handle("/metrics", promhttp.Handler())
+        mux.HandleFunc("/health", healthCheckHandler)
+        mux.Handle("/docs/", http.StripPrefix("/docs", docs.DocumentationHandler()))
+
+        log.Printf("Metrics, health, and documentation server listening on :%d", s.cfg.MetricsPort)
+        if err := http.ListenAndServe(fmt.Sprintf(":%d", s.cfg.MetricsPort), mux); err != nil {
+            log.Printf("Metrics server failed: %v", err)
+        }
+    }()
+
+    // Initialize model client with timeout
+    initCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+    defer cancel()
+
+    // Initialize circuit breakers
+    hystrix.ConfigureCommand("model_proxy", hystrix.CommandConfig{
+        Timeout:                5000, // 5 seconds
+        MaxConcurrentRequests:  100,
+        ErrorPercentThreshold:   25,
+        SleepWindow:            10000, // 10 seconds recovery window
+        RequestVolumeThreshold: 10,   // Minimum requests before tripping
+    })
+
+    // Try to initialize model client with better error handling
+    if err := s.model.Init(ctx); err != nil {
+        log.Printf("Failed to initialize model client: %v", err)
+        // Check if it is a certificate error
+        if _, ok := err.(x509.UnknownAuthorityError); ok {
+            log.Printf("Certificate authority error - check CA configuration")
+        }
+        // Check if it is a connection timeout
+        if initCtx.Err() == context.DeadlineExceeded {
+            log.Printf("Connection timeout - model-proxy service may be unavailable")
+        }
+        return fmt.Errorf("model client initialization failed: %w", err)
+    }
+
+    // Load TLS credentials for mTLS
+    creds, err := loadServerTLSCredentials()
+    if err != nil {
+        log.Printf("Failed to load TLS credentials: %v", err)
+        return fmt.Errorf("failed to load TLS credentials: %w", err)
+    }
+
+    // Configure keepalive for better connection management
+    keepaliveParams := grpc.KeepaliveParams{
+        Time:    10 * time.Second, // ping every 10 seconds
+        Timeout: 2 * time.Second, // wait 2 seconds for pong
+    }
+    keepalivePolicy := grpc.KeepaliveEnforcementPolicy{
+        MinTime:             5 * time.Second, // minimum ping interval
+        PermitWithoutStream: true,
+    }
+
+    // Create authentication interceptors
+    var unaryInterceptors []grpc.UnaryServerInterceptor
+    var streamInterceptors []grpc.StreamServerInterceptor
+
+    // Add monitoring and tracing middleware
+    unaryInterceptors = append(unaryInterceptors,
+        grpc_prometheus.UnaryServerInterceptor,
+        otelgrpc.UnaryServerInterceptor(),
+    )
+
+    streamInterceptors = append(streamInterceptors,
+        grpc_prometheus.StreamServerInterceptor,
+        otelgrpc.StreamServerInterceptor(),
+    )
+
+    // Add authentication if enabled
+    if s.cfg.FeaturesConfig.IsEnabled("authentication") {
+        log.Printf("Authentication enabled")
+        unaryInterceptors = append(unaryInterceptors, s.auth.UnaryServerInterceptor())
+        streamInterceptors = append(streamInterceptors, s.auth.StreamServerInterceptor())
+    } else {
+        log.Printf("Authentication disabled")
+    }
+
+    // Create gRPC server with middleware
+    srv := grpc.NewServer(
+        grpc.Creds(creds),
+        grpc.KeepaliveParams(keepaliveParams),
+        grpc.KeepaliveEnforcementPolicy(keepalivePolicy),
+        grpc.MaxConcurrentStreams(1000), // Limit concurrent streams
+        grpc.ConnectionTimeout(5*time.Second), // Connection timeout
+        grpc.StreamInterceptor(grpc_middleware.ChainStreamServer(streamInterceptors...)),
+        grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(unaryInterceptors...)),
+    )
+
+    // Register services
+    gen.RegisterChatServiceServer(srv, s)
+    gen.RegisterEmbeddingServiceServer(srv, s.embedding)
+    grpc_prometheus.Register(srv)
+
+    // Register health service
+    grpc_health_v1.RegisterHealthServer(srv, s)
+
+    // Start health check goroutine
+    go s.runHealthChecks()
+
+    lis, err := net.Listen("tcp", s.cfg.GRPCAddr)
+    if err != nil {
+        log.Printf("Failed to listen on %s: %v", s.cfg.GRPCAddr, err)
+        return fmt.Errorf("server listen failed: %w", err)
+    }
+
+    log.Printf("head gRPC+mTLS server listening on %s", s.cfg.GRPCAddr)
+    if err := srv.Serve(lis); err != nil {
+        log.Printf("Server failed: %v", err)
+        return fmt.Errorf("server failed: %w", err)
+    }
+
+    return nil
 }
 
-srv := grpc.NewServer() // mTLS уже настроен на стороне клиента и сервера через credentials в Dial
-gen.RegisterChatServiceServer(srv, s)
+func (s *HeadServer) runHealthChecks() {
+    ticker := time.NewTicker(10 * time.Second)
+    defer ticker.Stop()
 
-lis, err := net.Listen("tcp", s.cfg.GRPCAddr)
-if err != nil {
-return err
+    for {
+        select {
+        case <-ticker.C:
+            // Check model client health
+            if s.model != nil && s.model.conn != nil {
+                // Check connection state
+                state := s.model.conn.GetState()
+                if state != grpc.ConnectivityReady {
+                    log.Printf("Model client connection state: %s", state)
+                    s.SetHealthStatus("NOT_SERVING")
+                    // Try to reconnect
+                    err := s.model.reconnect(context.Background())
+                    if err != nil {
+                        log.Printf("Failed to reconnect: %v", err)
+                    }
+                } else {
+                    s.SetHealthStatus("SERVING")
+                }
+            }
+
+            // Check active requests
+            active := atomic.LoadInt32(&s.activeRequests)
+            if active > int32(s.maxRequests)*90/100 {
+                log.Printf("High load: %d active requests (limit: %d)", active, s.maxRequests)
+            }
+
+            // Check for configuration updates
+            if s.networkConfigManager != nil {
+                err := s.networkConfigManager.LoadConfig()
+                if err != nil {
+                    log.Printf("Failed to reload network config: %v", err)
+                } else {
+                    log.Printf("Network config reloaded successfully")
+                    // Reconnect model client with new config
+                    err := s.model.reconnect(context.Background())
+                    if err != nil {
+                        log.Printf("Failed to reconnect with new config: %v", err)
+                    }
+                }
+            }
+        }
+    }
 }
 
-log.Printf("head gRPC+mTLS server listening on %s", s.cfg.GRPCAddr)
-return srv.Serve(lis)
+// Health check implementation
+func (s *HeadServer) Check(ctx context.Context, req *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error) {
+    s.healthMutex.RLock()
+    defer s.healthMutex.RUnlock()
+
+    return &grpc_health_v1.HealthCheckResponse{
+        Status: grpc_health_v1.HealthCheckResponse_ServingStatus(
+            grpc_health_v1.HealthCheckResponse_ServingStatus_value[s.healthStatus],
+        ),
+    }, nil
 }
 
-func (s *HeadServer) Shutdown(ctx context.Context) error {
-done := make(chan struct{})
-go func() {
-s.model.Close()
-close(done)
-}()
-
-select {
-case <-ctx.Done():
-return ctx.Err()
-case <-done:
-return nil
+func (s *HeadServer) Watch(req *grpc_health_v1.HealthCheckRequest, stream grpc_health_v1.Health_WatchServer) error {
+    // Simple implementation - could be enhanced with actual state changes
+    for {
+        select {
+        case <-stream.Context().Done():
+            return nil
+        case <-time.After(5 * time.Second):
+            resp, err := s.Check(stream.Context(), req)
+            if err != nil {
+                return err
+            }
+            if err := stream.Send(resp); err != nil {
+                return err
+            }
+        }
+    }
 }
+
+// Update health status
+func (s *HeadServer) SetHealthStatus(status string) {
+    s.healthMutex.Lock()
+    defer s.healthMutex.Unlock()
+    s.healthStatus = status
+}
+
+// Batch processing method
+func (s *HeadServer) BatchGenerate(ctx context.Context, req *model.BatchGenRequest) (*model.BatchGenResponse, error) {
+    start := time.Now()
+    var responses []*model.GenResponse
+
+    // Start tracing span
+    ctx, span := tracer.Start(ctx, "BatchGenerate",
+        trace.WithAttributes(
+            attribute.Int("requests", len(req.Requests)),
+        ),
+    )
+    defer span.End()
+
+    // Increment active request count
+    atomic.AddInt32(&s.activeRequests, 1)
+    defer atomic.AddInt32(&s.activeRequests, -1)
+
+    // Update active connections metric
+    activeConnections.Set(float64(atomic.LoadInt32(&s.activeRequests)))
+
+    // Process each request in the batch
+    for _, singleReq := range req.Requests {
+        // Execute with circuit breaker
+        var responseText string
+        var tokensUsed int
+        err := hystrix.Do("model_proxy", func() error {
+            var err error
+            responseText, tokensUsed, err = s.model.Generate(ctx, singleReq.Model, singleReq.Messages, singleReq.Temperature, singleReq.MaxTokens)
+            if err != nil {
+                requestErrors.WithLabelValues(singleReq.Model, "model_error").Inc()
+                circuitBreakerState.WithLabelValues("model_proxy", "open").Set(1)
+                return fmt.Errorf("model error: %w", err)
+            }
+            return nil
+        }, nil)
+
+        if err != nil {
+            requestErrors.WithLabelValues(singleReq.Model, "circuit_breaker").Inc()
+            // Add error response for this request
+            responses = append(responses, &model.GenResponse{
+                RequestId: singleReq.RequestId,
+                Text:      fmt.Sprintf("Error: %v", err),
+                TokensUsed: 0,
+            })
+            continue
+        }
+
+        // Update circuit breaker state
+        circuitBreakerState.WithLabelValues("model_proxy", "closed").Set(1)
+
+        // Add successful response
+        responses = append(responses, &model.GenResponse{
+            RequestId: singleReq.RequestId,
+            Text:      responseText,
+            TokensUsed: int32(tokensUsed),
+        })
+    }
+
+    requestLatency.WithLabelValues("batch").Observe(time.Since(start).Seconds())
+    requestsTotal.WithLabelValues("batch", "ok").Inc()
+
+    return &model.BatchGenResponse{
+        Responses: responses,
+    }, nil
 }
 
 // Обычный (не стриминговый) запрос — возвращает полный текст сразу
 func (s *HeadServer) ChatCompletion(ctx context.Context, req *gen.ChatRequest) (*gen.ChatResponse, error) {
-start := time.Now()
-modelName := req.Model
-if modelName == "" {
-modelName = "gpt-4o"
-}
+    start := time.Now()
+    modelName := req.Model
+    if modelName == "" {
+        modelName = "gpt-4o"
+    }
 
-messages := make([]string, 0, len(req.Messages))
-for _, m := range req.Messages {
-messages = append(messages, m.Content)
-}
+    // Start tracing span
+    ctx, span := tracer.Start(ctx, "ChatCompletion",
+        trace.WithAttributes(
+            attribute.String("model", modelName),
+            attribute.Int("messages", len(req.Messages)),
+        ),
+    )
+    defer span.End()
 
-text, tokens, err := s.model.Generate(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
-if err != nil {
-requestsTotal.WithLabelValues(modelName, "error").Inc()
-return nil, status.Errorf(codes.Internal, "model error: %v", err)
-}
+    // Increment active request count
+    atomic.AddInt32(&s.activeRequests, 1)
+    defer atomic.AddInt32(&s.activeRequests, -1)
 
-requestsTotal.WithLabelValues(modelName, "ok").Inc()
-requestLatency.WithLabelValues(modelName).Observe(time.Since(start).Seconds())
+    // Update active connections metric
+    activeConnections.Set(float64(atomic.LoadInt32(&s.activeRequests)))
 
-return &gen.ChatResponse{
-RequestId:  req.RequestId,
-FullText:   text,
-Model:      modelName,
-Provider:  "litellm",
-TokensUsed: int32(tokens),
-}, nil
-}
+    messages := make([]string, 0, len(req.Messages))
+    for _, m := range req.Messages {
+        messages = append(messages, m.Content)
+    }
 
-requestsTotal.WithLabelValues(modelName, "ok").Inc()
-requestLatency.WithLabelValues(modelName).Observe(time.Since(start).Seconds())
+    // Execute with circuit breaker
+    var responseText string
+    var tokensUsed int
+    err := hystrix.Do("model_proxy", func() error {
+        var err error
+        responseText, tokensUsed, err = s.model.Generate(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
+        if err != nil {
+            requestErrors.WithLabelValues(modelName, "model_error").Inc()
+            circuitBreakerState.WithLabelValues("model_proxy", "open").Set(1)
+            return fmt.Errorf("model error: %w", err)
+        }
+        return nil
+    }, nil)
 
-return &gen.ChatResponse{
-RequestId:  req.RequestId,
-FullText:   text,
-Model:      modelName,
-Provider:  "litellm",
-TokensUsed: int32(tokens),
-}, nil
+    if err != nil {
+        requestErrors.WithLabelValues(modelName, "circuit_breaker").Inc()
+        requestsTotal.WithLabelValues(modelName, "error").Inc()
+        return nil, status.Errorf(codes.Internal, "request failed: %v", err)
+    }
+
+    // Update circuit breaker state
+    circuitBreakerState.WithLabelValues("model_proxy", "closed").Set(1)
+
+    requestLatency.WithLabelValues(modelName).Observe(time.Since(start).Seconds())
+    requestsTotal.WithLabelValues(modelName, "ok").Inc()
+
+    return &gen.ChatResponse{
+        RequestId:  req.RequestId,
+        FullText:   responseText,
+        Model:      modelName,
+        Provider:  "litellm",
+        TokensUsed: int32(tokensUsed),
+    }, nil
 }
 
 // Стриминговый запрос — настоящий SSE-совместимый стриминг
 func (s *HeadServer) ChatCompletionStream(req *gen.ChatRequest, stream gen.ChatService_ChatCompletionStreamServer) error {
-ctx := stream.Context()
-modelName := req.Model
-if modelName == "" {
-modelName = "gpt-4o"
-}
+    ctx := stream.Context()
+    modelName := req.Model
+    if modelName == "" {
+        modelName = "gpt-4o"
+    }
 
-messages := make([]string, 0, len(req.Messages))
-for _, m := range req.Messages {
-messages = append(messages, m.Content)
-}
+    // Start tracing span
+    ctx, span := tracer.Start(ctx, "ChatCompletionStream",
+        trace.WithAttributes(
+            attribute.String("model", modelName),
+            attribute.Int("messages", len(req.Messages)),
+        ),
+    )
+    defer span.End()
 
-// Открываем стриминговый gRPC-клиент к model-proxy
-grpcStream, err := s.model.stub.GenerateStream(ctx, &model.GenRequest{
-RequestId:   req.RequestId,
-Model:       modelName,
-Messages:    messages,
-Temperature: req.Temperature,
-MaxTokens:   req.MaxTokens,
-Stream:      true,
-})
-if err != nil {
-requestsTotal.WithLabelValues(modelName, "error").Inc()
-return status.Errorf(codes.Internal, "failed to start stream: %v", err)
-}
+    // Increment active request count
+    atomic.AddInt32(&s.activeRequests, 1)
+    defer atomic.AddInt32(&s.activeRequests, -1)
 
-var fullText string
-var totalTokens int32
+    messages := make([]string, 0, len(req.Messages))
+    for _, m := range req.Messages {
+        messages = append(messages, m.Content)
+    }
 
-for {
-chunk, err := grpcStream.Recv()
-if err == io.EOF {
-// Стриминг завершён
-break
-}
-if err != nil {
-requestsTotal.WithLabelValues(modelName, "error").Inc()
-return status.Errorf(codes.Internal, "stream recv error: %v", err)
-}
+    // Execute with circuit breaker
+    var responseText string
+    var tokensUsed int
 
-fullText += chunk.Text
-if chunk.TokensUsed > totalTokens {
-totalTokens = chunk.TokensUsed
-}
+    streamCh, errCh := s.model.GenerateStream(ctx, modelName, messages, float32(req.Temperature), req.MaxTokens)
 
-// Отправляем клиенту (tail → пользователь) каждый кусок
-if err := stream.Send(&gen.ChatResponseChunk{
-RequestId:  req.RequestId,
-Chunk:      chunk.Text,
-IsFinal:    false,
-Provider:   "litellm",
-TokensUsed: chunk.TokensUsed,
-}); err != nil {
-return err
-}
-}
-
-// Финальный чанк — совместимо с OpenAI
-_ = stream.Send(&gen.ChatResponseChunk{
-RequestId:  req.RequestId,
-Chunk:      "",
-IsFinal:    true,
-Provider:   "litellm",
-TokensUsed: totalTokens,
-})
-
-requestsTotal.WithLabelValues(modelName, "ok").Inc()
-return nil
+    for {
+        select {
+        case resp, ok := <-streamCh:
+            if !ok {
+                return nil
+            }
+            if err := stream.Send(&gen.ChatStreamResponse{
+                Chunk: resp.Text,
+            }); err != nil {
+                return err
+            }
+        case err, ok := <-errCh:
+            if !ok {
+                return nil
+            }
+            requestErrors.WithLabelValues(modelName, "stream_error").Inc()
+            return status.Errorf(codes.Internal, "stream error: %v", err)
+        }
+    }
 }

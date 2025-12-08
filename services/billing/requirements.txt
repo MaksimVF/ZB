@@ -1,0 +1,14 @@
+
+
+grpcio==1.60.0
+grpcio-tools==1.60.0
+redis==5.0.1
+flask==3.0.0
+flask-limiter==3.5.0
+requests==2.31.0
+pyjwt==2.8.0
+stripe==8.0.0
+protobuf==5.26.1
+python-decimal==0.0.1
+python-dotenv==1.0.0
+

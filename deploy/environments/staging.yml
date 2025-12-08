@@ -1,0 +1,44 @@
+
+
+
+
+
+
+---
+# Staging environment configuration
+docker_network: llm-network-staging
+project_root: /opt/llm-system-staging
+
+# Service versions for staging
+service_versions:
+  head: staging
+  model-proxy: staging
+  tail: staging
+  auth-service: staging
+  billing: staging
+  gateway: staging
+  rate-limiter: staging
+  secrets-service: staging
+  admin-dashboard: staging
+  user-dashboard: staging
+
+# Resource limits for staging
+resource_limits:
+  head:
+    memory: "1g"
+    cpu: "0.5"
+  model-proxy:
+    memory: "2g"
+    cpu: "1.0"
+  tail:
+    memory: "1g"
+    cpu: "0.5"
+
+# Monitoring settings
+monitoring_enabled: true
+logging_level: info
+tls_enabled: true
+
+
+
+

@@ -1,0 +1,58 @@
+
+
+
+
+groups:
+  - name: billing_alerts
+    rules:
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate in {{ $labels.job }}"
+          description: "Error rate is above 5% for the last 5 minutes"
+
+      - alert: LowBalance
+        expr: user_balance < 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low balance for user {{ $labels.user_id }}"
+          description: "User balance is below $10"
+
+      - alert: ServiceDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service {{ $labels.job }} is down"
+          description: "Service has been down for more than 2 minutes"
+
+      - alert: HighLatency
+        expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (job)) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High latency in {{ $labels.job }}"
+          description: "95th percentile latency is above 1 second"
+
+      - alert: HighUsage
+        expr: rate(tokens_used_total[1h]) > 1000000
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High token usage by user {{ $labels.user_id }}"
+          description: "User has used more than 1M tokens in the last hour"
+
+
+
+
+
+
+

@@ -1,0 +1,132 @@
+
+syntax = "proto3";
+
+package routing;
+
+option go_package = "github.com/MaksimVF/ZB/gen/routing";
+option java_package = "com.zb.routing";
+option java_outer_classname = "RoutingProto";
+option java_multiple_files = true;
+
+// RoutingService provides dynamic routing capabilities for the network
+service RoutingService {
+    // RegisterHead registers a head service with the routing system
+    rpc RegisterHead(RegisterHeadRequest) returns (RegisterHeadResponse);
+
+    // UpdateHeadStatus updates the status and load information of a head service
+    rpc UpdateHeadStatus(UpdateHeadStatusRequest) returns (UpdateHeadStatusResponse);
+
+    // GetRoutingDecision gets a routing decision based on current policies and head statuses
+    rpc GetRoutingDecision(GetRoutingDecisionRequest) returns (GetRoutingDecisionResponse);
+
+    // GetAllHeads gets information about all registered head services
+    rpc GetAllHeads(GetAllHeadsRequest) returns (GetAllHeadsResponse);
+
+    // UpdateRoutingPolicy updates the routing policy configuration
+    rpc UpdateRoutingPolicy(UpdateRoutingPolicyRequest) returns (UpdateRoutingPolicyResponse);
+
+    // GetRoutingPolicy gets the current routing policy configuration
+    rpc GetRoutingPolicy(GetRoutingPolicyRequest) returns (GetRoutingPolicyResponse);
+}
+
+// HeadService represents a head service in the routing system
+message HeadService {
+    string head_id = 1;                // Unique identifier for the head service
+    string endpoint = 2;              // Network endpoint (e.g., "grpc://head1:50055")
+    string status = 3;                // Current status (e.g., "active", "draining", "offline")
+    int32 current_load = 4;           // Current load percentage (0-100)
+    int64 last_heartbeat = 5;         // Unix timestamp of last heartbeat
+    string region = 6;                // Geographic region
+    string model_type = 7;            // Model type supported
+    string version = 8;               // Version information
+    map<string, string> metadata = 9;  // Additional metadata
+}
+
+// RegisterHeadRequest is used to register a new head service
+message RegisterHeadRequest {
+    string head_id = 1;                // Unique identifier for the head service
+    string endpoint = 2;               // Network endpoint
+    string region = 3;                 // Geographic region
+    string model_type = 4;             // Model type supported
+    string version = 5;                // Version information
+    map<string, string> metadata = 6;   // Additional metadata
+}
+
+// RegisterHeadResponse is the response to a head registration request
+message RegisterHeadResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// UpdateHeadStatusRequest updates the status of a head service
+message UpdateHeadStatusRequest {
+    string head_id = 1;                // Unique identifier for the head service
+    string status = 2;                // Current status
+    int32 current_load = 3;           // Current load percentage
+    int64 timestamp = 4;              // Current timestamp
+}
+
+// UpdateHeadStatusResponse is the response to a head status update
+message UpdateHeadStatusResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// GetRoutingDecisionRequest requests a routing decision
+message GetRoutingDecisionRequest {
+    string client_id = 1;             // Client identifier
+    string model_type = 2;            // Requested model type
+    string region_preference = 3;     // Preferred geographic region
+    string routing_strategy = 4;      // Specific routing strategy to use
+    map<string, string> metadata = 5;  // Additional request metadata
+}
+
+// GetRoutingDecisionResponse contains the routing decision
+message GetRoutingDecisionResponse {
+    string head_id = 1;                // Selected head service ID
+    string endpoint = 2;               // Endpoint to connect to
+    string strategy_used = 3;          // Strategy that was used
+    string reason = 4;                 // Reason for the decision
+    map<string, string> metadata = 5;   // Additional response metadata
+}
+
+// GetAllHeadsRequest requests information about all heads
+message GetAllHeadsRequest {
+    // Filter criteria can be added here
+}
+
+// GetAllHeadsResponse contains information about all heads
+message GetAllHeadsResponse {
+    repeated HeadService heads = 1;    // List of all head services
+}
+
+// RoutingPolicy defines the routing policy configuration
+message RoutingPolicy {
+    string default_strategy = 1;       // Default routing strategy
+    bool enable_geo_routing = 2;       // Enable geographic routing
+    bool enable_load_balancing = 3;   // Enable load balancing
+    bool enable_model_specific = 4;   // Enable model-specific routing
+    map<string, string> strategy_config = 5; // Strategy-specific configuration
+}
+
+// UpdateRoutingPolicyRequest updates the routing policy
+message UpdateRoutingPolicyRequest {
+    RoutingPolicy policy = 1;         // New policy configuration
+}
+
+// UpdateRoutingPolicyResponse is the response to a policy update
+message UpdateRoutingPolicyResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// GetRoutingPolicyRequest requests the current routing policy
+message GetRoutingPolicyRequest {
+    // No parameters needed
+}
+
+// GetRoutingPolicyResponse contains the current routing policy
+message GetRoutingPolicyResponse {
+    RoutingPolicy policy = 1;         // Current policy configuration
+}
+

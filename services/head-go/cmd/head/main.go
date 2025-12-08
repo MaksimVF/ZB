@@ -11,9 +11,21 @@ import (
     "github.com/yourorg/head/internal/server"
 )
 func main(){
+    // Load static configuration
     cfg := config.Load()
+
+    // Initialize network config manager
+    networkConfigManager := config.NewNetworkConfigManager("redis:6379")
+    err := networkConfigManager.LoadConfig()
+    if err != nil {
+        log.Printf("Failed to load network config: %v", err)
+    }
+
+    // Start auto-reload for network config
+    networkConfigManager.StartAutoReload(10 * time.Second)
+
     go metrics.Start(cfg.MetricsPort)
-    srv := server.New(cfg)
+    srv := server.New(cfg, networkConfigManager)
     errCh := make(chan error,1)
     go func(){ errCh <- srv.Run() }()
     sig := make(chan os.Signal,1)

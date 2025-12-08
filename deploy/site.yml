@@ -1,0 +1,440 @@
+
+
+
+---
+# Main deployment playbook
+- name: Pre-deployment setup
+  hosts: all-servers
+  become: true
+  gather_facts: true
+  vars_files:
+    - "group_vars/all.yml"
+
+  tasks:
+    - name: Check system requirements
+      assert:
+        that:
+          - ansible_memory_mb.real.total >= 4096
+          - ansible_processor_vcpus >= 2
+        fail_msg: "Server does not meet minimum requirements (4GB RAM, 2 CPUs)"
+
+    - name: Ensure required packages are installed
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+          - python3-pip
+          - virtualenv
+          - python3-setuptools
+          - git
+        state: present
+        update_cache: yes
+
+    - name: Install Docker
+      block:
+        - name: Add Docker GPG apt Key
+          apt_key:
+            url: https://download.docker.com/linux/ubuntu/gpg
+            state: present
+
+        - name: Add Docker Repository
+          apt_repository:
+            repo: deb https://download.docker.com/linux/ubuntu focal stable
+            state: present
+
+        - name: Install Docker
+          apt:
+            name: docker-ce
+            state: present
+            update_cache: yes
+
+        - name: Ensure Docker service is running
+          service:
+            name: docker
+            state: started
+            enabled: yes
+
+    - name: Install Docker Module for Python
+      pip:
+        name: docker
+
+    - name: Create project directory
+      file:
+        path: "{{ project_root }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy project files
+      synchronize:
+        src: ../../
+        dest: "{{ project_root }}"
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=node_modules"
+          - "--exclude=__pycache__"
+
+- name: Deploy Head services
+  hosts: head-services
+  become: true
+  vars_files:
+    - "group_vars/all.yml"
+
+  tasks:
+    - name: Create docker network
+      docker_network:
+        name: "{{ docker_network }}"
+
+    - name: Build and deploy model-proxy service
+      block:
+        - name: Build model-proxy image
+          docker_image:
+            name: model-proxy
+            build:
+              path: "{{ project_root }}/services/model-proxy"
+              pull: yes
+            source: build
+            force_source: yes
+            state: present
+
+        - name: Deploy model-proxy container
+          docker_container:
+            name: model-proxy
+            image: model-proxy
+            state: started
+            restart_policy: always
+            ports:
+              - "8100:8100"
+              - "50061:50061"
+              - "50062:50062"
+            networks:
+              - name: "{{ docker_network }}"
+            memory: "{{ resource_limits.model-proxy.memory }}"
+            cpu_period: 100000
+            cpu_quota: "{{ (resource_limits.model-proxy.cpu | regex_replace('(\\d+(\\.\\d+)?)', '\\1 * 100000') | int }}"
+            healthcheck:
+              test: ["CMD", "curl", "-f", "http://localhost:8100/health"]
+              interval: 30s
+              timeout: 10s
+              retries: 3
+
+    - name: Build and deploy head service
+      block:
+        - name: Build head image
+          docker_image:
+            name: head
+            build:
+              path: "{{ project_root }}/services/head-go"
+              pull: yes
+            source: build
+            force_source: yes
+            state: present
+
+        - name: Deploy head container
+          docker_container:
+            name: head
+            image: head
+            state: started
+            restart_policy: always
+            ports:
+              - "50055:50055"
+              - "9001:9001"
+            networks:
+              - name: "{{ docker_network }}"
+            memory: "{{ resource_limits.head.memory }}"
+            cpu_period: 100000
+            cpu_quota: "{{ (resource_limits.head.cpu | regex_replace('(\\d+(\\.\\d+)?)', '\\1 * 100000') | int }}"
+            healthcheck:
+              test: ["CMD", "grpc_health_probe", "-addr=:50055"]
+              interval: 30s
+              timeout: 10s
+              retries: 3
+
+- name: Deploy Tail services
+  hosts: tail-services
+  become: true
+  vars_files:
+    - "group_vars/all.yml"
+
+  tasks:
+    - name: Create docker network
+      docker_network:
+        name: "{{ docker_network }}"
+
+    - name: Build and deploy tail service
+      block:
+        - name: Build tail image
+          docker_image:
+            name: tail
+            build:
+              path: "{{ project_root }}/services/tail-go"
+              pull: yes
+            source: build
+            force_source: yes
+            state: present
+
+        - name: Deploy tail container
+          docker_container:
+            name: tail
+            image: tail
+            state: started
+            restart_policy: always
+            ports:
+              - "8000:8000"
+            networks:
+              - name: "{{ docker_network }}"
+            volumes:
+              - "{{ project_root }}/certs:/certs:ro"
+            memory: "{{ resource_limits.tail.memory }}"
+            cpu_period: 100000
+            cpu_quota: "{{ (resource_limits.tail.cpu | regex_replace('(\\d+(\\.\\d+)?)', '\\1 * 100000') | int }}"
+            healthcheck:
+              test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+              interval: 30s
+              timeout: 10s
+              retries: 3
+
+    - name: Build and deploy auth-service
+      block:
+        - name: Build auth-service image
+          docker_image:
+            name: auth-service
+            build:
+              path: "{{ project_root }}/services/auth-service"
+              pull: yes
+            source: build
+            force_source: yes
+            state: present
+
+        - name: Deploy auth-service container
+          docker_container:
+            name: auth-service
+            image: auth-service
+            state: started
+            restart_policy: always
+            networks:
+              - name: "{{ docker_network }}"
+            healthcheck:
+              test: ["CMD", "grpc_health_probe", "-addr=:50051"]
+              interval: 30s
+              timeout: 10s
+              retries: 3
+
+    - name: Build and deploy billing service
+      block:
+        - name: Build billing image
+          docker_image:
+            name: billing
+            build:
+              path: "{{ project_root }}/services/billing"
+              pull: yes
+            source: build
+            force_source: yes
+            state: present
+
+        - name: Deploy billing container
+          docker_container:
+            name: billing
+            image: billing
+            state: started
+            restart_policy: always
+            networks:
+              - name: "{{ docker_network }}"
+            healthcheck:
+              test: ["CMD", "curl", "-f", "http://localhost:50051/health"]
+              interval: 30s
+              timeout: 10s
+              retries: 3
+
+    - name: Build and deploy gateway service
+      block:
+        - name: Build gateway image
+          docker_image:
+            name: gateway
+            build:
+              path: "{{ project_root }}/services/gateway"
+              pull: yes
+            source: build
+            force_source: yes
+            state: present
+
+        - name: Deploy gateway container
+          docker_container:
+            name: gateway
+            image: gateway
+            state: started
+            restart_policy: always
+            networks:
+              - name: "{{ docker_network }}"
+            healthcheck:
+              test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+              interval: 30s
+              timeout: 10s
+              retries: 3
+
+    - name: Build and deploy rate-limiter service
+      block:
+        - name: Build rate-limiter image
+          docker_image:
+            name: rate-limiter
+            build:
+              path: "{{ project_root }}/services/rate-limiter"
+              pull: yes
+            source: build
+            force_source: yes
+            state: present
+
+        - name: Deploy rate-limiter container
+          docker_container:
+            name: rate-limiter
+            image: rate-limiter
+            state: started
+            restart_policy: always
+            ports:
+              - "50051:50051"
+            networks:
+              - name: "{{ docker_network }}"
+            volumes:
+              - "{{ project_root }}/certs:/certs:ro"
+            healthcheck:
+              test: ["CMD", "grpc_health_probe", "-addr=:50051"]
+              interval: 30s
+              timeout: 10s
+              retries: 3
+
+    - name: Build and deploy secrets-service
+      block:
+        - name: Build secrets-service image
+          docker_image:
+            name: secrets-service
+            build:
+              path: "{{ project_root }}/services/secrets-service"
+              pull: yes
+            source: build
+            force_source: yes
+            state: present
+
+        - name: Deploy secrets-service container
+          docker_container:
+            name: secrets-service
+            image: secrets-service
+            state: started
+            restart_policy: always
+            networks:
+              - name: "{{ docker_network }}"
+            healthcheck:
+              test: ["CMD", "grpc_health_probe", "-addr=:50051"]
+              interval: 30s
+              timeout: 10s
+              retries: 3
+
+- name: Deploy UI services
+  hosts: ui-services
+  become: true
+  vars_files:
+    - "group_vars/all.yml"
+
+  tasks:
+    - name: Create docker network
+      docker_network:
+        name: "{{ docker_network }}"
+
+    - name: Build and deploy admin-dashboard
+      block:
+        - name: Build admin-dashboard image
+          docker_image:
+            name: admin-dashboard
+            build:
+              path: "{{ project_root }}/ui/admin-dashboard"
+              pull: yes
+            source: build
+            force_source: yes
+            state: present
+
+        - name: Deploy admin-dashboard container
+          docker_container:
+            name: admin-dashboard
+            image: admin-dashboard
+            state: started
+            restart_policy: always
+            ports:
+              - "3001:5173"
+            networks:
+              - name: "{{ docker_network }}"
+            healthcheck:
+              test: ["CMD", "curl", "-f", "http://localhost:5173"]
+              interval: 30s
+              timeout: 10s
+              retries: 3
+
+    - name: Build and deploy user-dashboard
+      block:
+        - name: Build user-dashboard image
+          docker_image:
+            name: user-dashboard
+            build:
+              path: "{{ project_root }}/ui/user-dashboard"
+              pull: yes
+            source: build
+            force_source: yes
+            state: present
+
+        - name: Deploy user-dashboard container
+          docker_container:
+            name: user-dashboard
+            image: user-dashboard
+            state: started
+            restart_policy: always
+            ports:
+              - "3000:5173"
+            networks:
+              - name: "{{ docker_network }}"
+            healthcheck:
+              test: ["CMD", "curl", "-f", "http://localhost:5173"]
+              interval: 30s
+              timeout: 10s
+              retries: 3
+
+- name: Post-deployment verification
+  hosts: all-servers
+  become: true
+  tasks:
+    - name: Verify all containers are running
+      command: "docker ps -a --filter 'status=running' --filter 'name={{ item }}'"
+      register: container_status
+      failed_when: container_status.rc != 0
+      with_items:
+        - model-proxy
+        - head
+        - tail
+        - auth-service
+        - billing
+        - gateway
+        - rate-limiter
+        - secrets-service
+        - admin-dashboard
+        - user-dashboard
+
+    - name: Check service health
+      uri:
+        url: "http://localhost:{{ item.port }}/health"
+        method: GET
+        status_code: 200
+      register: health_check
+      until: health_check.status == 200
+      retries: 5
+      delay: 10
+      with_items:
+        - { name: "model-proxy", port: 8100 }
+        - { name: "tail", port: 8000 }
+        - { name: "admin-dashboard", port: 3001 }
+        - { name: "user-dashboard", port: 3000 }
+      when: inventory_hostname in groups['ui-services'] or
+            inventory_hostname in groups['head-services'] or
+            inventory_hostname in groups['tail-services']
+
+    - name: Report deployment status
+      debug:
+        msg: "Deployment completed successfully on {{ inventory_hostname }}"
+

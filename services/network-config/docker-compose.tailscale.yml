@@ -1,0 +1,59 @@
+
+
+
+version: '3.8'
+
+services:
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: tailscale
+    environment:
+      - TAILSCALE_AUTH_KEY=${TAILSCALE_AUTH_KEY}
+      - TAILSCALE_HOSTNAME=${TAILSCALE_HOSTNAME:-tailscale-gateway}
+      - TAILSCALE_ADVERTISE_ROUTES=${TAILSCALE_ADVERTISE_ROUTES:-}
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv6.conf.all.forwarding=1
+    restart: unless-stopped
+    networks:
+      - tailscale-net
+
+  network-config:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: network-config
+    environment:
+      - REDIS_ADDR=redis:6379
+    depends_on:
+      - redis
+    ports:
+      - "50060:50060"
+    networks:
+      - tailscale-net
+      - default
+    restart: unless-stopped
+
+  redis:
+    image: redis:alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - default
+
+volumes:
+  tailscale-state:
+
+networks:
+  tailscale-net:
+    driver: bridge
+    attachable: true
+
+
+

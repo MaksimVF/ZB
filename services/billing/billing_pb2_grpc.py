@@ -49,6 +49,16 @@ class BillingServiceStub(object):
                 request_serializer=billing__pb2.CommitRequest.SerializeToString,
                 response_deserializer=billing__pb2.CommitResponse.FromString,
                 _registered_method=True)
+        self.GetBalance = channel.unary_unary(
+                '/billing.BillingService/GetBalance',
+                request_serializer=billing__pb2.GetBalanceRequest.SerializeToString,
+                response_deserializer=billing__pb2.GetBalanceResponse.FromString,
+                _registered_method=True)
+        self.AdjustBalance = channel.unary_unary(
+                '/billing.BillingService/AdjustBalance',
+                request_serializer=billing__pb2.AdjustBalanceRequest.SerializeToString,
+                response_deserializer=billing__pb2.AdjustBalanceResponse.FromString,
+                _registered_method=True)
 
 
 class BillingServiceServicer(object):
@@ -72,6 +82,18 @@ class BillingServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetBalance(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def AdjustBalance(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_BillingServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -89,6 +111,16 @@ def add_BillingServiceServicer_to_server(servicer, server):
                     servicer.Commit,
                     request_deserializer=billing__pb2.CommitRequest.FromString,
                     response_serializer=billing__pb2.CommitResponse.SerializeToString,
+            ),
+            'GetBalance': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetBalance,
+                    request_deserializer=billing__pb2.GetBalanceRequest.FromString,
+                    response_serializer=billing__pb2.GetBalanceResponse.SerializeToString,
+            ),
+            'AdjustBalance': grpc.unary_unary_rpc_method_handler(
+                    servicer.AdjustBalance,
+                    request_deserializer=billing__pb2.AdjustBalanceRequest.FromString,
+                    response_serializer=billing__pb2.AdjustBalanceResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -172,6 +204,60 @@ class BillingService(object):
             '/billing.BillingService/Commit',
             billing__pb2.CommitRequest.SerializeToString,
             billing__pb2.CommitResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetBalance(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/billing.BillingService/GetBalance',
+            billing__pb2.GetBalanceRequest.SerializeToString,
+            billing__pb2.GetBalanceResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def AdjustBalance(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/billing.BillingService/AdjustBalance',
+            billing__pb2.AdjustBalanceRequest.SerializeToString,
+            billing__pb2.AdjustBalanceResponse.FromString,
             options,
             channel_credentials,
             insecure,
