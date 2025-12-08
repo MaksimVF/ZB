@@ -10,3 +10,4 @@ require (
 )
 
 replace github.com/MaksimVF/ZB => ../../..
+replace github.com/MaksimVF/ZB/gen => ../../gen
