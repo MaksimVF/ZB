@@ -7,19 +7,19 @@
 # Use multi-stage build for each service
 
 # Stage 1: Build routing-service
-FROM golang:1.21 AS routing-service-builder
+FROM golang:1.25 AS routing-service-builder
 WORKDIR /app
 COPY services/routing-service/ ./
 RUN go mod tidy && go build -o routing-service ./...
 
 # Stage 2: Build secrets-service
-FROM golang:1.21 AS secrets-service-builder
+FROM golang:1.25 AS secrets-service-builder
 WORKDIR /app
 COPY services/secrets-service/ ./
 RUN go mod tidy && go build -o secrets-service ./...
 
 # Stage 3: Build network-config-admin
-FROM golang:1.21 AS network-config-builder
+FROM golang:1.25 AS network-config-builder
 WORKDIR /app
 COPY services/network-config/ ./
 RUN go mod tidy && go build -o network-config-admin ./...
