@@ -1,5 +1,3 @@
-
-
 /*
 Gateway Service (Agent Gateway)
 ==============================
@@ -25,27 +23,30 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"time"
 
+	"llm-gateway-pro/services/gateway/internal/billing"
+	"llm-gateway-pro/services/gateway/internal/handlers"
+	"llm-gateway-pro/services/gateway/internal/providers"
+	"llm-gateway-pro/services/gateway/internal/resilience"
+	"llm-gateway-pro/services/gateway/middleware"
+
+	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	pb "llm-gateway-pro/services/secret-service/pb"
-	"llm-gateway-pro/services/gateway/internal/handlers"
-	"llm-gateway-pro/services/gateway/internal/billing"
-	"llm-gateway-pro/services/gateway/internal/providers"
-	"llm-gateway-pro/services/gateway/internal/resilience"
 )
 
 var (
-	logger        zerolog.Logger
-	secretClient  pb.SecretServiceClient
-	secretConn    *grpc.ClientConn
+	logger       zerolog.Logger
+	secretClient pb.SecretServiceClient
+	secretConn   *grpc.ClientConn
 )
 
 func init() {
@@ -130,50 +131,50 @@ func main() {
 	circuitBreakerConfigs := []resilience.CircuitBreakerConfig{
 		{
 			Name:          "openai",
-			MaxRequests:    5,
-			Interval:       60 * time.Second,
-			Timeout:        10 * time.Second,
-			ReadyToTrip:    resilience.DefaultReadyToTrip,
+			MaxRequests:   5,
+			Interval:      60 * time.Second,
+			Timeout:       10 * time.Second,
+			ReadyToTrip:   resilience.DefaultReadyToTrip,
 			OnStateChange: resilience.DefaultOnStateChange,
 		},
 		{
 			Name:          "anthropic",
-			MaxRequests:    5,
-			Interval:       60 * time.Second,
-			Timeout:        10 * time.Second,
-			ReadyToTrip:    resilience.DefaultReadyToTrip,
+			MaxRequests:   5,
+			Interval:      60 * time.Second,
+			Timeout:       10 * time.Second,
+			ReadyToTrip:   resilience.DefaultReadyToTrip,
 			OnStateChange: resilience.DefaultOnStateChange,
 		},
 		{
 			Name:          "google",
-			MaxRequests:    5,
-			Interval:       60 * time.Second,
-			Timeout:        10 * time.Second,
-			ReadyToTrip:    resilience.DefaultReadyToTrip,
+			MaxRequests:   5,
+			Interval:      60 * time.Second,
+			Timeout:       10 * time.Second,
+			ReadyToTrip:   resilience.DefaultReadyToTrip,
 			OnStateChange: resilience.DefaultOnStateChange,
 		},
 		{
 			Name:          "meta",
-			MaxRequests:    5,
-			Interval:       60 * time.Second,
-			Timeout:        10 * time.Second,
-			ReadyToTrip:    resilience.DefaultReadyToTrip,
+			MaxRequests:   5,
+			Interval:      60 * time.Second,
+			Timeout:       10 * time.Second,
+			ReadyToTrip:   resilience.DefaultReadyToTrip,
 			OnStateChange: resilience.DefaultOnStateChange,
 		},
 		{
 			Name:          "mistral",
-			MaxRequests:    5,
-			Interval:       60 * time.Second,
-			Timeout:        10 * time.Second,
-			ReadyToTrip:    resilience.DefaultReadyToTrip,
+			MaxRequests:   5,
+			Interval:      60 * time.Second,
+			Timeout:       10 * time.Second,
+			ReadyToTrip:   resilience.DefaultReadyToTrip,
 			OnStateChange: resilience.DefaultOnStateChange,
 		},
 		{
 			Name:          "cohere",
-			MaxRequests:    5,
-			Interval:       60 * time.Second,
-			Timeout:        10 * time.Second,
-			ReadyToTrip:    resilience.DefaultReadyToTrip,
+			MaxRequests:   5,
+			Interval:      60 * time.Second,
+			Timeout:       10 * time.Second,
+			ReadyToTrip:   resilience.DefaultReadyToTrip,
 			OnStateChange: resilience.DefaultOnStateChange,
 		},
 	}
@@ -267,4 +268,3 @@ func getSecretFromService(key string) string {
 
 	return resp.Value
 }
-

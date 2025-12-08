@@ -20,5 +20,4 @@ google.golang.org/grpc/codes v1.56.3
 google.golang.org/grpc/status v1.56.3
 )
 
-replace llm-gateway-pro/services/secret-service/pb => ../pb
 

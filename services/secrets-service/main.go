@@ -1,17 +1,15 @@
-
-
 package main
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"time"
 
+	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
 	"github.com/hashicorp/vault/api"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -20,7 +18,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
-	pb "llm-gateway-pro/services/secret-service/pb"
 )
 
 var (
@@ -44,8 +41,8 @@ var (
 )
 
 const (
-	SecretNotFoundError    = "secret not found"
-	PermissionDeniedError  = "permission denied"
+	SecretNotFoundError   = "secret not found"
+	PermissionDeniedError = "permission denied"
 	VaultConnectionError  = "vault connection error"
 	InvalidInputError     = "invalid input"
 	InternalServerError   = "internal server error"
@@ -93,6 +90,13 @@ func (e *SecretError) Error() string {
 
 func newSecretError(code codes.Code, message, details string) *SecretError {
 	return &SecretError{Code: code, Message: message, Details: details}
+}
+
+// server implements the gRPC SecretServiceServer interface.
+// Embed UnimplementedSecretServiceServer to ensure forward compatibility
+// when new methods are added to the service definition.
+type server struct {
+	pb.UnimplementedSecretServiceServer
 }
 
 // ===================== gRPC =====================
@@ -329,7 +333,7 @@ func handlePostSecret(w http.ResponseWriter, r *http.Request) {
 	logger.Info().Str("method", "handlePostSecret").Msg("Creating/updating secret")
 
 	var input struct {
-		Path  string `json:"path"`  // "llm/openai/api_key"
+		Path  string `json:"path"` // "llm/openai/api_key"
 		Value string `json:"value"`
 	}
 
@@ -472,4 +476,3 @@ func main() {
 		logger.Fatal().Err(err).Msg("HTTP server failed")
 	}
 }
-

@@ -12,6 +12,6 @@ require (
 	google.golang.org/protobuf v1.31.0
 )
 
-replace llm-gateway-pro/services/secret-service/pb => ../secret-service/pb
+replace github.com/MaksimVF/ZB/services/secrets-service/pb => ../secret-service/pb
 replace llm-gateway-pro/services/head-go/gen => ../head-go/gen
 

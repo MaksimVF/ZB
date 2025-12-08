@@ -1,20 +1,21 @@
-
-
-
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
+	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
 	"github.com/hashicorp/vault/api"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	pb "llm-gateway-pro/services/secret-service/pb"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func setupTestEnvironment() {
@@ -32,10 +33,10 @@ func TestGetSecret(t *testing.T) {
 
 	s := &server{}
 	tests := []struct {
-		name        string
-		secretName  string
-		mockResponse *api.Secret
-		mockError   error
+		name              string
+		secretName        string
+		mockResponse      *api.Secret
+		mockError         error
 		expectedErrorCode codes.Code
 	}{
 		{
@@ -51,15 +52,15 @@ func TestGetSecret(t *testing.T) {
 			expectedErrorCode: codes.OK,
 		},
 		{
-			name:        "secret not found",
-			secretName:  "nonexistent/secret",
-			mockResponse: nil,
+			name:              "secret not found",
+			secretName:        "nonexistent/secret",
+			mockResponse:      nil,
 			expectedErrorCode: codes.NotFound,
 		},
 		{
-			name:        "vault connection error",
-			secretName:  "llm/openai/api_key",
-			mockError:   fmt.Errorf("connection failed"),
+			name:              "vault connection error",
+			secretName:        "llm/openai/api_key",
+			mockError:         fmt.Errorf("connection failed"),
 			expectedErrorCode: codes.Internal,
 		},
 	}
@@ -184,4 +185,3 @@ func (m *MockLogical) List(path string) (*api.Secret, error) {
 	args := m.Called(path)
 	return args.Get(0).(*api.Secret), args.Error(1)
 }
-

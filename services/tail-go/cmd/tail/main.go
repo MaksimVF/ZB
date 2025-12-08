@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 package main
 
 import (
@@ -26,10 +17,11 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
-	pb "llm-gateway-pro/services/secret-service/pb" // <-- твой proto
 	"llm-gateway-pro/services/gateway/handlers"
 	"llm-gateway-pro/services/tail-go/cmd/tail/middleware"
 	"llm-gateway-pro/services/tail-go/middleware"
+
+	pb "github.com/MaksimVF/ZB/services/secrets-service/pb" // <-- твой proto
 )
 
 // Глобальные клиенты
@@ -184,11 +176,3 @@ func loadClientTLSCredentials() credentials.TransportCredentials {
 func watchSecretsUpdates() {
 	// Implementation of secret updates watching
 }
-
-
-
-
-
-
-
-

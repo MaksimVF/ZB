@@ -2,64 +2,66 @@
 package secrets
 
 import (
-"context"
-"fmt"
-"sync"
-"time"
+	"context"
+	"crypto/tls"
+	"fmt"
+	"sync"
+	"time"
 
-pb "llm-gateway-pro/services/secret-service/pb"
-"google.golang.org/grpc"
+	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 var (
-client pb.SecretServiceClient
-once   sync.Once
-cache  = make(map[string]cachedSecret)
-mu     sync.RWMutex
+	client pb.SecretServiceClient
+	once   sync.Once
+	cache  = make(map[string]cachedSecret)
+	mu     sync.RWMutex
 )
 
 type cachedSecret struct {
-value string
-exp   time.Time
+	value string
+	exp   time.Time
 }
 
 func initClient() {
-once.Do(func() {
-conn, err := grpc.Dial("secret-service:50053",
-grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{})),
-grpc.WithBlock(),
-)
-if err != nil {
-panic(fmt.Sprintf("Не удалось подключиться к secret-service: %v", err))
-}
-client = pb.NewSecretServiceClient(conn)
-})
+	once.Do(func() {
+		conn, err := grpc.Dial("secret-service:50053",
+			grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{})),
+			grpc.WithBlock(),
+		)
+		if err != nil {
+			panic(fmt.Sprintf("Не удалось подключиться к secret-service: %v", err))
+		}
+		client = pb.NewSecretServiceClient(conn)
+	})
 }
 
 func Get(name string) (string, error) {
-initClient()
+	initClient()
 
-// Проверяем кэш
-mu.RLock()
-if c, ok := cache[name]; ok && time.Now().Before(c.exp) {
-mu.RUnlock()
-return c.value, nil
-}
-mu.RUnlock()
+	// Проверяем кэш
+	mu.RLock()
+	if c, ok := cache[name]; ok && time.Now().Before(c.exp) {
+		mu.RUnlock()
+		return c.value, nil
+	}
+	mu.RUnlock()
 
-// Запрос в secret-service
-ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-defer cancel()
+	// Запрос в secret-service
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-resp, err := client.GetSecret(ctx, &pb.GetSecretRequest{Name: name})
-if err != nil {
-return "", err
-}
+	resp, err := client.GetSecret(ctx, &pb.GetSecretRequest{Name: name})
+	if err != nil {
+		return "", err
+	}
 
-// Кэшируем на 30 сек
-mu.Lock()
-cache[name] = cachedSecret{value: resp.Value, exp: time.Now().Add(30 * time.Second)}
-mu.Unlock()
+	// Кэшируем на 30 сек
+	mu.Lock()
+	cache[name] = cachedSecret{value: resp.Value, exp: time.Now().Add(30 * time.Second)}
+	mu.Unlock()
 
-return resp.Value, nil
+	return resp.Value, nil
 }

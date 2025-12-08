@@ -1,13 +1,3 @@
-
-
-
-
-
-
-
-
-
-
 package main
 
 import (
@@ -28,14 +18,15 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
-	pb "llm-gateway-pro/services/secret-service/pb"
 	"llm-gateway-pro/services/agentic-service/handlers"
 	"llm-gateway-pro/services/agentic-service/middleware"
+
+	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
 )
 
 var (
-	secretClient  pb.SecretServiceClient
-	secretConn    *grpc.ClientConn
+	secretClient pb.SecretServiceClient
+	secretConn   *grpc.ClientConn
 	redisClient  *redis.Client
 	secretsCache sync.Map
 )
@@ -159,12 +150,3 @@ func loadClientTLSCredentials() credentials.TransportCredentials {
 func watchSecretsUpdates() {
 	// Implementation of secret updates watching
 }
-
-
-
-
-
-
-
-
-

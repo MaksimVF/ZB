@@ -1,6 +1,3 @@
-
-
-
 package secrets
 
 import (
@@ -9,16 +6,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"google.golang.org/grpc"
 
 	"llm-gateway-pro/services/agentic-service/internal/grpc"
-	pb "llm-gateway-pro/services/secret-service/pb"
+
+	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
 )
 
 var (
-	secretClient  pb.SecretServiceClient
-	secretConn    *grpc.ClientConn
+	secretClient pb.SecretServiceClient
+	secretConn   *grpc.ClientConn
 	secretsCache sync.Map
 )
 
@@ -65,5 +62,3 @@ func loadClientTLSCredentials() grpc.TransportCredentials {
 	// Implementation would load TLS credentials
 	return nil // Placeholder
 }
-
-
