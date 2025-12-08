@@ -24,6 +24,7 @@ var (
 	logger       *zap.Logger
 	configMutex  sync.RWMutex
 	currentConfig NetworkConfig
+	tailscaleManager *TailscaleManager
 )
 
 // NetworkConfig represents the network configuration structure
@@ -32,6 +33,9 @@ type NetworkConfig struct {
 	NetworkMode    string            `json:"network_mode"`
 	WGPeerPublic   string            `json:"wg_peer_public,omitempty"`
 	WGAllowedIPs   string            `json:"wg_allowed_ips,omitempty"`
+	TailscaleAuthKey string          `json:"tailscale_auth_key,omitempty"`
+	TailscaleHostname string          `json:"tailscale_hostname,omitempty"`
+	TailscaleAdvertiseRoutes string   `json:"tailscale_advertise_routes,omitempty"`
 	SecurityToken  string            `json:"security_token"`
 	RetryPolicy    RetryPolicy       `json:"retry_policy"`
 	RateLimits     RateLimits        `json:"rate_limits"`
@@ -67,6 +71,9 @@ func init() {
 		Addr: "redis:6379",
 	})
 
+	// Initialize Tailscale manager
+	tailscaleManager = NewTailscaleManager(logger)
+
 	// Load initial config
 	loadConfig()
 }
@@ -78,6 +85,10 @@ func main() {
 	router.HandleFunc("/api/config", getConfig).Methods("GET")
 	router.HandleFunc("/api/config", updateConfig).Methods("PUT")
 	router.HandleFunc("/api/config/history", getConfigHistory).Methods("GET")
+
+	// Tailscale endpoints
+	router.HandleFunc("/api/tailscale/status", getTailscaleStatus).Methods("GET")
+	router.HandleFunc("/api/tailscale/configure", configureTailscale).Methods("POST")
 
 	// Health check
 	router.HandleFunc("/health", healthCheck).Methods("GET")
@@ -146,6 +157,15 @@ func loadConfig() {
 	if err != nil {
 		logger.Error("Failed to parse config", zap.Error(err))
 	}
+
+	// Apply Tailscale configuration if in tailscale mode
+	if currentConfig.NetworkMode == "tailscale" {
+		logger.Info("Applying Tailscale configuration after loading config")
+		err = tailscaleManager.ApplyNetworkConfig(currentConfig)
+		if err != nil {
+			logger.Error("Failed to apply Tailscale configuration", zap.Error(err))
+		}
+	}
 }
 
 // saveConfig saves the configuration to Redis
@@ -202,6 +222,17 @@ func updateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Apply Tailscale configuration if in tailscale mode
+	if newConfig.NetworkMode == "tailscale" {
+		logger.Info("Applying Tailscale configuration after update")
+		err = tailscaleManager.ApplyNetworkConfig(newConfig)
+		if err != nil {
+			logger.Error("Failed to apply Tailscale configuration", zap.Error(err))
+			http.Error(w, "Failed to apply Tailscale configuration", http.StatusInternalServerError)
+			return
+		}
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -223,5 +254,41 @@ func getConfigHistory(w http.ResponseWriter, r *http.Request) {
 	// TODO: Implement config history from database
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode([]NetworkConfig{currentConfig})
+}
+
+// getTailscaleStatus returns the current Tailscale status
+func getTailscaleStatus(w http.ResponseWriter, r *http.Request) {
+	status, err := tailscaleManager.GetTailscaleStatus()
+	if err != nil {
+		http.Error(w, "Failed to get Tailscale status: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
+}
+
+// configureTailscale configures Tailscale with the provided parameters
+func configureTailscale(w http.ResponseWriter, r *http.Request) {
+	var config struct {
+		AuthKey          string `json:"auth_key"`
+		Hostname         string `json:"hostname"`
+		AdvertiseRoutes  string `json:"advertise_routes"`
+	}
+
+	err := json.NewDecoder(r.Body).Decode(&config)
+	if err != nil {
+		http.Error(w, "Invalid request payload", http.StatusBadRequest)
+		return
+	}
+
+	err = tailscaleManager.ConfigureTailscale(config.AuthKey, config.Hostname, config.AdvertiseRoutes)
+	if err != nil {
+		http.Error(w, "Failed to configure Tailscale: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Tailscale configured successfully"))
 }
 
