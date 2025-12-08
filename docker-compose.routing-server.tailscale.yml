@@ -1,0 +1,109 @@
+
+
+
+
+version: "3.8"
+
+services:
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: tailscale
+    environment:
+      - TAILSCALE_AUTH_KEY=${TAILSCALE_AUTH_KEY}
+      - TAILSCALE_HOSTNAME=${TAILSCALE_HOSTNAME:-routing-tailscale}
+      - TAILSCALE_ADVERTISE_ROUTES=${TAILSCALE_ADVERTISE_ROUTES:-}
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv6.conf.all.forwarding=1
+    restart: unless-stopped
+    networks:
+      - server-network
+      - tailscale-net
+
+  routing-service:
+    build:
+      context: .
+      dockerfile: services/routing-service/Dockerfile
+    ports:
+      - "8083:8083"   # Routing service HTTP
+    volumes:
+      - ./certs:/app/certs:ro
+    networks:
+      - server-network
+      - client-network
+      - tailscale-net
+    depends_on:
+      - redis
+      - tailscale
+
+  secrets-service:
+    build:
+      context: .
+      dockerfile: services/secrets-service/Dockerfile
+    ports:
+      - "50053:50053" # Secrets service gRPC
+    volumes:
+      - ./certs:/app/certs:ro
+    networks:
+      - server-network
+      - tailscale-net
+
+  network-config-admin:
+    build:
+      context: .
+      dockerfile: services/network-config/Dockerfile
+    ports:
+      - "8082:8080"   # Network config admin
+    networks:
+      - server-network
+      - tailscale-net
+    depends_on:
+      - redis
+      - tailscale
+
+  telegram-bot:
+    build:
+      context: .
+      dockerfile: services/telegram-bot/Dockerfile
+    ports:
+      - "3003:3000"   # Telegram bot
+    environment:
+      - TELEGRAM_BOT_TOKEN=${Telegram_Token}
+      - ADMIN_CHAT_ID=${ADMIN_CHAT_ID}
+      - REDIS_URL=redis://redis:6379
+    networks:
+      - client-network
+      - tailscale-net
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    networks:
+      - server-network
+    volumes:
+      - redis-data:/data
+
+volumes:
+  tailscale-state:
+  redis-data:
+
+networks:
+  server-network:
+    name: server-network
+  client-network:
+    name: client-network
+  tailscale-net:
+    name: tailscale-net
+    driver: bridge
+    attachable: true
+
+
+
