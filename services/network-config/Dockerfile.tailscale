@@ -1,0 +1,39 @@
+
+
+# Dockerfile for Tailscale Docker device
+# This Dockerfile sets up a container with Tailscale for network connectivity
+
+FROM alpine:latest
+
+# Install dependencies
+RUN apk add --no-cache \
+    curl \
+    iptables \
+    ip6tables \
+    openrc \
+    tini
+
+# Install Tailscale
+RUN curl -fsSL https://tailscale.com/install.sh | sh
+
+# Set up entrypoint
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+
+# Expose Tailscale ports
+EXPOSE 41641/udp
+
+# Set up volumes for Tailscale state
+VOLUME ["/var/lib/tailscale"]
+
+# Set up environment variables
+ENV TAILSCALE_AUTH_KEY=""
+ENV TAILSCALE_HOSTNAME="tailscale-container"
+ENV TAILSCALE_ADVERTISE_ROUTES=""
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+  CMD tailscale status || exit 1
+
+
