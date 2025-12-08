@@ -3,18 +3,15 @@
 # Dockerfile for Tailscale Docker device
 # This Dockerfile sets up a container with Tailscale for network connectivity
 
-FROM alpine:latest
+# Use the official Tailscale image as base
+FROM tailscale/tailscale:latest
 
-# Install dependencies
+# Install additional dependencies
 RUN apk add --no-cache \
-    curl \
     iptables \
     ip6tables \
     openrc \
     tini
-
-# Install Tailscale
-RUN curl -fsSL https://tailscale.com/install.sh | sh
 
 # Set up entrypoint
 COPY entrypoint.sh /entrypoint.sh
