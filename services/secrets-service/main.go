@@ -17,6 +17,8 @@ import (
 	"time"
 
 	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/hashicorp/vault/api"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -599,18 +601,54 @@ func main() {
 		}
 	}()
 
-	// HTTP Admin API
-	http.HandleFunc("/admin/api/secrets", adminHandler)
-	http.HandleFunc("/admin/api/secrets/", adminHandler)
+	// HTTP Admin API with chi router
+	r := chi.NewRouter()
+
+	// Middleware
+	r.Use(middleware.RequestID)
+	r.Use(middleware.RealIP)
+	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
+
+	// CORS middleware
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// CORS handling - allow only specific origins from configuration
+			allowedOrigins := os.Getenv("ALLOWED_ORIGINS")
+			if allowedOrigins == "" {
+				allowedOrigins = "http://localhost:3000,http://localhost:3001" // Default to UI services
+			}
+			origin := r.Header.Get("Origin")
+			if origin != "" && isOriginAllowed(origin, allowedOrigins) {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+			}
+			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type,X-Admin-Key")
+
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	// Routes
+	r.Route("/admin/api", func(r chi.Router) {
+		r.Post("/secrets", adminHandler)
+		r.Get("/secrets", adminHandler)
+		r.Delete("/secrets/{name}", adminHandler)
+	})
 
 	// Health check endpoint
-	http.HandleFunc("/health", healthCheckHandler)
+	r.Get("/health", healthCheckHandler)
 
 	// Prometheus metrics endpoint
-	http.Handle("/metrics", promhttp.Handler())
+	r.Handle("/metrics", promhttp.Handler())
 
 	logger.Info().Msg("Starting HTTP server on :8082")
-	if err := http.ListenAndServe(":8082", nil); err != nil {
+	if err := http.ListenAndServe(":8082", r); err != nil {
 		logger.Fatal().Err(err).Msg("HTTP server failed")
 	}
 }
