@@ -33,7 +33,8 @@ services:
     environment:
       - VAULT_ADDR=http://vault:8200
       - VAULT_TOKEN=root
-      - ADMIN_KEY=default-admin-key-2025
+      - ADMIN_KEY=${ADMIN_KEY}
+      - ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3001
     depends_on:
       vault:
         condition: service_healthy
