@@ -2,6 +2,7 @@
 
 
 
+
 package main
 
 import (
@@ -71,6 +72,27 @@ func isOriginAllowed(origin, allowedOrigins string) bool {
 		}
 	}
 	return false
+}
+
+// Centralized error handler for gRPC methods
+func handleGRPCError(ctx context.Context, err error, operation string) error {
+	logger.Error().Err(err).Str("operation", operation).Msg("Operation failed")
+
+	// Check for specific error types and convert to gRPC status
+	switch {
+	case strings.Contains(err.Error(), "not found"):
+		secretCounter.WithLabelValues(operation, "not_found").Inc()
+		return status.Errorf(codes.NotFound, "%s: %s", SecretNotFoundError, err.Error())
+	case strings.Contains(err.Error(), "permission denied"):
+		secretCounter.WithLabelValues(operation, "permission_denied").Inc()
+		return status.Errorf(codes.PermissionDenied, "%s: %s", PermissionDeniedError, err.Error())
+	case strings.Contains(err.Error(), "invalid"):
+		secretCounter.WithLabelValues(operation, "invalid_input").Inc()
+		return status.Errorf(codes.InvalidArgument, "%s: %s", InvalidInputError, err.Error())
+	default:
+		secretCounter.WithLabelValues(operation, "error").Inc()
+		return status.Errorf(codes.Internal, "%s: %s", InternalServerError, err.Error())
+	}
 }
 
 // Helper functions for Vault KV v2 operations
@@ -189,34 +211,25 @@ func (s *server) GetSecret(ctx context.Context, req *pb.GetSecretRequest) (*pb.G
 
 	// Validate input
 	if req.Name == "" {
-		err := newSecretError(codes.InvalidArgument, InvalidInputError, "secret name is required")
-		secretCounter.WithLabelValues("get_secret", "error").Inc()
-		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+		err := fmt.Errorf("secret name is required")
+		return nil, handleGRPCError(ctx, err, "get_secret")
 	}
 
 	// Get secret from Vault using KV v2
 	secret, err := getSecretFromVault(req.Name)
 	if err != nil {
-		logger.Error().
-			Err(err).
-			Str("method", "GetSecret").
-			Str("secret_name", req.Name).
-			Msg("Vault read error")
-		secretCounter.WithLabelValues("get_secret", "error").Inc()
-		return nil, status.Errorf(codes.Internal, "%s: %s", VaultConnectionError, err.Error())
+		return nil, handleGRPCError(ctx, err, "get_secret")
 	}
 
 	if secret == nil {
-		err := newSecretError(codes.NotFound, SecretNotFoundError, fmt.Sprintf("secret %s not found", req.Name))
-		secretCounter.WithLabelValues("get_secret", "not_found").Inc()
-		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+		err := fmt.Errorf("secret %s not found", req.Name)
+		return nil, handleGRPCError(ctx, err, "get_secret")
 	}
 
 	value, ok := secret.Data["value"].(string)
 	if !ok {
-		err := newSecretError(codes.Internal, InternalServerError, "invalid value format in vault response")
-		secretCounter.WithLabelValues("get_secret", "error").Inc()
-		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+		err := fmt.Errorf("invalid value format in vault response")
+		return nil, handleGRPCError(ctx, err, "get_secret")
 	}
 
 	// Add metadata to the response
@@ -256,43 +269,32 @@ func (s *server) GetUserSecret(ctx context.Context, req *pb.GetUserSecretRequest
 
 	// Validate input
 	if req.UserId == "" || req.SecretName == "" {
-		err := newSecretError(codes.InvalidArgument, InvalidInputError, "user_id and secret_name are required")
-		secretCounter.WithLabelValues("get_user_secret", "error").Inc()
-		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+		err := fmt.Errorf("user_id and secret_name are required")
+		return nil, handleGRPCError(ctx, err, "get_user_secret")
 	}
 
 	// Get user-specific secret from Vault
 	secretPath := fmt.Sprintf("user-secrets/data/%s/%s", req.UserId, req.SecretName)
 	secret, err := vaultClient.Logical().Read(secretPath)
 	if err != nil {
-		logger.Error().
-			Err(err).
-			Str("method", "GetUserSecret").
-			Str("user_id", req.UserId).
-			Str("secret_name", req.SecretName).
-			Msg("Vault read error")
-		secretCounter.WithLabelValues("get_user_secret", "error").Inc()
-		return nil, status.Errorf(codes.Internal, "%s: %s", VaultConnectionError, err.Error())
+		return nil, handleGRPCError(ctx, err, "get_user_secret")
 	}
 
 	if secret == nil {
-		err := newSecretError(codes.NotFound, SecretNotFoundError, fmt.Sprintf("user secret %s/%s not found", req.UserId, req.SecretName))
-		secretCounter.WithLabelValues("get_user_secret", "not_found").Inc()
-		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+		err := fmt.Errorf("user secret %s/%s not found", req.UserId, req.SecretName)
+		return nil, handleGRPCError(ctx, err, "get_user_secret")
 	}
 
 	data, ok := secret.Data["data"].(map[string]interface{})
 	if !ok {
-		err := newSecretError(codes.Internal, InternalServerError, "invalid data format in vault response")
-		secretCounter.WithLabelValues("get_user_secret", "error").Inc()
-		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+		err := fmt.Errorf("invalid data format in vault response")
+		return nil, handleGRPCError(ctx, err, "get_user_secret")
 	}
 
 	value, ok := data["value"].(string)
 	if !ok {
-		err := newSecretError(codes.Internal, InternalServerError, "invalid value format in vault response")
-		secretCounter.WithLabelValues("get_user_secret", "error").Inc()
-		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+		err := fmt.Errorf("invalid value format in vault response")
+		return nil, handleGRPCError(ctx, err, "get_user_secret")
 	}
 
 	logger.Info().
@@ -314,9 +316,8 @@ func (s *server) SetUserSecret(ctx context.Context, req *pb.SetUserSecretRequest
 
 	// Validate input
 	if req.UserId == "" || req.SecretName == "" || req.SecretValue == "" {
-		err := newSecretError(codes.InvalidArgument, InvalidInputError, "user_id, secret_name, and secret_value are required")
-		secretCounter.WithLabelValues("set_user_secret", "error").Inc()
-		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+		err := fmt.Errorf("user_id, secret_name, and secret_value are required")
+		return nil, handleGRPCError(ctx, err, "set_user_secret")
 	}
 
 	// Store user-specific secret in Vault
@@ -325,14 +326,7 @@ func (s *server) SetUserSecret(ctx context.Context, req *pb.SetUserSecretRequest
 		"data": map[string]interface{}{"value": req.SecretValue},
 	})
 	if err != nil {
-		logger.Error().
-			Err(err).
-			Str("method", "SetUserSecret").
-			Str("user_id", req.UserId).
-			Str("secret_name", req.SecretName).
-			Msg("Vault write error")
-		secretCounter.WithLabelValues("set_user_secret", "error").Inc()
-		return nil, status.Errorf(codes.Internal, "%s: %s", VaultConnectionError, err.Error())
+		return nil, handleGRPCError(ctx, err, "set_user_secret")
 	}
 
 	logger.Info().
@@ -620,6 +614,7 @@ func main() {
 		logger.Fatal().Err(err).Msg("HTTP server failed")
 	}
 }
+
 
 
 
