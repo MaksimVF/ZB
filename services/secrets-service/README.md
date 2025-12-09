@@ -54,7 +54,8 @@ Run the initialization script:
 
 - `VAULT_ADDR`: Vault address (default: http://vault:8200)
 - `VAULT_TOKEN`: Vault token with proper rights
-- `ADMIN_KEY`: Admin API key
+- `ADMIN_KEY`: Admin API key (configure via environment variable, not hardcoded)
+- `ALLOWED_ORIGINS`: Comma-separated list of allowed CORS origins (default: http://localhost:3000,http://localhost:3001)
 
 ## Usage
 
@@ -131,6 +132,10 @@ The service exposes Prometheus metrics at `/metrics` including:
 
 - `secret_operations_total`: Count of secret operations by type and status
 - `http_request_duration_seconds`: HTTP request latency by method and path
+
+## Security
+
+For detailed security information, including configuration and best practices, please refer to the [SECURITY.md](SECURITY.md) document.
 
 ## Contributing
 

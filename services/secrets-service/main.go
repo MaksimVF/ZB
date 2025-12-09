@@ -1,3 +1,4 @@
+
 package main
 
 import (
@@ -7,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
@@ -38,6 +41,9 @@ var (
 		},
 		[]string{"method", "path", "status"},
 	)
+	// Rate limiting for admin API
+	adminAPILimiter = make(map[string]int64)
+	adminKeyRegex   = regexp.MustCompile(`^[a-zA-Z0-9\-_]{16,64}$`) // Admin key must be 16-64 chars, alphanumeric with dashes/underscores
 )
 
 const (
@@ -47,6 +53,41 @@ const (
 	InvalidInputError     = "invalid input"
 	InternalServerError   = "internal server error"
 )
+
+// Helper function to check if an origin is allowed
+func isOriginAllowed(origin, allowedOrigins string) bool {
+	// Split allowed origins by comma and check if the request origin is in the list
+	for _, allowedOrigin := range strings.Split(allowedOrigins, ",") {
+		if strings.TrimSpace(allowedOrigin) == origin {
+			return true
+		}
+	}
+	return false
+}
+
+// Helper function to get client IP address
+func getClientIP(r *http.Request) string {
+	// Try to get IP from X-Forwarded-For header first
+	xForwardedFor := r.Header.Get("X-Forwarded-For")
+	if xForwardedFor != "" {
+		// X-Forwarded-For can contain multiple IPs, take the first one
+		ips := strings.Split(xForwardedFor, ",")
+		return strings.TrimSpace(ips[0])
+	}
+
+	// Fall back to remote address
+	remoteAddr := r.RemoteAddr
+	if strings.Contains(remoteAddr, ":") {
+		// Handle IPv6 or port suffix
+		remoteAddr, _, err := net.SplitHostPort(remoteAddr)
+		if err != nil {
+			return remoteAddr
+		}
+		return remoteAddr
+	}
+
+	return remoteAddr
+}
 
 func init() {
 	// Initialize structured logger
@@ -262,8 +303,15 @@ func adminHandler(w http.ResponseWriter, r *http.Request) {
 		Str("path", r.URL.Path).
 		Msg("Received admin API request")
 
-	// CORS handling
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// CORS handling - allow only specific origins from configuration
+	allowedOrigins := os.Getenv("ALLOWED_ORIGINS")
+	if allowedOrigins == "" {
+		allowedOrigins = "http://localhost:3000,http://localhost:3001" // Default to UI services
+	}
+	origin := r.Header.Get("Origin")
+	if origin != "" && isOriginAllowed(origin, allowedOrigins) {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+	}
 	w.Header().Set("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type,X-Admin-Key")
 
@@ -272,11 +320,32 @@ func adminHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Rate limiting for admin API
+	clientIP := getClientIP(r)
+	currentTime := time.Now().Unix()
+	if lastRequestTime, exists := adminAPILimiter[clientIP]; exists {
+		if currentTime-lastRequestTime < 5 { // Allow 1 request per 5 seconds per IP
+			logger.Warn().Str("method", "adminHandler").Str("client_ip", clientIP).Msg("Rate limit exceeded")
+			http.Error(w, "rate limit exceeded: too many requests", 429)
+			httpDuration.WithLabelValues(r.Method, r.URL.Path, "429").Observe(time.Since(start).Seconds())
+			return
+		}
+	}
+	adminAPILimiter[clientIP] = currentTime
+
 	// Authentication check
 	adminKey := r.Header.Get("X-Admin-Key")
 	if adminKey == "" {
 		logger.Warn().Str("method", "adminHandler").Msg("Missing admin key")
 		http.Error(w, "forbidden: missing admin key", 403)
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "403").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	// Validate admin key format
+	if !adminKeyRegex.MatchString(adminKey) {
+		logger.Warn().Str("method", "adminHandler").Msg("Invalid admin key format")
+		http.Error(w, "forbidden: invalid admin key format", 403)
 		httpDuration.WithLabelValues(r.Method, r.URL.Path, "403").Observe(time.Since(start).Seconds())
 		return
 	}
@@ -344,9 +413,27 @@ func handlePostSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enhanced input validation
 	if input.Path == "" || input.Value == "" {
 		logger.Error().Msg("Missing required fields in request")
 		http.Error(w, "path and value are required", 400)
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "400").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	// Validate path format - only allow alphanumeric, dashes, underscores, and slashes
+	pathRegex := regexp.MustCompile(`^[a-zA-Z0-9\-_/]+$`)
+	if !pathRegex.MatchString(input.Path) {
+		logger.Error().Str("path", input.Path).Msg("Invalid path format")
+		http.Error(w, "invalid path format: only alphanumeric, dashes, underscores, and slashes allowed", 400)
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "400").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	// Validate value length
+	if len(input.Value) > 4096 { // Limit secret value size
+		logger.Error().Msg("Secret value too long")
+		http.Error(w, "secret value too long: max 4096 characters", 400)
 		httpDuration.WithLabelValues(r.Method, r.URL.Path, "400").Observe(time.Since(start).Seconds())
 		return
 	}
@@ -381,6 +468,15 @@ func handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		logger.Error().Msg("Missing secret name in delete request")
 		http.Error(w, "secret name is required", 400)
+		httpDuration.WithLabelValues(r.Method, r.URL.Path, "400").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	// Validate secret name format - only allow alphanumeric, dashes, underscores, and slashes
+	pathRegex := regexp.MustCompile(`^[a-zA-Z0-9\-_/]+$`)
+	if !pathRegex.MatchString(name) {
+		logger.Error().Str("secret_name", name).Msg("Invalid secret name format")
+		http.Error(w, "invalid secret name format: only alphanumeric, dashes, underscores, and slashes allowed", 400)
 		httpDuration.WithLabelValues(r.Method, r.URL.Path, "400").Observe(time.Since(start).Seconds())
 		return
 	}

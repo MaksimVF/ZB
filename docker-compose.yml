@@ -49,7 +49,7 @@ services:
       - client_network
       - server_network
     environment:
-      - ADMIN_KEY=superadmin2025
+      - ADMIN_KEY=${UI_ADMIN_KEY}
       - VITE_API_URL=http://localhost:3000
     depends_on:
       - secret-service
