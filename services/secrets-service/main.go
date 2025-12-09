@@ -1,18 +1,15 @@
-
-
 package main
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
-	"regexp"
 	"time"
 
+	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
 	"github.com/hashicorp/vault/api"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -21,7 +18,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
-	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
 )
 
 var (
@@ -45,8 +41,8 @@ var (
 )
 
 const (
-	SecretNotFoundError    = "secret not found"
-	PermissionDeniedError  = "permission denied"
+	SecretNotFoundError   = "secret not found"
+	PermissionDeniedError = "permission denied"
 	VaultConnectionError  = "vault connection error"
 	InvalidInputError     = "invalid input"
 	InternalServerError   = "internal server error"
@@ -96,47 +92,11 @@ func newSecretError(code codes.Code, message, details string) *SecretError {
 	return &SecretError{Code: code, Message: message, Details: details}
 }
 
-// isValidSecretName validates the format of a secret name
-func isValidSecretName(name string) bool {
-	// Basic validation: must contain only alphanumeric, dashes, underscores, and slashes
-	// and should not contain sensitive patterns
-	validPattern := `^[a-zA-Z0-9_\-\/]+$`
-	return regexMatch(validPattern, name)
-}
-
-// maskSensitiveValue masks sensitive information in values
-func maskSensitiveValue(value string) string {
-	if value == "" {
-		return ""
-	}
-
-	// If the value looks like an API key (long alphanumeric string), mask it
-	if len(value) > 16 && isAlphanumeric(value) {
-		return "*****" + value[len(value)-4:]
-	}
-
-	// For other values, return first 2 and last 2 characters
-	if len(value) > 4 {
-		return value[:2] + "****" + value[len(value)-2:]
-	}
-
-	return "****"
-}
-
-// isAlphanumeric checks if a string contains only alphanumeric characters
-func isAlphanumeric(s string) bool {
-	for _, r := range s {
-		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
-			return false
-		}
-	}
-	return true
-}
-
-// regexMatch checks if a string matches a regex pattern
-func regexMatch(pattern, s string) bool {
-	matched, err := regexp.MatchString(pattern, s)
-	return matched && err == nil
+// server implements the gRPC SecretServiceServer interface.
+// Embed UnimplementedSecretServiceServer to ensure forward compatibility
+// when new methods are added to the service definition.
+type server struct {
+	pb.UnimplementedSecretServiceServer
 }
 
 // ===================== gRPC =====================
@@ -149,13 +109,6 @@ func (s *server) GetSecret(ctx context.Context, req *pb.GetSecretRequest) (*pb.G
 	// Validate input
 	if req.Name == "" {
 		err := newSecretError(codes.InvalidArgument, InvalidInputError, "secret name is required")
-		secretCounter.WithLabelValues("get_secret", "error").Inc()
-		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
-	}
-
-	// Validate secret name format
-	if !isValidSecretName(req.Name) {
-		err := newSecretError(codes.InvalidArgument, InvalidInputError, "invalid secret name format")
 		secretCounter.WithLabelValues("get_secret", "error").Inc()
 		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
 	}
@@ -192,27 +145,13 @@ func (s *server) GetSecret(ctx context.Context, req *pb.GetSecretRequest) (*pb.G
 		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
 	}
 
-	// Mask sensitive information in logs
-	maskedValue := maskSensitiveValue(value)
 	logger.Info().
 		Str("method", "GetSecret").
 		Str("secret_name", req.Name).
-		Str("value_length", fmt.Sprintf("%d", len(value))).
 		Msg("Secret retrieved successfully")
 
-	// Add metadata about the secret
-	metadata := map[string]string{
-		"secret_name":   req.Name,
-		"value_length":  fmt.Sprintf("%d", len(value)),
-		"last_updated":  time.Now().Format(time.RFC3339),
-		"secret_type":   "api_key", // Could be enhanced to detect type
-	}
-
 	secretCounter.WithLabelValues("get_secret", "success").Inc()
-	return &pb.GetSecretResponse{
-		Value:    value,
-		Metadata: metadata,
-	}, nil
+	return &pb.GetSecretResponse{Value: value}, nil
 }
 
 func (s *server) GetUserSecret(ctx context.Context, req *pb.GetUserSecretRequest) (*pb.GetUserSecretResponse, error) {
@@ -394,7 +333,7 @@ func handlePostSecret(w http.ResponseWriter, r *http.Request) {
 	logger.Info().Str("method", "handlePostSecret").Msg("Creating/updating secret")
 
 	var input struct {
-		Path  string `json:"path"`  // "llm/openai/api_key"
+		Path  string `json:"path"` // "llm/openai/api_key"
 		Value string `json:"value"`
 	}
 
@@ -537,4 +476,3 @@ func main() {
 		logger.Fatal().Err(err).Msg("HTTP server failed")
 	}
 }
-
