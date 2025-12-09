@@ -1,6 +1,8 @@
 
 
 
+
+
 package main
 
 import (
@@ -15,10 +17,17 @@ import (
 	"time"
 
 	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/hashicorp/vault/api"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	"go.opentelemetry.io/otel/sdk/resource"
+	"go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -65,6 +74,45 @@ func isOriginAllowed(origin, allowedOrigins string) bool {
 		}
 	}
 	return false
+}
+
+// Centralized error handler for gRPC methods
+func handleGRPCError(ctx context.Context, err error, operation string) error {
+	logger.Error().Err(err).Str("operation", operation).Msg("Operation failed")
+
+	// Check for specific error types and convert to gRPC status
+	switch {
+	case strings.Contains(err.Error(), "not found"):
+		secretCounter.WithLabelValues(operation, "not_found").Inc()
+		return status.Errorf(codes.NotFound, "%s: %s", SecretNotFoundError, err.Error())
+	case strings.Contains(err.Error(), "permission denied"):
+		secretCounter.WithLabelValues(operation, "permission_denied").Inc()
+		return status.Errorf(codes.PermissionDenied, "%s: %s", PermissionDeniedError, err.Error())
+	case strings.Contains(err.Error(), "invalid"):
+		secretCounter.WithLabelValues(operation, "invalid_input").Inc()
+		return status.Errorf(codes.InvalidArgument, "%s: %s", InvalidInputError, err.Error())
+	default:
+		secretCounter.WithLabelValues(operation, "error").Inc()
+		return status.Errorf(codes.Internal, "%s: %s", InternalServerError, err.Error())
+	}
+}
+
+// Helper functions for Vault KV v2 operations
+func getSecretFromVault(path string) (*api.Secret, error) {
+	return vaultClient.KVv2("secret").Get(context.Background(), path)
+}
+
+func putSecretInVault(path string, data map[string]interface{}) error {
+	_, err := vaultClient.KVv2("secret").Put(context.Background(), path, data)
+	return err
+}
+
+func deleteSecretFromVault(path string) error {
+	return vaultClient.KVv2("secret").Delete(context.Background(), path)
+}
+
+func listSecretsFromVault(prefix string) (*api.Secret, error) {
+	return vaultClient.KVv2("secret").List(context.Background(), prefix)
 }
 
 // Helper function to get client IP address
@@ -115,6 +163,9 @@ func init() {
 	// Register Prometheus metrics
 	prometheus.MustRegister(secretCounter, httpDuration)
 
+	// Initialize OpenTelemetry
+	initOpenTelemetry()
+
 	// Initialize Vault client
 	config := api.DefaultConfig()
 	config.Address = os.Getenv("VAULT_ADDR") // http://vault:8200
@@ -132,6 +183,28 @@ func init() {
 
 	vaultClient = client
 	logger.Info().Msg("Vault client initialized successfully")
+}
+
+func initOpenTelemetry() {
+	// Create a new stdout exporter
+	exporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
+	if err != nil {
+		logger.Fatal().Err(err).Msg("Failed to create stdout exporter")
+	}
+
+	// Create a new tracer provider with a batch span processor and the stdout exporter
+	tp := trace.NewTracerProvider(
+		trace.WithBatcher(exporter),
+		trace.WithResource(resource.NewWithAttributes(
+			semconv.SchemaURL,
+			semconv.ServiceNameKey.String("secret-service"),
+		)),
+	)
+
+	// Set the global tracer provider
+	otel.SetTracerProvider(tp)
+
+	logger.Info().Msg("OpenTelemetry initialized successfully")
 }
 
 // Custom error types
@@ -158,6 +231,11 @@ type server struct {
 
 // ===================== gRPC =====================
 func (s *server) GetSecret(ctx context.Context, req *pb.GetSecretRequest) (*pb.GetSecretResponse, error) {
+	// Start a new span for the GetSecret operation
+	tracer := otel.Tracer("secret-service")
+	ctx, span := tracer.Start(ctx, "GetSecret")
+	defer span.End()
+
 	logger.Info().
 		Str("method", "GetSecret").
 		Str("secret_name", req.Name).
@@ -165,41 +243,25 @@ func (s *server) GetSecret(ctx context.Context, req *pb.GetSecretRequest) (*pb.G
 
 	// Validate input
 	if req.Name == "" {
-		err := newSecretError(codes.InvalidArgument, InvalidInputError, "secret name is required")
-		secretCounter.WithLabelValues("get_secret", "error").Inc()
-		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+		err := fmt.Errorf("secret name is required")
+		return nil, handleGRPCError(ctx, err, "get_secret")
 	}
 
-	// Get secret from Vault
-	secret, err := vaultClient.Logical().Read("secret/data/" + req.Name)
+	// Get secret from Vault using KV v2
+	secret, err := getSecretFromVault(req.Name)
 	if err != nil {
-		logger.Error().
-			Err(err).
-			Str("method", "GetSecret").
-			Str("secret_name", req.Name).
-			Msg("Vault read error")
-		secretCounter.WithLabelValues("get_secret", "error").Inc()
-		return nil, status.Errorf(codes.Internal, "%s: %s", VaultConnectionError, err.Error())
+		return nil, handleGRPCError(ctx, err, "get_secret")
 	}
 
 	if secret == nil {
-		err := newSecretError(codes.NotFound, SecretNotFoundError, fmt.Sprintf("secret %s not found", req.Name))
-		secretCounter.WithLabelValues("get_secret", "not_found").Inc()
-		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+		err := fmt.Errorf("secret %s not found", req.Name)
+		return nil, handleGRPCError(ctx, err, "get_secret")
 	}
 
-	data, ok := secret.Data["data"].(map[string]interface{})
+	value, ok := secret.Data["value"].(string)
 	if !ok {
-		err := newSecretError(codes.Internal, InternalServerError, "invalid data format in vault response")
-		secretCounter.WithLabelValues("get_secret", "error").Inc()
-		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
-	}
-
-	value, ok := data["value"].(string)
-	if !ok {
-		err := newSecretError(codes.Internal, InternalServerError, "invalid value format in vault response")
-		secretCounter.WithLabelValues("get_secret", "error").Inc()
-		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+		err := fmt.Errorf("invalid value format in vault response")
+		return nil, handleGRPCError(ctx, err, "get_secret")
 	}
 
 	// Add metadata to the response
@@ -239,43 +301,32 @@ func (s *server) GetUserSecret(ctx context.Context, req *pb.GetUserSecretRequest
 
 	// Validate input
 	if req.UserId == "" || req.SecretName == "" {
-		err := newSecretError(codes.InvalidArgument, InvalidInputError, "user_id and secret_name are required")
-		secretCounter.WithLabelValues("get_user_secret", "error").Inc()
-		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+		err := fmt.Errorf("user_id and secret_name are required")
+		return nil, handleGRPCError(ctx, err, "get_user_secret")
 	}
 
 	// Get user-specific secret from Vault
 	secretPath := fmt.Sprintf("user-secrets/data/%s/%s", req.UserId, req.SecretName)
 	secret, err := vaultClient.Logical().Read(secretPath)
 	if err != nil {
-		logger.Error().
-			Err(err).
-			Str("method", "GetUserSecret").
-			Str("user_id", req.UserId).
-			Str("secret_name", req.SecretName).
-			Msg("Vault read error")
-		secretCounter.WithLabelValues("get_user_secret", "error").Inc()
-		return nil, status.Errorf(codes.Internal, "%s: %s", VaultConnectionError, err.Error())
+		return nil, handleGRPCError(ctx, err, "get_user_secret")
 	}
 
 	if secret == nil {
-		err := newSecretError(codes.NotFound, SecretNotFoundError, fmt.Sprintf("user secret %s/%s not found", req.UserId, req.SecretName))
-		secretCounter.WithLabelValues("get_user_secret", "not_found").Inc()
-		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+		err := fmt.Errorf("user secret %s/%s not found", req.UserId, req.SecretName)
+		return nil, handleGRPCError(ctx, err, "get_user_secret")
 	}
 
 	data, ok := secret.Data["data"].(map[string]interface{})
 	if !ok {
-		err := newSecretError(codes.Internal, InternalServerError, "invalid data format in vault response")
-		secretCounter.WithLabelValues("get_user_secret", "error").Inc()
-		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+		err := fmt.Errorf("invalid data format in vault response")
+		return nil, handleGRPCError(ctx, err, "get_user_secret")
 	}
 
 	value, ok := data["value"].(string)
 	if !ok {
-		err := newSecretError(codes.Internal, InternalServerError, "invalid value format in vault response")
-		secretCounter.WithLabelValues("get_user_secret", "error").Inc()
-		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+		err := fmt.Errorf("invalid value format in vault response")
+		return nil, handleGRPCError(ctx, err, "get_user_secret")
 	}
 
 	logger.Info().
@@ -297,9 +348,8 @@ func (s *server) SetUserSecret(ctx context.Context, req *pb.SetUserSecretRequest
 
 	// Validate input
 	if req.UserId == "" || req.SecretName == "" || req.SecretValue == "" {
-		err := newSecretError(codes.InvalidArgument, InvalidInputError, "user_id, secret_name, and secret_value are required")
-		secretCounter.WithLabelValues("set_user_secret", "error").Inc()
-		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
+		err := fmt.Errorf("user_id, secret_name, and secret_value are required")
+		return nil, handleGRPCError(ctx, err, "set_user_secret")
 	}
 
 	// Store user-specific secret in Vault
@@ -308,14 +358,7 @@ func (s *server) SetUserSecret(ctx context.Context, req *pb.SetUserSecretRequest
 		"data": map[string]interface{}{"value": req.SecretValue},
 	})
 	if err != nil {
-		logger.Error().
-			Err(err).
-			Str("method", "SetUserSecret").
-			Str("user_id", req.UserId).
-			Str("secret_name", req.SecretName).
-			Msg("Vault write error")
-		secretCounter.WithLabelValues("set_user_secret", "error").Inc()
-		return nil, status.Errorf(codes.Internal, "%s: %s", VaultConnectionError, err.Error())
+		return nil, handleGRPCError(ctx, err, "set_user_secret")
 	}
 
 	logger.Info().
@@ -331,6 +374,12 @@ func (s *server) SetUserSecret(ctx context.Context, req *pb.SetUserSecretRequest
 // ===================== HTTP Admin API =====================
 func adminHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+
+	// Start a new span for the admin handler
+	tracer := otel.Tracer("secret-service")
+	ctx, span := tracer.Start(r.Context(), "adminHandler")
+	defer span.End()
+	r = r.WithContext(ctx)
 
 	logger.Info().
 		Str("method", "adminHandler").
@@ -413,7 +462,7 @@ func handleGetSecrets(w http.ResponseWriter, r *http.Request, start time.Time) {
 	clientIP := getClientIP(r)
 	logger.Info().Str("method", "handleGetSecrets").Str("client_ip", clientIP).Msg("Listing secrets")
 
-	secrets, err := vaultClient.Logical().List("secret/metadata/llm")
+	secrets, err := listSecretsFromVault("llm")
 	if err != nil {
 		handleHTTPError(w, r, 500, fmt.Sprintf("failed to list secrets: %v", err), start)
 		return
@@ -472,9 +521,7 @@ func handlePostSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := vaultClient.Logical().Write("secret/data/"+input.Path, map[string]interface{}{
-		"data": map[string]interface{}{"value": input.Value},
-	})
+	err := putSecretInVault(input.Path, map[string]interface{}{"value": input.Value})
 	if err != nil {
 		logger.Error().Err(err).Str("path", input.Path).Msg("Failed to write secret to Vault")
 		http.Error(w, fmt.Sprintf("failed to save secret: %v", err), 500)
@@ -518,7 +565,7 @@ func handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := vaultClient.Logical().Delete("secret/data/" + name)
+	err := deleteSecretFromVault(name)
 	if err != nil {
 		handleHTTPError(w, r, 500, fmt.Sprintf("failed to delete secret: %v", err), start)
 		return
@@ -590,20 +637,58 @@ func main() {
 		}
 	}()
 
-	// HTTP Admin API
-	http.HandleFunc("/admin/api/secrets", adminHandler)
-	http.HandleFunc("/admin/api/secrets/", adminHandler)
+	// HTTP Admin API with chi router
+	r := chi.NewRouter()
+
+	// Middleware
+	r.Use(middleware.RequestID)
+	r.Use(middleware.RealIP)
+	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
+
+	// CORS middleware
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// CORS handling - allow only specific origins from configuration
+			allowedOrigins := os.Getenv("ALLOWED_ORIGINS")
+			if allowedOrigins == "" {
+				allowedOrigins = "http://localhost:3000,http://localhost:3001" // Default to UI services
+			}
+			origin := r.Header.Get("Origin")
+			if origin != "" && isOriginAllowed(origin, allowedOrigins) {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+			}
+			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type,X-Admin-Key")
+
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	// Routes
+	r.Route("/admin/api", func(r chi.Router) {
+		r.Post("/secrets", adminHandler)
+		r.Get("/secrets", adminHandler)
+		r.Delete("/secrets/{name}", adminHandler)
+	})
 
 	// Health check endpoint
-	http.HandleFunc("/health", healthCheckHandler)
+	r.Get("/health", healthCheckHandler)
 
 	// Prometheus metrics endpoint
-	http.Handle("/metrics", promhttp.Handler())
+	r.Handle("/metrics", promhttp.Handler())
 
 	logger.Info().Msg("Starting HTTP server on :8082")
-	if err := http.ListenAndServe(":8082", nil); err != nil {
+	if err := http.ListenAndServe(":8082", r); err != nil {
 		logger.Fatal().Err(err).Msg("HTTP server failed")
 	}
 }
+
+
 
 
