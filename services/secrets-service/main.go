@@ -1,4 +1,6 @@
 
+
+
 package main
 
 import (
@@ -87,6 +89,20 @@ func getClientIP(r *http.Request) string {
 	}
 
 	return remoteAddr
+}
+
+// Helper function to handle HTTP errors consistently
+func handleHTTPError(w http.ResponseWriter, r *http.Request, statusCode int, errorMsg string, start time.Time) {
+	clientIP := getClientIP(r)
+	logger.Error().
+		Str("method", r.Method).
+		Str("path", r.URL.Path).
+		Str("client_ip", clientIP).
+		Str("error", errorMsg).
+		Msg("HTTP error")
+
+	http.Error(w, fmt.Sprintf("error: %s", errorMsg), statusCode)
+	httpDuration.WithLabelValues(r.Method, r.URL.Path, fmt.Sprintf("%d", statusCode)).Observe(time.Since(start).Seconds())
 }
 
 func init() {
@@ -186,13 +202,32 @@ func (s *server) GetSecret(ctx context.Context, req *pb.GetSecretRequest) (*pb.G
 		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
 	}
 
+	// Add metadata to the response
+	metadata := map[string]string{
+		"source": "vault",
+		"path":   "secret/data/" + req.Name,
+	}
+
+	// Try to extract version and creation time if available
+	if metadataRaw, ok := secret.Data["metadata"].(map[string]interface{}); ok {
+		if version, ok := metadataRaw["version"].(float64); ok {
+			metadata["version"] = fmt.Sprintf("%d", int(version))
+		}
+		if createdTime, ok := metadataRaw["created_time"].(string); ok {
+			metadata["created_at"] = createdTime
+		}
+		if updatedTime, ok := metadataRaw["updated_time"].(string); ok {
+			metadata["last_updated"] = updatedTime
+		}
+	}
+
 	logger.Info().
 		Str("method", "GetSecret").
 		Str("secret_name", req.Name).
 		Msg("Secret retrieved successfully")
 
 	secretCounter.WithLabelValues("get_secret", "success").Inc()
-	return &pb.GetSecretResponse{Value: value}, nil
+	return &pb.GetSecretResponse{Value: value, Metadata: metadata}, nil
 }
 
 func (s *server) GetUserSecret(ctx context.Context, req *pb.GetUserSecretRequest) (*pb.GetUserSecretResponse, error) {
@@ -375,31 +410,29 @@ func adminHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGetSecrets(w http.ResponseWriter, r *http.Request, start time.Time) {
-	logger.Info().Str("method", "handleGetSecrets").Msg("Listing secrets")
+	clientIP := getClientIP(r)
+	logger.Info().Str("method", "handleGetSecrets").Str("client_ip", clientIP).Msg("Listing secrets")
 
 	secrets, err := vaultClient.Logical().List("secret/metadata/llm")
 	if err != nil {
-		logger.Error().Err(err).Msg("Failed to list secrets")
-		http.Error(w, fmt.Sprintf("failed to list secrets: %v", err), 500)
-		httpDuration.WithLabelValues(r.Method, r.URL.Path, "500").Observe(time.Since(start).Seconds())
+		handleHTTPError(w, r, 500, fmt.Sprintf("failed to list secrets: %v", err), start)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(secrets); err != nil {
-		logger.Error().Err(err).Msg("Failed to encode response")
-		http.Error(w, "failed to encode response", 500)
-		httpDuration.WithLabelValues(r.Method, r.URL.Path, "500").Observe(time.Since(start).Seconds())
+		handleHTTPError(w, r, 500, "failed to encode response", start)
 		return
 	}
 
-	logger.Info().Int("count", len(secrets.Data["keys"].([]string))).Msg("Secrets listed successfully")
+	logger.Info().Str("client_ip", clientIP).Int("count", len(secrets.Data["keys"].([]string))).Msg("Secrets listed successfully")
 	httpDuration.WithLabelValues(r.Method, r.URL.Path, "200").Observe(time.Since(start).Seconds())
 }
 
 func handlePostSecret(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	logger.Info().Str("method", "handlePostSecret").Msg("Creating/updating secret")
+	clientIP := getClientIP(r)
+	logger.Info().Str("method", "handlePostSecret").Str("client_ip", clientIP).Msg("Creating/updating secret")
 
 	var input struct {
 		Path  string `json:"path"` // "llm/openai/api_key"
@@ -407,7 +440,7 @@ func handlePostSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		logger.Error().Err(err).Msg("Failed to decode request body")
+		logger.Error().Err(err).Str("client_ip", clientIP).Msg("Failed to decode request body")
 		http.Error(w, fmt.Sprintf("invalid input: %v", err), 400)
 		httpDuration.WithLabelValues(r.Method, r.URL.Path, "400").Observe(time.Since(start).Seconds())
 		return
@@ -415,8 +448,9 @@ func handlePostSecret(w http.ResponseWriter, r *http.Request) {
 
 	// Enhanced input validation
 	if input.Path == "" || input.Value == "" {
-		logger.Error().Msg("Missing required fields in request")
-		http.Error(w, "path and value are required", 400)
+		errMsg := "path and value are required"
+		logger.Error().Str("error", errMsg).Msg("Missing required fields in request")
+		http.Error(w, fmt.Sprintf("invalid_request: %s", errMsg), 400)
 		httpDuration.WithLabelValues(r.Method, r.URL.Path, "400").Observe(time.Since(start).Seconds())
 		return
 	}
@@ -462,12 +496,14 @@ func handlePostSecret(w http.ResponseWriter, r *http.Request) {
 
 func handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	clientIP := getClientIP(r)
 	name := r.URL.Path[len("/admin/api/secrets/"):]
-	logger.Info().Str("method", "handleDeleteSecret").Str("secret_name", name).Msg("Deleting secret")
+	logger.Info().Str("method", "handleDeleteSecret").Str("client_ip", clientIP).Str("secret_name", name).Msg("Deleting secret")
 
 	if name == "" {
-		logger.Error().Msg("Missing secret name in delete request")
-		http.Error(w, "secret name is required", 400)
+		errMsg := "secret name is required"
+		logger.Error().Str("client_ip", clientIP).Str("error", errMsg).Msg("Missing secret name in delete request")
+		http.Error(w, fmt.Sprintf("invalid_request: %s", errMsg), 400)
 		httpDuration.WithLabelValues(r.Method, r.URL.Path, "400").Observe(time.Since(start).Seconds())
 		return
 	}
@@ -475,29 +511,26 @@ func handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	// Validate secret name format - only allow alphanumeric, dashes, underscores, and slashes
 	pathRegex := regexp.MustCompile(`^[a-zA-Z0-9\-_/]+$`)
 	if !pathRegex.MatchString(name) {
-		logger.Error().Str("secret_name", name).Msg("Invalid secret name format")
-		http.Error(w, "invalid secret name format: only alphanumeric, dashes, underscores, and slashes allowed", 400)
+		errMsg := "invalid secret name format: only alphanumeric, dashes, underscores, and slashes allowed"
+		logger.Error().Str("client_ip", clientIP).Str("secret_name", name).Str("error", errMsg).Msg("Invalid secret name format")
+		http.Error(w, fmt.Sprintf("invalid_request: %s", errMsg), 400)
 		httpDuration.WithLabelValues(r.Method, r.URL.Path, "400").Observe(time.Since(start).Seconds())
 		return
 	}
 
 	_, err := vaultClient.Logical().Delete("secret/data/" + name)
 	if err != nil {
-		logger.Error().Err(err).Str("secret_name", name).Msg("Failed to delete secret")
-		http.Error(w, fmt.Sprintf("failed to delete secret: %v", err), 500)
-		httpDuration.WithLabelValues(r.Method, r.URL.Path, "500").Observe(time.Since(start).Seconds())
+		handleHTTPError(w, r, 500, fmt.Sprintf("failed to delete secret: %v", err), start)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]string{"status": "deleted"}); err != nil {
-		logger.Error().Err(err).Msg("Failed to encode response")
-		http.Error(w, "failed to encode response", 500)
-		httpDuration.WithLabelValues(r.Method, r.URL.Path, "500").Observe(time.Since(start).Seconds())
+		handleHTTPError(w, r, 500, "failed to encode response", start)
 		return
 	}
 
-	logger.Info().Str("secret_name", name).Msg("Secret deleted successfully")
+	logger.Info().Str("client_ip", clientIP).Str("secret_name", name).Msg("Secret deleted successfully")
 	httpDuration.WithLabelValues(r.Method, r.URL.Path, "200").Observe(time.Since(start).Seconds())
 }
 
@@ -572,3 +605,5 @@ func main() {
 		logger.Fatal().Err(err).Msg("HTTP server failed")
 	}
 }
+
+
