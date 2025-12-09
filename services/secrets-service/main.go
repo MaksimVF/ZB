@@ -163,6 +163,9 @@ func init() {
 	// Register Prometheus metrics
 	prometheus.MustRegister(secretCounter, httpDuration)
 
+	// Initialize OpenTelemetry
+	initOpenTelemetry()
+
 	// Initialize Vault client
 	config := api.DefaultConfig()
 	config.Address = os.Getenv("VAULT_ADDR") // http://vault:8200
@@ -180,6 +183,28 @@ func init() {
 
 	vaultClient = client
 	logger.Info().Msg("Vault client initialized successfully")
+}
+
+func initOpenTelemetry() {
+	// Create a new stdout exporter
+	exporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
+	if err != nil {
+		logger.Fatal().Err(err).Msg("Failed to create stdout exporter")
+	}
+
+	// Create a new tracer provider with a batch span processor and the stdout exporter
+	tp := trace.NewTracerProvider(
+		trace.WithBatcher(exporter),
+		trace.WithResource(resource.NewWithAttributes(
+			semconv.SchemaURL,
+			semconv.ServiceNameKey.String("secret-service"),
+		)),
+	)
+
+	// Set the global tracer provider
+	otel.SetTracerProvider(tp)
+
+	logger.Info().Msg("OpenTelemetry initialized successfully")
 }
 
 // Custom error types
@@ -206,6 +231,11 @@ type server struct {
 
 // ===================== gRPC =====================
 func (s *server) GetSecret(ctx context.Context, req *pb.GetSecretRequest) (*pb.GetSecretResponse, error) {
+	// Start a new span for the GetSecret operation
+	tracer := otel.Tracer("secret-service")
+	ctx, span := tracer.Start(ctx, "GetSecret")
+	defer span.End()
+
 	logger.Info().
 		Str("method", "GetSecret").
 		Str("secret_name", req.Name).
@@ -344,6 +374,12 @@ func (s *server) SetUserSecret(ctx context.Context, req *pb.SetUserSecretRequest
 // ===================== HTTP Admin API =====================
 func adminHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+
+	// Start a new span for the admin handler
+	tracer := otel.Tracer("secret-service")
+	ctx, span := tracer.Start(r.Context(), "adminHandler")
+	defer span.End()
+	r = r.WithContext(ctx)
 
 	logger.Info().
 		Str("method", "adminHandler").
