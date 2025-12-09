@@ -1,6 +1,7 @@
 
 
 
+
 package main
 
 import (
@@ -19,6 +20,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	"go.opentelemetry.io/otel/sdk/resource"
+	"go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -65,6 +71,24 @@ func isOriginAllowed(origin, allowedOrigins string) bool {
 		}
 	}
 	return false
+}
+
+// Helper functions for Vault KV v2 operations
+func getSecretFromVault(path string) (*api.Secret, error) {
+	return vaultClient.KVv2("secret").Get(context.Background(), path)
+}
+
+func putSecretInVault(path string, data map[string]interface{}) error {
+	_, err := vaultClient.KVv2("secret").Put(context.Background(), path, data)
+	return err
+}
+
+func deleteSecretFromVault(path string) error {
+	return vaultClient.KVv2("secret").Delete(context.Background(), path)
+}
+
+func listSecretsFromVault(prefix string) (*api.Secret, error) {
+	return vaultClient.KVv2("secret").List(context.Background(), prefix)
 }
 
 // Helper function to get client IP address
@@ -170,8 +194,8 @@ func (s *server) GetSecret(ctx context.Context, req *pb.GetSecretRequest) (*pb.G
 		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
 	}
 
-	// Get secret from Vault
-	secret, err := vaultClient.Logical().Read("secret/data/" + req.Name)
+	// Get secret from Vault using KV v2
+	secret, err := getSecretFromVault(req.Name)
 	if err != nil {
 		logger.Error().
 			Err(err).
@@ -188,14 +212,7 @@ func (s *server) GetSecret(ctx context.Context, req *pb.GetSecretRequest) (*pb.G
 		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
 	}
 
-	data, ok := secret.Data["data"].(map[string]interface{})
-	if !ok {
-		err := newSecretError(codes.Internal, InternalServerError, "invalid data format in vault response")
-		secretCounter.WithLabelValues("get_secret", "error").Inc()
-		return nil, status.Errorf(err.Code, "%s: %s", err.Message, err.Details)
-	}
-
-	value, ok := data["value"].(string)
+	value, ok := secret.Data["value"].(string)
 	if !ok {
 		err := newSecretError(codes.Internal, InternalServerError, "invalid value format in vault response")
 		secretCounter.WithLabelValues("get_secret", "error").Inc()
@@ -413,7 +430,7 @@ func handleGetSecrets(w http.ResponseWriter, r *http.Request, start time.Time) {
 	clientIP := getClientIP(r)
 	logger.Info().Str("method", "handleGetSecrets").Str("client_ip", clientIP).Msg("Listing secrets")
 
-	secrets, err := vaultClient.Logical().List("secret/metadata/llm")
+	secrets, err := listSecretsFromVault("llm")
 	if err != nil {
 		handleHTTPError(w, r, 500, fmt.Sprintf("failed to list secrets: %v", err), start)
 		return
@@ -472,9 +489,7 @@ func handlePostSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := vaultClient.Logical().Write("secret/data/"+input.Path, map[string]interface{}{
-		"data": map[string]interface{}{"value": input.Value},
-	})
+	err := putSecretInVault(input.Path, map[string]interface{}{"value": input.Value})
 	if err != nil {
 		logger.Error().Err(err).Str("path", input.Path).Msg("Failed to write secret to Vault")
 		http.Error(w, fmt.Sprintf("failed to save secret: %v", err), 500)
@@ -518,7 +533,7 @@ func handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := vaultClient.Logical().Delete("secret/data/" + name)
+	err := deleteSecretFromVault(name)
 	if err != nil {
 		handleHTTPError(w, r, 500, fmt.Sprintf("failed to delete secret: %v", err), start)
 		return
@@ -605,5 +620,6 @@ func main() {
 		logger.Fatal().Err(err).Msg("HTTP server failed")
 	}
 }
+
 
 
