@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/hashicorp/vault/api"
@@ -32,6 +31,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
+
+	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
 )
 
 var (
