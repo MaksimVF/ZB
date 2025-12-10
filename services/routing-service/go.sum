@@ -1,2 +1,10 @@
+github.com/go-redis/redis/v8 v8.11.5 h1:AcZZR7igkdvfVmQTPnu9WE37LRrO/YrBH5zWyjDC0oI=
+github.com/go-redis/redis/v8 v8.11.5/go.mod h1:gREzHqY1hg6oD9ngVRbLStwAWKhA0FEgq8Jd4h5lpwo=
 github.com/gorilla/mux v1.8.0 h1:i40aqfkR1h2SlN9hojwV5ZA91wcXFOvkdNIeFDP5koI=
 github.com/gorilla/mux v1.8.0/go.mod h1:DVbg23sWSpFRCP0SfiEN6jmj59UnW/n46BH5rLB71So=
+github.com/gorilla/websocket v1.5.0 h1:cXnVxrC5Qv3RZsJ1YQQZsQyJwYtXDgJYJkxZYZLZLZ4=
+github.com/gorilla/websocket v1.5.0/go.mod h1:J7rHwZxZ1E7k/mQnIsEI4xVVUaJJ1rWfE3SBa/74x+I=
+go.uber.org/zap v1.21.0 h1:WefMeulhovoZ2sYXz7st6K0sLj7bBhpiFaud4r4zST8=
+go.uber.org/zap v1.21.0/go.mod h1:wjWOCqI0f2ZZrJF/UufIOkiC8ii6tm1iqIsLo76RfJw=
+google.golang.org/grpc v1.44.0 h1:ZGZpQQJ+XR+qkfqjxNXcK3zYbLjQQQQQQQQQQQQQQQQ=
+google.golang.org/grpc v1.44.0/go.mod h1:94dSjZpM9sxwM3/hH48ZsjBzJWYlwFdO4GnBxwG+4=

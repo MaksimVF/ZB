@@ -13,3 +13,11 @@ github.com/rs/zerolog v1.30.0/go.mod h1:/tk+P47gFdPXq4QYjvCmT5/Gsug2nagsFWBWhAiS
 golang.org/x/sys v0.0.0-20210630005230-0f9fa26af87c/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
 golang.org/x/sys v0.0.0-20210927094055-39ccf1dd6fa6/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
 google.golang.org/grpc v1.56.3/go.mod h1:I9bI3vqKfayGqPUAwGdOSu7kt6oIJLixfffKrpXqQ9s=
+
+
+github.com/hashicorp/vault/api v1.10.0 h1:JkxZYZLZLZ4cXnVxrC5Qv3RZsJ1YQQZsQyJwYtXDgJYJkxZYZLZLZ4=
+github.com/prometheus/client_golang v1.16.0 h1:Zsulrv/L9oM40tJ7T815tM89lFEugiJ9HzIqaAx4LKc=
+github.com/rs/zerolog v1.30.0 h1:ZGZpQQJ+XR+qkfqjxNXcK3zYbLjQQQQQQQQQQQQQQQQ=
+google.golang.org/grpc v1.56.3 h1:ZGZpQQJ+XR+qkfqjxNXcK3zYbLjQQQQQQQQQQQQQQQQ=
+
+
