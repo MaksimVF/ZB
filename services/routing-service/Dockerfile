@@ -9,15 +9,8 @@ WORKDIR /app
 # Copy go mod and sum files
 COPY go.mod go.sum ./
 
-# Download all dependencies. Dependencies will be cached if the go.mod and go.sum files are not changed
-RUN go mod download
-
-# Install missing dependencies that are not in go.sum
-RUN go get github.com/go-redis/redis/v8 \
-    && go get github.com/gorilla/mux \
-    && go get github.com/gorilla/websocket \
-    && go get go.uber.org/zap \
-    && go get google.golang.org/grpc
+# Download and tidy dependencies to ensure go.sum is up to date
+RUN go mod tidy
 
 # Copy the source from the current directory to the Working Directory inside the container
 COPY . .
