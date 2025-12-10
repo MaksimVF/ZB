@@ -14,11 +14,9 @@ WORKDIR /app
 # Copy the go.mod and go.sum files
 COPY go.mod go.sum ./
 
-# Download all dependencies. Dependencies will be cached if the go.mod and go.sum files are not changed
-RUN go mod download
-
-# Install missing dependencies that are not in go.sum
-RUN go get google.golang.org/grpc \
+# Download all dependencies and update go.sum
+RUN go mod download \
+    && go get google.golang.org/grpc \
     && go get github.com/hashicorp/vault/api \
     && go get github.com/prometheus/client_golang/prometheus \
     && go get github.com/rs/zerolog \
