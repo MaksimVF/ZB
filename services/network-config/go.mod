@@ -4,7 +4,7 @@
 
 module github.com/MaksimVF/ZB/services/network-config
 
-go 1.21
+go 1.25
 
 require (
 	github.com/go-redis/redis/v8 v8.11.5
