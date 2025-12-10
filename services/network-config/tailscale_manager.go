@@ -2,12 +2,11 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
-	"time"
 
 	"go.uber.org/zap"
 )
