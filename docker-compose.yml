@@ -138,7 +138,7 @@ services:
   # ------------------------------
   # Web-based admin interface for managing network configuration
   network-config-admin:
-    build: ./services/network-config-admin
+    build: ./services/network-config
     ports:
       - "8082:8080"
     depends_on:
