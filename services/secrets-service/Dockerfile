@@ -14,19 +14,8 @@ WORKDIR /app
 # Copy the go.mod and go.sum files
 COPY go.mod go.sum ./
 
-# Download all dependencies. Dependencies will be cached if the go.mod and go.sum files are not changed
-RUN go mod download
-
-# Install missing dependencies that are not in go.sum
-RUN go get google.golang.org/grpc \
-    && go get github.com/hashicorp/vault/api \
-    && go get github.com/prometheus/client_golang/prometheus \
-    && go get github.com/rs/zerolog \
-    && go get go.opentelemetry.io/otel \
-    && go get go.opentelemetry.io/otel/exporters/stdout/stdouttrace \
-    && go get go.opentelemetry.io/otel/sdk/resource \
-    && go get go.opentelemetry.io/otel/sdk/trace \
-    && go get go.opentelemetry.io/otel/semconv/v1.4.0
+# Download and tidy dependencies to ensure go.sum is up to date
+RUN go mod tidy
 
 # Copy the source code into the container
 COPY . .
