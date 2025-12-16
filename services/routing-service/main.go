@@ -22,8 +22,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/gorilla/mux"
-	"github.com/go-redis/redis/v8"
+	"github.com/go-chi/chi/v5"
+	"github.com/redis/go-redis/v9"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/nats-io/nats.go"
@@ -65,7 +65,15 @@ var (
 	// WebSocket upgrader
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
-			return true // Allow all origins for now
+			// TODO: Replace with a configurable list of allowed origins.
+			allowedOrigins := []string{"http://localhost:3000", "http://example.com"}
+			origin := r.Header.Get("Origin")
+			for _, allowedOrigin := range allowedOrigins {
+				if origin == allowedOrigin {
+					return true
+				}
+			}
+			return false
 		},
 	}
 
@@ -356,6 +364,7 @@ func jwtMiddleware(next http.Handler) http.Handler {
 
 		// In production, validate the JWT token and extract user info
 		// For now, we'll simulate token validation and role extraction
+		logger.Warn("Insecure JWT validation: This is a placeholder and should not be used in production.")
 		var userCtx UserContext
 
 		// Simulate token validation
@@ -402,6 +411,7 @@ func webhookSecurityMiddleware(next http.Handler) http.Handler {
 
 		// In production, validate the JWT token
 		// For now, we'll check for a specific webhook token format
+		logger.Warn("Insecure webhook validation: This is a placeholder and should not be used in production.")
 		if !strings.HasPrefix(authHeader, "Bearer webhook-") {
 			http.Error(w, "Invalid webhook token", http.StatusUnauthorized)
 			httpRequests.WithLabelValues(r.Method, r.URL.Path, "401").Inc()
@@ -462,44 +472,44 @@ func checkRole(requiredRole UserRole) func(http.Handler) http.Handler {
 }
 
 func startHTTPServer() {
-	router := mux.NewRouter()
-
-	// Admin API endpoints with RBAC
-	router.HandleFunc("/api/routing/policy", getRoutingPolicy).Methods("GET")
-	router.Handle("/api/routing/policy", checkRole(RoleAdmin)(http.HandlerFunc(updateRoutingPolicy))).Methods("PUT")
-	router.Handle("/api/routing/heads", checkRole(RoleOperator)(http.HandlerFunc(registerHeadHTTP))).Methods("POST")
-	router.HandleFunc("/api/routing/heads", getAllHeads).Methods("GET")
-	router.HandleFunc("/health", healthCheck).Methods("GET")
-
-	// Webhook endpoints with security and rate limiting
-	router.Handle("/webhook/head-status", webhookSecurityMiddleware(rateLimitMiddleware(http.HandlerFunc(handleHeadStatusWebhook)))).Methods("POST")
-	router.Handle("/webhook/routing-decision", webhookSecurityMiddleware(rateLimitMiddleware(http.HandlerFunc(handleRoutingDecisionWebhook)))).Methods("POST")
-
-	// Server-Sent Events (SSE) endpoints
-	router.HandleFunc("/events/head-status", handleHeadStatusEvents).Methods("GET")
-	router.HandleFunc("/events/routing-decisions", handleRoutingDecisionEvents).Methods("GET")
-
-	// WebSocket endpoints
-	router.HandleFunc("/ws/head-management", handleHeadManagementWebSocket)
-	router.HandleFunc("/ws/routing-decisions", handleRoutingDecisionsWebSocket)
-
-	// GraphQL endpoint
-	router.Handle("/graphql", graphqlHandler()).Methods("POST")
-	router.Handle("/graphiql", graphiqlHandler()).Methods("GET")
-
-	// Serve admin interface
-	router.PathPrefix("/admin/").Handler(http.StripPrefix("/admin/", http.FileServer(http.Dir("./"))))
-
-	// Add Prometheus metrics endpoint
-	router.Handle("/metrics", promhttp.Handler()).Methods("GET")
+	router := chi.NewRouter()
 
 	// Apply middlewares
 	router.Use(middleware.AuditLoggingMiddleware)
+	router.Use(jwtMiddleware)
 
-	// Apply JWT middleware
+	// Admin API endpoints with RBAC
+	router.Get("/api/routing/policy", getRoutingPolicy)
+	router.With(checkRole(RoleAdmin)).Put("/api/routing/policy", updateRoutingPolicy)
+	router.With(checkRole(RoleOperator)).Post("/api/routing/heads", registerHeadHTTP)
+	router.Get("/api/routing/heads", getAllHeads)
+	router.Get("/health", healthCheck)
+
+	// Webhook endpoints with security and rate limiting
+	router.With(webhookSecurityMiddleware, rateLimitMiddleware).Post("/webhook/head-status", handleHeadStatusWebhook)
+	router.With(webhookSecurityMiddleware, rateLimitMiddleware).Post("/webhook/routing-decision", handleRoutingDecisionWebhook)
+
+	// Server-Sent Events (SSE) endpoints
+	router.Get("/events/head-status", handleHeadStatusEvents)
+	router.Get("/events/routing-decisions", handleRoutingDecisionEvents)
+
+	// WebSocket endpoints
+	router.Get("/ws/head-management", handleHeadManagementWebSocket)
+	router.Get("/ws/routing-decisions", handleRoutingDecisionsWebSocket)
+
+	// GraphQL endpoint
+	router.Post("/graphql", graphqlHandler())
+	router.Get("/graphiql", graphiqlHandler())
+
+	// Serve admin interface
+	router.Handle("/admin/*", http.StripPrefix("/admin/", http.FileServer(http.Dir("./"))))
+
+	// Add Prometheus metrics endpoint
+	router.Handle("/metrics", promhttp.Handler())
+
 	httpServer = &http.Server{
 		Addr:    ":8080",
-		Handler: jwtMiddleware(router),
+		Handler: router,
 	}
 
 	logger.Info("Starting HTTP server with JWT authentication, RBAC, Prometheus metrics, webhook support, SSE, WebSocket, and GraphQL on :8080")
@@ -2287,7 +2297,7 @@ func storeHeadInRedis(head HeadService) error {
 		"last_heartbeat": head.LastHeartbeat,
 	}
 
-	err := redisClient.HMSet(ctx, headKey, headData).Err()
+	err := redisClient.HSet(ctx, headKey, headData).Err()
 	if err != nil {
 		return err
 	}
@@ -2317,7 +2327,7 @@ func updateHeadStatusInRedis(head HeadService) error {
 		"last_heartbeat": head.LastHeartbeat,
 	}
 
-	return redisClient.HMSet(ctx, headKey, headData).Err()
+	return redisClient.HSet(ctx, headKey, headData).Err()
 }
 
 func storeRoutingPolicyInRedis(policy RoutingPolicy) error {
@@ -2331,7 +2341,7 @@ func storeRoutingPolicyInRedis(policy RoutingPolicy) error {
 		"strategy_config":     policy.StrategyConfig,
 	}
 
-	return redisClient.HMSet(ctx, "routing:policy", policyData).Err()
+	return redisClient.HSet(ctx, "routing:policy", policyData).Err()
 }
 
 // Routing Strategy Functions
