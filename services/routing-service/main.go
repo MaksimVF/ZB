@@ -1980,6 +1980,29 @@ func (s *RoutingServer) UpdateHeadStatus(ctx context.Context, req *pb.UpdateHead
 	return &pb.UpdateHeadStatusResponse{Success: true, Message: "Head status updated successfully"}, nil
 }
 
+// updateHeadMetrics updates the head's performance metrics for predictive algorithms
+func updateHeadMetrics(head *HeadService, modelType, strategy string) {
+	// Update load history (keep last 10 samples)
+	if len(head.LoadHistory) >= 10 {
+		head.LoadHistory = head.LoadHistory[1:]
+	}
+	head.LoadHistory = append(head.LoadHistory, head.CurrentLoad)
+
+	// Update response time history (simulate response time for now)
+	responseTime := int64(50 + rand.Intn(100)) // Simulate 50-150ms response time
+	if len(head.ResponseTimes) >= 10 {
+		head.ResponseTimes = head.ResponseTimes[1:]
+	}
+	head.ResponseTimes = append(head.ResponseTimes, responseTime)
+
+	// Update utilization
+	if head.Capacity > 0 {
+		head.Utilization = float64(head.CurrentLoad) / float64(head.Capacity) * 100
+	} else {
+		head.Utilization = 0
+	}
+}
+
 func (s *RoutingServer) GetRoutingDecision(ctx context.Context, req *pb.GetRoutingDecisionRequest) (*pb.GetRoutingDecisionResponse, error) {
 
 	// Implement routing decision logic based on current policy
@@ -2084,30 +2107,6 @@ func (s *RoutingServer) GetRoutingDecision(ctx context.Context, req *pb.GetRouti
 
 	// Update head metrics for predictive algorithms
 	updateHeadMetrics(selectedHead, req.ModelType, strategy)
-
-// updateHeadMetrics updates the head's performance metrics for predictive algorithms
-func updateHeadMetrics(head *HeadService, modelType, strategy string) {
-	// Update load history (keep last 10 samples)
-	if len(head.LoadHistory) >= 10 {
-		head.LoadHistory = head.LoadHistory[1:]
-	}
-	head.LoadHistory = append(head.LoadHistory, head.CurrentLoad)
-
-	// Update response time history (simulate response time for now)
-	responseTime := int64(50 + rand.Intn(100)) // Simulate 50-150ms response time
-	if len(head.ResponseTimes) >= 10 {
-		head.ResponseTimes = head.ResponseTimes[1:]
-	}
-	head.ResponseTimes = append(head.ResponseTimes, responseTime)
-
-	// Update utilization
-	if head.Capacity > 0 {
-		head.Utilization = float64(head.CurrentLoad) / float64(head.Capacity) * 100
-	} else {
-		head.Utilization = 0
-	}
-}
-
 	// Record metrics
 	routingDecisions.WithLabelValues(strategy, req.ModelType, selectedHead.Region).Inc()
 
