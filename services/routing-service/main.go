@@ -1897,6 +1897,7 @@ func makeRoutingDecisionFromWebhook(modelType, regionPreference, routingStrategy
 		"reason":        resp.Reason,
 		"metadata":      resp.Metadata,
 	}, nil
+}
 
 // gRPC Methods
 
