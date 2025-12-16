@@ -16,7 +16,7 @@ RUN go mod tidy
 COPY . .
 
 # Build the Go app
-RUN go build -o routing-service ./...
+RUN go build -o routing-service .
 
 # Start a new stage from scratch
 FROM alpine:latest
