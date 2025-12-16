@@ -9,5 +9,3 @@ require (
 	go.uber.org/zap v1.21.0
 	google.golang.org/grpc v1.77.0
 )
-
-replace github.com/MaksimVF/ZB => ../../..

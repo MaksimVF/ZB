@@ -35,7 +35,7 @@ import (
 
 
 	"github.com/MaksimVF/ZB/services/routing-service/middleware"
-	pb "github.com/MaksimVF/ZB/gen/proto/routing"
+	pb "github.com/MaksimVF/ZB/services/routing-service/proto"
 
 	"github.com/MaksimVF/ZB/services/routing-service/retry"
 )
