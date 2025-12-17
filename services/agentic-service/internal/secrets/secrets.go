@@ -12,7 +12,7 @@ import (
 	"github.com/go-redis/redis/v8"
 	"google.golang.org/grpc"
 
-	"llm-gateway-pro/services/agentic-service/internal/grpc"
+	"github.com/MaksimVF/ZB/services/agentic-service/grpc"
 	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
 )
 

@@ -30,9 +30,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
-	"llm-gateway-pro/services/agentic-service/internal/secrets"
-	"llm-gateway-pro/services/agentic-service/internal"
-	"llm-gateway-pro/services/head-go/gen"
+	"github.com/MaksimVF/ZB/services/agentic-service/internal/secrets"
+	"github.com/MaksimVF/ZB/services/agentic-service/internal"
+	"github.com/MaksimVF/ZB/services/agentic-service/gen"
 )
 
 var (

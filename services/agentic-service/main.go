@@ -23,8 +23,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-redis/redis/v8"
-	"github.com/gorilla/mux"
+	"github.com/go-chi/chi/v5"
+	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
@@ -63,16 +63,18 @@ func main() {
 	go watchSecretsUpdates()
 
 	// Initialize HTTP router
-	r := mux.NewRouter()
+	r := chi.NewRouter()
 
 	// Agentic endpoint
-	r.Handle("/v1/agentic", middleware.RateLimiter(
-		middleware.ContentFilteringMiddleware(
-			middleware.AuditLoggingMiddleware(
-				middleware.DataIsolationMiddleware(handlers.AgenticHandler))))).Methods("POST")
+	r.With(
+		middleware.RateLimiter,
+		middleware.ContentFilteringMiddleware,
+		middleware.AuditLoggingMiddleware,
+		middleware.DataIsolationMiddleware,
+	).Post("/v1/agentic", handlers.AgenticHandler)
 
 	// Health check
-	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		// Check Redis connection
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -93,14 +95,14 @@ func main() {
 
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "OK")
-	}).Methods("GET")
+	})
 
 	// Provider management endpoints
-	r.HandleFunc("/v1/providers", handlers.GetProviders).Methods("GET")
-	r.HandleFunc("/v1/providers/health", handlers.GetProviderHealth).Methods("GET")
-	r.HandleFunc("/v1/providers", handlers.AddProvider).Methods("POST")
-	r.HandleFunc("/v1/providers", handlers.RemoveProvider).Methods("DELETE")
-	r.HandleFunc("/v1/providers/api-key", handlers.UpdateProviderAPIKey).Methods("PUT")
+	r.Get("/v1/providers", handlers.GetProviders)
+	r.Get("/v1/providers/health", handlers.GetProviderHealth)
+	r.Post("/v1/providers", handlers.AddProvider)
+	r.Delete("/v1/providers", handlers.RemoveProvider)
+	r.Put("/v1/providers/api-key", handlers.UpdateProviderAPIKey)
 
 	// Start HTTP server
 	srv := &http.Server{

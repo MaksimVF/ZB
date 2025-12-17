@@ -30,18 +30,18 @@ services:
     networks:
       - server_network
       - client_network
-  # Tail Service (Main Service)
+  # Tail Service (Main Service) - DISABLED
   # --------------------------
-  # This is the core working service that handles the main business logic and API functionality.
-  # It serves as the primary backend service in our architecture.
-  tail:
-    build: ./services/tail-go
-    ports: ["8000:8000"]
-    depends_on: ["head", "rate-limiter"]
-    volumes:
-      - ./certs:/certs:ro
-    networks:
-      - client_network
+  # This service is currently disabled due to compilation errors and outdated dependencies.
+  # It requires a major refactoring before it can be re-enabled.
+  # tail:
+  #   build: ./services/tail-go
+  #   ports: ["8000:8000"]
+  #   depends_on: ["head", "rate-limiter"]
+  #   volumes:
+  #     - ./certs:/certs:ro
+  #   networks:
+  #     - client_network
   ui:
     build: ./ui/admin-dashboard
     ports: ["3000:5173"]
