@@ -14,7 +14,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"llm-gateway-pro/services/agentic-service/internal"
+	"github.com/MaksimVF/ZB/services/agentic-service/internal"
 )
 
 // GetProviders returns the list of all configured providers

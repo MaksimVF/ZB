@@ -19,9 +19,9 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/go-chi/chi/v5"
+	"github.com/redis/go-redis/v9"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/gorilla/mux"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -33,6 +33,8 @@ import (
 	"google.golang.org/grpc/status"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+
+	pb "github.com/MaksimVF/ZB/services/head-go/gen"
 )
 
 var (
@@ -144,24 +146,29 @@ func main() {
 		logger.Fatal().Err(err).Msg("Failed to migrate database schema")
 	}
 
-	r := mux.NewRouter()
-    r.Use(securityHeadersMiddleware)
-	r.HandleFunc("/register", Register).Methods("POST")
-	r.HandleFunc("/login", rateLimitMiddleware(Login)).Methods("POST")
-	r.HandleFunc("/me", AuthMiddleware(Me)).Methods("GET")
-	r.HandleFunc("/api-keys", AuthMiddleware(ListAPIKeys)).Methods("GET")
-	r.HandleFunc("/api-keys", AuthMiddleware(CreateAPIKey)).Methods("POST")
-	r.HandleFunc("/balance", AuthMiddleware(GetBalance)).Methods("GET")
+	r := chi.NewRouter()
+	r.Use(securityHeadersMiddleware)
+
+	r.Post("/register", Register)
+	r.With(rateLimitMiddleware).Post("/login", Login)
+	r.With(AuthMiddleware).Get("/me", Me)
+	r.With(AuthMiddleware).Get("/api-keys", ListAPIKeys)
+	r.With(AuthMiddleware).Post("/api-keys", CreateAPIKey)
+	r.With(AuthMiddleware).Get("/balance", GetBalance)
 
 	// Health check endpoint
-	r.HandleFunc("/health", HealthCheck).Methods("GET")
+	r.Get("/health", HealthCheck)
 
 	// Prometheus metrics endpoint
 	r.Handle("/metrics", promhttp.Handler())
 
 	// gRPC for gateway with mTLS
 	go func() {
-		lis, err := net.Listen("tcp", ":50051")
+		grpcPort := os.Getenv("GRPC_PORT")
+		if grpcPort == "" {
+			grpcPort = "50051"
+		}
+		lis, err := net.Listen("tcp", ":"+grpcPort)
 		if err != nil {
 			logger.Fatal().Err(err).Msg("Failed to listen for gRPC")
 		}
@@ -179,8 +186,12 @@ func main() {
 		}
 	}()
 
-	logger.Info().Msg("Auth service: HTTP :8081 | gRPC+mTLS :50051")
-	log.Fatal(http.ListenAndServe(":8081", r))
+	httpPort := os.Getenv("HTTP_PORT")
+	if httpPort == "" {
+		httpPort = "8081"
+	}
+	logger.Info().Msgf("Auth service: HTTP :%s | gRPC+mTLS :%s", httpPort, os.Getenv("GRPC_PORT"))
+	log.Fatal(http.ListenAndServe(":"+httpPort, r))
 }
 
 // Custom error types
