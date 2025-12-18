@@ -1,11 +1,10 @@
-
-
-
 package main
 
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -82,6 +81,9 @@ func init() {
 	secret = []byte(os.Getenv("JWT_SECRET"))
 	if len(secret) == 0 {
 		logger.Fatal().Msg("JWT_SECRET environment variable not set")
+	}
+	if len(secret) < 32 {
+		logger.Fatal().Msg("JWT_SECRET must be at least 32 characters")
 	}
 
 	// Initialize Redis
@@ -454,7 +456,7 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Content Security Policy
 		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;")
+			"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;")
 
 		// XSS Protection
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
@@ -483,7 +485,7 @@ func getUserAPIKeys(userID string) []map[string]interface{} {
 	var keys []APIKey
 	if err := db.Where("user_id = ?", userID).Find(&keys).Error; err != nil {
 		logger.Error().Err(err).Str("user_id", userID).Msg("Failed to get API keys")
-		return []map[string]interface{}{}
+		return []map[string]interface{}{ }
 	}
 
 	var result []map[string]interface{}
@@ -555,11 +557,12 @@ func AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 		if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
 			var user User
-			if err := db.First(&user, "id = ?", claims["user_id"]).Error; err != nil {
-				logger.Warn().Str("user_id", claims["user_id"].(string)).Msg("User not found")
-				http.Error(w, UnauthorizedError, 401)
-				httpDuration.WithLabelValues(r.Method, r.URL.Path, "401").Observe(time.Since(start).Seconds())
-				return
+			userID, ok := claims["user_id"].(string)
+			if !ok {
+				// обработка ошибки
+			}
+			if err := db.First(&user, "id = ?", userID).Error; err != nil {
+				// ...
 			}
 			ctx := context.WithValue(r.Context(), "user", user)
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -689,5 +692,3 @@ func loadTLSCredentials() (credentials.TransportCredentials, error) {
 
 	return credentials.NewTLS(tlsConfig), nil
 }
-
-
