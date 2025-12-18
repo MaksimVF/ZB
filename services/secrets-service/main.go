@@ -77,6 +77,54 @@ func isOriginAllowed(origin, allowedOrigins string) bool {
 	return false
 }
 
+// Helper function to validate secret path and prevent path traversal attacks
+func validateSecretPath(path string) error {
+	if path == "" {
+		return fmt.Errorf("path cannot be empty")
+	}
+
+	// Check for path traversal patterns
+	dangerousPatterns := []string{"..", "~", "\\", ":", "*", "?", "\"", "<", ">", "|"}
+	for _, pattern := range dangerousPatterns {
+		if strings.Contains(path, pattern) {
+			return fmt.Errorf("path contains forbidden character sequence: %s", pattern)
+		}
+	}
+
+	// Validate path format - only allow alphanumeric, dashes, underscores, and slashes
+	pathRegex := regexp.MustCompile(`^[a-zA-Z0-9\-_/]+$`)
+	if !pathRegex.MatchString(path) {
+		return fmt.Errorf("path contains invalid characters: only alphanumeric, dashes, underscores, and slashes allowed")
+	}
+
+	// Check path length
+	if len(path) > 256 {
+		return fmt.Errorf("path too long: maximum 256 characters allowed")
+	}
+
+	// Ensure path doesn't start or end with slash
+	if strings.HasPrefix(path, "/") || strings.HasSuffix(path, "/") {
+		return fmt.Errorf("path cannot start or end with slash")
+	}
+
+	return nil
+}
+
+// Helper function to validate user ID format
+func validateUserID(userID string) error {
+	if userID == "" {
+		return fmt.Errorf("user ID cannot be empty")
+	}
+
+	// UUID format validation
+	uuidRegex := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	if !uuidRegex.MatchString(userID) {
+		return fmt.Errorf("invalid user ID format: must be a valid UUID")
+	}
+
+	return nil
+}
+
 // Centralized error handler for gRPC methods
 func handleGRPCError(ctx context.Context, err error, operation string) error {
 	logger.Error().Err(err).Str("operation", operation).Msg("Operation failed")
@@ -164,33 +212,55 @@ func init() {
 	// Register Prometheus metrics
 	prometheus.MustRegister(secretCounter, httpDuration)
 
-	// Initialize OpenTelemetry
+	// Initialize OpenTelemetry (non-critical, skip if fails)
 	initOpenTelemetry()
 
-	// Initialize Vault client
+	// Initialize Vault client with proper error handling
+	vaultAddr := os.Getenv("VAULT_ADDR")
+	if vaultAddr == "" {
+		vaultAddr = "http://vault:8200" // Default for Docker Compose
+	}
+
 	config := api.DefaultConfig()
-	config.Address = os.Getenv("VAULT_ADDR") // http://vault:8200
+	config.Address = vaultAddr
 	client, err := api.NewClient(config)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to initialize Vault client")
 	}
-	client.SetToken(os.Getenv("VAULT_TOKEN")) // token with proper rights
 
-	// Test Vault connection
-	_, err = client.Sys().Health()
+	// Set token with fallback
+	vaultToken := os.Getenv("VAULT_TOKEN")
+	if vaultToken == "" {
+		logger.Fatal().Msg("VAULT_TOKEN environment variable not set")
+	}
+	client.SetToken(vaultToken)
+
+	// Test Vault connection with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err = client.Sys().HealthWithContext(ctx)
 	if err != nil {
-		logger.Fatal().Err(err).Msg("Vault health check failed")
+		logger.Fatal().Err(err).Msg("Vault health check failed - ensure Vault is running and accessible")
 	}
 
 	vaultClient = client
-	logger.Info().Msg("Vault client initialized successfully")
+	logger.Info().Str("vault_addr", vaultAddr).Msg("Vault client initialized successfully")
 }
 
 func initOpenTelemetry() {
+	// Only initialize OpenTelemetry if the required packages are available
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Warn().Msg("OpenTelemetry initialization skipped (packages not available)")
+		}
+	}()
+
 	// Create a new stdout exporter
 	exporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
 	if err != nil {
-		logger.Fatal().Err(err).Msg("Failed to create stdout exporter")
+		logger.Warn().Err(err).Msg("Failed to create stdout exporter, skipping OpenTelemetry")
+		return
 	}
 
 	// Create a new tracer provider with a batch span processor and the stdout exporter
@@ -245,6 +315,11 @@ func (s *server) GetSecret(ctx context.Context, req *pb.GetSecretRequest) (*pb.G
 	// Validate input
 	if req.Name == "" {
 		err := fmt.Errorf("secret name is required")
+		return nil, handleGRPCError(ctx, err, "get_secret")
+	}
+
+	// Validate secret path
+	if err := validateSecretPath(req.Name); err != nil {
 		return nil, handleGRPCError(ctx, err, "get_secret")
 	}
 
@@ -306,9 +381,19 @@ func (s *server) GetUserSecret(ctx context.Context, req *pb.GetUserSecretRequest
 		return nil, handleGRPCError(ctx, err, "get_user_secret")
 	}
 
-	// Get user-specific secret from Vault
-	secretPath := fmt.Sprintf("user-secrets/data/%s/%s", req.UserId, req.SecretName)
-	secret, err := vaultClient.Logical().Read(secretPath)
+	// Validate user ID format
+	if err := validateUserID(req.UserId); err != nil {
+		return nil, handleGRPCError(ctx, err, "get_user_secret")
+	}
+
+	// Validate secret path
+	if err := validateSecretPath(req.SecretName); err != nil {
+		return nil, handleGRPCError(ctx, err, "get_user_secret")
+	}
+
+	// Get user-specific secret from Vault using KV v2
+	secretPath := fmt.Sprintf("user-secrets/%s/%s", req.UserId, req.SecretName)
+	secret, err := getSecretFromVault(secretPath)
 	if err != nil {
 		return nil, handleGRPCError(ctx, err, "get_user_secret")
 	}
@@ -318,13 +403,7 @@ func (s *server) GetUserSecret(ctx context.Context, req *pb.GetUserSecretRequest
 		return nil, handleGRPCError(ctx, err, "get_user_secret")
 	}
 
-	data, ok := secret.Data["data"].(map[string]interface{})
-	if !ok {
-		err := fmt.Errorf("invalid data format in vault response")
-		return nil, handleGRPCError(ctx, err, "get_user_secret")
-	}
-
-	value, ok := data["value"].(string)
+	value, ok := secret.Data["value"].(string)
 	if !ok {
 		err := fmt.Errorf("invalid value format in vault response")
 		return nil, handleGRPCError(ctx, err, "get_user_secret")
@@ -353,11 +432,25 @@ func (s *server) SetUserSecret(ctx context.Context, req *pb.SetUserSecretRequest
 		return nil, handleGRPCError(ctx, err, "set_user_secret")
 	}
 
-	// Store user-specific secret in Vault
-	secretPath := fmt.Sprintf("user-secrets/data/%s/%s", req.UserId, req.SecretName)
-	_, err := vaultClient.Logical().Write(secretPath, map[string]interface{}{
-		"data": map[string]interface{}{"value": req.SecretValue},
-	})
+	// Validate user ID format
+	if err := validateUserID(req.UserId); err != nil {
+		return nil, handleGRPCError(ctx, err, "set_user_secret")
+	}
+
+	// Validate secret path
+	if err := validateSecretPath(req.SecretName); err != nil {
+		return nil, handleGRPCError(ctx, err, "set_user_secret")
+	}
+
+	// Validate secret value length
+	if len(req.SecretValue) > 4096 {
+		err := fmt.Errorf("secret value too long: maximum 4096 characters allowed")
+		return nil, handleGRPCError(ctx, err, "set_user_secret")
+	}
+
+	// Store user-specific secret in Vault using KV v2
+	secretPath := fmt.Sprintf("user-secrets/%s/%s", req.UserId, req.SecretName)
+	err := putSecretInVault(secretPath, map[string]interface{}{"value": req.SecretValue})
 	if err != nil {
 		return nil, handleGRPCError(ctx, err, "set_user_secret")
 	}
@@ -505,11 +598,10 @@ func handlePostSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate path format - only allow alphanumeric, dashes, underscores, and slashes
-	pathRegex := regexp.MustCompile(`^[a-zA-Z0-9\-_/]+$`)
-	if !pathRegex.MatchString(input.Path) {
-		logger.Error().Str("path", input.Path).Msg("Invalid path format")
-		http.Error(w, "invalid path format: only alphanumeric, dashes, underscores, and slashes allowed", 400)
+	// Validate path using enhanced validation
+	if err := validateSecretPath(input.Path); err != nil {
+		logger.Error().Str("path", input.Path).Err(err).Msg("Invalid path format")
+		http.Error(w, fmt.Sprintf("invalid_path: %s", err.Error()), 400)
 		httpDuration.WithLabelValues(r.Method, r.URL.Path, "400").Observe(time.Since(start).Seconds())
 		return
 	}
@@ -556,12 +648,10 @@ func handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate secret name format - only allow alphanumeric, dashes, underscores, and slashes
-	pathRegex := regexp.MustCompile(`^[a-zA-Z0-9\-_/]+$`)
-	if !pathRegex.MatchString(name) {
-		errMsg := "invalid secret name format: only alphanumeric, dashes, underscores, and slashes allowed"
-		logger.Error().Str("client_ip", clientIP).Str("secret_name", name).Str("error", errMsg).Msg("Invalid secret name format")
-		http.Error(w, fmt.Sprintf("invalid_request: %s", errMsg), 400)
+	// Validate secret name using enhanced validation
+	if err := validateSecretPath(name); err != nil {
+		logger.Error().Str("client_ip", clientIP).Str("secret_name", name).Err(err).Msg("Invalid secret name format")
+		http.Error(w, fmt.Sprintf("invalid_path: %s", err.Error()), 400)
 		httpDuration.WithLabelValues(r.Method, r.URL.Path, "400").Observe(time.Since(start).Seconds())
 		return
 	}

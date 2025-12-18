@@ -2,8 +2,6 @@ module github.com/MaksimVF/ZB/services/auth-service
 
 go 1.23
 
-toolchain go1.24.3
-
 require (
 	github.com/MaksimVF/ZB/services/head-go v0.0.0-00010101000000-000000000000
 	github.com/go-chi/chi/v5 v5.2.3
