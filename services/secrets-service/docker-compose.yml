@@ -10,10 +10,8 @@ services:
   vault:
     image: hashicorp/vault:latest
     container_name: vault
-    ports:
-      - "8200:8200"
     environment:
-      - VAULT_DEV_ROOT_TOKEN_ID=root
+      - VAULT_DEV_ROOT_TOKEN_ID=${VAULT_TOKEN:-root}
       - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
     cap_add:
       - IPC_LOCK
@@ -22,6 +20,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - vault-network
 
   secret-service:
     build:
@@ -32,22 +32,28 @@ services:
       - "8082:8082"
     environment:
       - VAULT_ADDR=http://vault:8200
-      - VAULT_TOKEN=root
-      - ADMIN_KEY=${ADMIN_KEY}
-      - ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3001
+      - VAULT_TOKEN=${VAULT_TOKEN:-root}
+      - ADMIN_KEY=${ADMIN_KEY:-change-me-in-production}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:3001}
     depends_on:
       vault:
         condition: service_healthy
+    networks:
+      - vault-network
 
   redis:
     image: redis:7.0-alpine
-    ports:
-      - "6379:6379"
     volumes:
       - redis_data:/data
+    networks:
+      - vault-network
 
 volumes:
   redis_data:
+
+networks:
+  vault-network:
+    driver: bridge
 
 
 

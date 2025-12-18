@@ -56,6 +56,20 @@ var (
 		},
 		[]string{"method", "path", "status"},
 	)
+	securityEvents = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "security_events_total",
+			Help: "Total number of security events by type and risk level",
+		},
+		[]string{"event_type", "risk_level"},
+	)
+	bruteForceAttempts = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "brute_force_attempts_total",
+			Help: "Total number of brute force attempts by type",
+		},
+		[]string{"attempt_type", "target"},
+	)
 )
 
 const (
@@ -65,7 +79,195 @@ const (
 	RateLimitExceededError  = "rate limit exceeded"
 	InternalServerError     = "internal server error"
 	UnauthorizedError       = "unauthorized"
+	AccountLockedError      = "account temporarily locked"
+	TooManyAttemptsError    = "too many attempts"
+	CaptchaRequiredError    = "captcha required"
 )
+
+// Brute force protection configuration
+const (
+	MaxFailedAttemptsPerEmail = 5
+	MaxFailedAttemptsPerIP    = 10
+	LockoutDuration           = 15 * time.Minute  // Initial lockout
+	MaxLockoutDuration        = 24 * time.Hour    // Maximum lockout
+	CaptchaThreshold          = 3                 // Enable CAPTCHA after 3 failed attempts
+	ProgressiveDelayBase      = 1 * time.Second   // Base delay for exponential backoff
+)
+
+// Attempt tracking structures
+type LoginAttempt struct {
+	FailedAttempts int           `json:"failed_attempts"`
+	LastAttempt    time.Time     `json:"last_attempt"`
+	LockedUntil    time.Time     `json:"locked_until"`
+	IpAddress      string        `json:"ip_address"`
+	Email          string        `json:"email"`
+}
+
+// Security event for logging
+type SecurityEvent struct {
+	EventType   string    `json:"event_type"`
+	Email       string    `json:"email"`
+	IPAddress   string    `json:"ip_address"`
+	Reason      string    `json:"reason"`
+	Timestamp   time.Time `json:"timestamp"`
+	RiskLevel   string    `json:"risk_level"`
+}
+
+// === Brute Force Protection Functions ===
+
+// Check if account is locked for email
+func isAccountLocked(email string) (bool, time.Duration) {
+	key := fmt.Sprintf("lockout:email:%s", email)
+	lockedUntil, err := rdb.Get(context.Background(), key).Time()
+	
+	if err == nil && time.Now().Before(lockedUntil) {
+		remaining := lockedUntil.Sub(time.Now())
+		return true, remaining
+	}
+
+	return false, 0
+}
+
+// Check if IP is temporarily blocked
+func isIPBlocked(ip string) bool {
+	key := fmt.Sprintf("block:ip:%s", ip)
+	blocked, err := rdb.Exists(context.Background(), key).Result()
+	return err == nil && blocked > 0
+}
+
+// Record failed login attempt
+func recordFailedAttempt(email, ip string) {
+	now := time.Now()
+	
+	// Record attempt for email
+	emailKey := fmt.Sprintf("attempts:email:%s", email)
+	emailData := LoginAttempt{
+		FailedAttempts: 1,
+		LastAttempt:    now,
+		IpAddress:      ip,
+		Email:          email,
+	}
+	
+	// Get existing attempts
+	existingData, err := rdb.Get(context.Background(), emailKey).Result()
+	if err == nil {
+		var existing LoginAttempt
+		if json.Unmarshal([]byte(existingData), &existing) == nil {
+			emailData.FailedAttempts = existing.FailedAttempts + 1
+			emailData.LockedUntil = existing.LockedUntil
+		}
+	}
+	
+	// Check if we need to lock the account
+	if emailData.FailedAttempts >= MaxFailedAttemptsPerEmail {
+		// Calculate lockout duration with exponential backoff
+		lockoutDuration := LockoutDuration
+		if emailData.FailedAttempts > MaxFailedAttemptsPerEmail {
+			backoffCount := emailData.FailedAttempts - MaxFailedAttemptsPerEmail
+			lockoutDuration = time.Duration(backoffCount) * LockoutDuration
+			if lockoutDuration > MaxLockoutDuration {
+				lockoutDuration = MaxLockoutDuration
+			}
+		}
+		
+		lockedUntil := now.Add(lockoutDuration)
+		emailData.LockedUntil = lockedUntil
+		
+		// Set lockout in Redis
+		rdb.Set(context.Background(), emailKey, lockedUntil.Unix(), 0)
+		
+		// Log security event
+		logSecurityEvent("ACCOUNT_LOCKED", email, ip, fmt.Sprintf("Account locked for %v", lockoutDuration), "HIGH")
+	} else {
+		// Store attempt data
+		data, _ := json.Marshal(emailData)
+		rdb.SetEx(context.Background(), emailKey, data, 24*time.Hour)
+	}
+	
+	// Record IP-based attempts
+	ipKey := fmt.Sprintf("attempts:ip:%s", ip)
+	ipAttempts, _ := rdb.Incr(context.Background(), ipKey).Result()
+	rdb.Expire(context.Background(), ipKey, time.Hour)
+	
+	if ipAttempts >= MaxFailedAttemptsPerIP {
+		// Block IP for 1 hour
+		rdb.SetEx(context.Background(), fmt.Sprintf("block:ip:%s", ip), 1, time.Hour)
+		logSecurityEvent("IP_BLOCKED", email, ip, "IP blocked due to multiple failed attempts", "MEDIUM")
+	}
+	
+	// Log failed attempt
+	logSecurityEvent("LOGIN_FAILED", email, ip, fmt.Sprintf("Failed attempt #%d", emailData.FailedAttempts), "LOW")
+}
+
+// Reset failed attempts on successful login
+func resetFailedAttempts(email string) {
+	emailKey := fmt.Sprintf("attempts:email:%s", email)
+	rdb.Del(context.Background(), emailKey)
+	
+	// Remove lockout if exists
+	lockoutKey := fmt.Sprintf("lockout:email:%s", email)
+	rdb.Del(context.Background(), lockoutKey)
+}
+
+// Calculate progressive delay for failed attempts
+func getProgressiveDelay(email string) time.Duration {
+	emailKey := fmt.Sprintf("attempts:email:%s", email)
+	data, err := rdb.Get(context.Background(), emailKey).Result()
+	
+	if err != nil {
+		return 0
+	}
+
+	var attempt LoginAttempt
+	if json.Unmarshal([]byte(data), &attempt) == nil {
+		if attempt.FailedAttempts > 0 {
+			// Exponential backoff: 1s, 2s, 4s, 8s, etc.
+			delay := ProgressiveDelayBase * time.Duration(1<<uint(attempt.FailedAttempts-1))
+			return time.Minute(1) + delay // Add minimum 1 minute delay
+		}
+	}
+	
+	return 0
+}
+
+// Log security event
+func logSecurityEvent(eventType, email, ip, reason, riskLevel string) {
+	event := SecurityEvent{
+		EventType: eventType,
+		Email:     email,
+		IPAddress: ip,
+		Reason:    reason,
+		Timestamp: time.Now(),
+		RiskLevel: riskLevel,
+	}
+
+	eventData, _ := json.Marshal(event)
+	
+	// Store in Redis for analytics
+	rdb.LPush(context.Background(), "security:events", eventData)
+	rdb.LTrim(context.Background(), "security:events", 0, 999) // Keep last 1000 events
+	rdb.Expire(context.Background(), "security:events", 7*24*time.Hour) // Keep for 7 days
+
+	// Increment Prometheus metrics
+	securityEvents.WithLabelValues(eventType, riskLevel).Inc()
+	
+	// Increment brute force specific metrics
+	if strings.Contains(strings.ToLower(eventType), "failed") || 
+	   strings.Contains(strings.ToLower(eventType), "lock") ||
+	   strings.Contains(strings.ToLower(eventType), "blocked") {
+		bruteForceAttempts.WithLabelValues(eventType, email).Inc()
+	}
+
+	// Log based on risk level
+	switch riskLevel {
+	case "HIGH":
+		logger.Warn().Str("event", eventType).Str("email", logSafeEmail(email)).Str("ip", ip).Str("reason", reason).Msg("High risk security event")
+	case "MEDIUM":
+		logger.Warn().Str("event", eventType).Str("email", logSafeEmail(email)).Str("ip", ip).Str("reason", reason).Msg("Medium risk security event")
+	case "LOW":
+		logger.Info().Str("event", eventType).Str("email", logSafeEmail(email)).Str("ip", ip).Str("reason", reason).Msg("Low risk security event")
+	}
+}
 
 func init() {
 	// Initialize structured logger
@@ -75,7 +277,7 @@ func init() {
 		Logger()
 
 	// Register Prometheus metrics
-	prometheus.MustRegister(authCounter, httpDuration)
+	prometheus.MustRegister(authCounter, httpDuration, securityEvents, bruteForceAttempts)
 
 	// Load JWT secret from environment
 	secret = []byte(os.Getenv("JWT_SECRET"))
@@ -123,9 +325,6 @@ type APIKey struct {
 }
 
 func main() {
-	// Initialize Prometheus metrics
-	prometheus.MustRegister(authCounter, httpDuration)
-
 	// Initialize database
 	dsn := fmt.Sprintf(
 		"host=%s user=%s password=%s dbname=%s port=%s sslmode=disable",
@@ -150,6 +349,7 @@ func main() {
 
 	r := chi.NewRouter()
 	r.Use(securityHeadersMiddleware)
+	r.Use(suspiciousActivityMiddleware)
 
 	r.Post("/register", Register)
 	r.With(rateLimitMiddleware).Post("/login", Login)
@@ -157,6 +357,12 @@ func main() {
 	r.With(AuthMiddleware).Get("/api-keys", ListAPIKeys)
 	r.With(AuthMiddleware).Post("/api-keys", CreateAPIKey)
 	r.With(AuthMiddleware).Get("/balance", GetBalance)
+
+	// Security management endpoints
+	r.Get("/security/status", SecurityStatus)
+	r.With(AuthMiddleware).Post("/security/unlock", UnlockAccount)
+	r.With(AuthMiddleware).Get("/security/events", GetSecurityEvents)
+	r.With(AuthMiddleware).Post("/security/report", ReportSuspiciousActivity)
 
 	// Health check endpoint
 	r.Get("/health", HealthCheck)
@@ -214,7 +420,8 @@ func newAuthError(code codes.Code, message, details string) *AuthError {
 // === HTTP API ===
 func Register(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	logger.Info().Str("method", "Register").Msg("Received registration request")
+	ip := r.RemoteAddr
+	logger.Info().Str("method", "Register").Str("ip", ip).Msg("Received registration request")
 
 	var req struct {
 		Email    string `json:"email"`
@@ -228,9 +435,17 @@ func Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if IP is blocked (prevent spam registration)
+	if isIPBlocked(ip) {
+		logger.Warn().Str("ip", ip).Str("email", logSafeEmail(req.Email)).Msg("Registration attempt from blocked IP")
+		http.Error(w, "IP temporarily blocked", 423)
+		httpDuration.WithLabelValues("POST", "/register", "423").Observe(time.Since(start).Seconds())
+		return
+	}
+
 	// Validate email
 	if !isValidEmail(req.Email) {
-		logger.Warn().Str("email", logSafeEmail(req.Email)).Msg("Invalid email format")
+		logger.Warn().Str("email", logSafeEmail(req.Email)).Str("ip", ip).Msg("Invalid email format")
 		http.Error(w, InvalidEmailError, 400)
 		httpDuration.WithLabelValues("POST", "/register", "400").Observe(time.Since(start).Seconds())
 		return
@@ -238,7 +453,7 @@ func Register(w http.ResponseWriter, r *http.Request) {
 
 	// Validate password strength
 	if !isStrongPassword(req.Password) {
-		logger.Warn().Msg("Weak password attempt")
+		logger.Warn().Str("email", logSafeEmail(req.Email)).Str("ip", ip).Msg("Weak password attempt")
 		http.Error(w, WeakPasswordError, 400)
 		httpDuration.WithLabelValues("POST", "/register", "400").Observe(time.Since(start).Seconds())
 		return
@@ -247,9 +462,30 @@ func Register(w http.ResponseWriter, r *http.Request) {
 	// Check if user already exists
 	var existingUser User
 	if err := db.Where("email = ?", req.Email).First(&existingUser).Error; err == nil {
-		logger.Warn().Str("email", logSafeEmail(req.Email)).Msg("User already exists")
+		logger.Warn().Str("email", logSafeEmail(req.Email)).Str("ip", ip).Msg("User already exists")
+		
+		// Log potential account enumeration attempt
+		logSecurityEvent("ACCOUNT_ENUMERATION", req.Email, ip, "Registration attempt for existing user", "MEDIUM")
+		
 		http.Error(w, "user already exists", 409)
 		httpDuration.WithLabelValues("POST", "/register", "409").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	// Check registration rate limiting per IP
+	regKey := fmt.Sprintf("register:ip:%s", ip)
+	regAttempts, _ := rdb.Incr(context.Background(), regKey).Result()
+	rdb.Expire(context.Background(), regKey, time.Hour)
+	
+	if regAttempts > 10 { // Max 10 registrations per hour per IP
+		logger.Warn().Str("ip", ip).Str("email", logSafeEmail(req.Email)).Int("attempts", int(regAttempts)).Msg("Registration rate limit exceeded")
+		
+		// Temporarily block IP for excessive registration attempts
+		rdb.SetEx(context.Background(), fmt.Sprintf("block:ip:%s", ip), 1, time.Hour)
+		logSecurityEvent("IP_BLOCKED", req.Email, ip, "Blocked for excessive registration attempts", "MEDIUM")
+		
+		http.Error(w, "too many registration attempts", 429)
+		httpDuration.WithLabelValues("POST", "/register", "429").Observe(time.Since(start).Seconds())
 		return
 	}
 
@@ -282,7 +518,10 @@ func Register(w http.ResponseWriter, r *http.Request) {
 	// Generate first API key
 	createAPIKeyForUser(user.ID, "Default key")
 
-	logger.Info().Str("user_id", user.ID).Msg("User registered successfully")
+	// Log successful registration
+	logSecurityEvent("REGISTRATION_SUCCESS", req.Email, ip, "User registered successfully", "LOW")
+
+	logger.Info().Str("user_id", user.ID).Str("email", logSafeEmail(req.Email)).Str("ip", ip).Msg("User registered successfully")
 	httpDuration.WithLabelValues("POST", "/register", "200").Observe(time.Since(start).Seconds())
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "user_id": user.ID})
@@ -290,7 +529,8 @@ func Register(w http.ResponseWriter, r *http.Request) {
 
 func Login(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	logger.Info().Str("method", "Login").Msg("Received login request")
+	ip := r.RemoteAddr
+	logger.Info().Str("method", "Login").Str("ip", ip).Msg("Received login request")
 
 	var req struct {
 		Email    string `json:"email"`
@@ -304,20 +544,68 @@ func Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if account is locked
+	if locked, remaining := isAccountLocked(req.Email); locked {
+		logger.Warn().Str("email", logSafeEmail(req.Email)).Str("ip", ip).Dur("remaining", remaining).Msg("Login attempt on locked account")
+		http.Error(w, fmt.Sprintf("%s (try again in %v)", AccountLockedError, remaining), 423)
+		httpDuration.WithLabelValues("POST", "/login", "423").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	// Check if IP is blocked
+	if isIPBlocked(ip) {
+		logger.Warn().Str("ip", ip).Str("email", logSafeEmail(req.Email)).Msg("Login attempt from blocked IP")
+		http.Error(w, "IP temporarily blocked", 423)
+		httpDuration.WithLabelValues("POST", "/login", "423").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	// Apply progressive delay
+	if delay := getProgressiveDelay(req.Email); delay > 0 {
+		logger.Warn().Str("email", logSafeEmail(req.Email)).Str("ip", ip).Dur("delay", delay).Msg("Progressive delay applied")
+		time.Sleep(delay)
+	}
+
+	// Check if CAPTCHA is required
+	emailKey := fmt.Sprintf("attempts:email:%s", req.Email)
+	attemptsData, _ := rdb.Get(context.Background(), emailKey).Result()
+	if attemptsData != "" {
+		var attempt LoginAttempt
+		if json.Unmarshal([]byte(attemptsData), &attempt) == nil {
+			if attempt.FailedAttempts >= CaptchaThreshold {
+				logger.Warn().Str("email", logSafeEmail(req.Email)).Str("ip", ip).Int("attempts", attempt.FailedAttempts).Msg("CAPTCHA required")
+				http.Error(w, CaptchaRequiredError, 429)
+				httpDuration.WithLabelValues("POST", "/login", "429").Observe(time.Since(start).Seconds())
+				return
+			}
+		}
+	}
+
 	var user User
 	if err := db.Where("email = ?", req.Email).First(&user).Error; err != nil {
-		logger.Warn().Str("email", req.Email).Msg("User not found")
+		// User not found - still record attempt for security
+		recordFailedAttempt(req.Email, ip)
+		logger.Warn().Str("email", logSafeEmail(req.Email)).Str("ip", ip).Msg("Login attempt with non-existent email")
 		http.Error(w, InvalidCredentialsError, 401)
 		httpDuration.WithLabelValues("POST", "/login", "401").Observe(time.Since(start).Seconds())
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password)); err != nil {
-		logger.Warn().Str("email", req.Email).Msg("Invalid password attempt")
+		// Record failed attempt
+		recordFailedAttempt(req.Email, ip)
+		
+		logger.Warn().Str("email", logSafeEmail(req.Email)).Str("ip", ip).Msg("Invalid password attempt")
 		http.Error(w, InvalidCredentialsError, 401)
 		httpDuration.WithLabelValues("POST", "/login", "401").Observe(time.Since(start).Seconds())
 		return
 	}
+
+	// Successful login - reset failed attempts
+	resetFailedAttempts(req.Email)
+	
+	// Log successful login
+	logSecurityEvent("LOGIN_SUCCESS", req.Email, ip, "Successful login", "LOW")
 
 	// Generate JWT token
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
@@ -335,7 +623,7 @@ func Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logger.Info().Str("user_id", user.ID).Msg("User logged in successfully")
+	logger.Info().Str("user_id", user.ID).Str("email", logSafeEmail(req.Email)).Str("ip", ip).Msg("User logged in successfully")
 	httpDuration.WithLabelValues("POST", "/login", "200").Observe(time.Since(start).Seconds())
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -451,6 +739,65 @@ func logSafeEmail(email string) string {
 	return username[:2] + strings.Repeat("*", len(username)-2) + "@" + domain
 }
 
+// Suspicious activity detection middleware
+func suspiciousActivityMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		ip := r.RemoteAddr
+		userAgent := r.Header.Get("User-Agent")
+		path := r.URL.Path
+
+		// Skip health checks and metrics
+		if path == "/health" || path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Track request patterns per IP
+		patternKey := fmt.Sprintf("patterns:ip:%s", ip)
+		
+		// Check for rapid requests to different endpoints (potential scanning)
+		requests, _ := rdb.Incr(context.Background(), fmt.Sprintf("scan:%s:%s", ip, path)).Result()
+		rdb.Expire(context.Background(), fmt.Sprintf("scan:%s:%s", ip, path), time.Minute)
+		
+		if requests > 20 { // More than 20 requests to same endpoint per minute
+			logSecurityEvent("SUSPICIOUS_SCANNING", "", ip, fmt.Sprintf("Rapid requests to %s (%d requests)", path, requests), "MEDIUM")
+		}
+
+		// Track unique endpoints accessed per minute
+		endpointsKey := fmt.Sprintf("endpoints:%s", ip)
+		rdb.SAdd(context.Background(), endpointsKey, path)
+		rdb.Expire(context.Background(), endpointsKey, time.Minute)
+		
+		endpointCount, _ := rdb.SCard(context.Background(), endpointsKey).Result()
+		if endpointCount > 10 { // Accessing more than 10 different endpoints per minute
+			logSecurityEvent("SUSPICIOUS_PATTERNS", "", ip, fmt.Sprintf("Multiple endpoints accessed (%d endpoints)", endpointCount), "MEDIUM")
+		}
+
+		// Check for missing User-Agent (potential bot)
+		if userAgent == "" && path != "/register" && path != "/login" {
+			logSecurityEvent("MISSING_USER_AGENT", "", ip, fmt.Sprintf("Request to %s without User-Agent", path), "LOW")
+		}
+
+		// Track failed authentication attempts across all endpoints
+		if strings.Contains(path, "/api-keys") || strings.Contains(path, "/balance") {
+			// These endpoints require authentication
+			authHeader := r.Header.Get("Authorization")
+			if authHeader == "" {
+				authFailKey := fmt.Sprintf("auth_fail:ip:%s", ip)
+				failCount, _ := rdb.Incr(context.Background(), authFailKey).Result()
+				rdb.Expire(context.Background(), authFailKey, time.Hour)
+				
+				if failCount > 5 {
+					logSecurityEvent("MULTIPLE_AUTH_FAILURES", "", ip, fmt.Sprintf("Multiple auth failures (%d)", failCount), "MEDIUM")
+				}
+			}
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Security headers middleware
 func securityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -559,10 +906,16 @@ func AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			var user User
 			userID, ok := claims["user_id"].(string)
 			if !ok {
-				// обработка ошибки
+				logger.Warn().Msg("Invalid user_id in JWT token")
+				http.Error(w, "invalid token", 401)
+				httpDuration.WithLabelValues(r.Method, r.URL.Path, "401").Observe(time.Since(start).Seconds())
+				return
 			}
 			if err := db.First(&user, "id = ?", userID).Error; err != nil {
-				// ...
+				logger.Warn().Str("user_id", userID).Msg("User not found")
+				http.Error(w, "user not found", 401)
+				httpDuration.WithLabelValues(r.Method, r.URL.Path, "401").Observe(time.Since(start).Seconds())
+				return
 			}
 			ctx := context.WithValue(r.Context(), "user", user)
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -576,27 +929,44 @@ func AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func rateLimitMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	// Redis Lua script for atomic rate limiting
+	luaScript := `
+		local key = KEYS[1]
+		local limit = tonumber(ARGV[1])
+		local expire = tonumber(ARGV[2])
+		
+		local current = redis.call('GET', key)
+		if current and tonumber(current) >= limit then
+			return 0
+		end
+		
+		local newCount = redis.call('INCR', key)
+		if newCount == 1 then
+			redis.call('EXPIRE', key, expire)
+		end
+		
+		return newCount
+	`
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		ip := r.RemoteAddr
 		key := fmt.Sprintf("rate_limit:%s", ip)
 
-		// Check rate limit in Redis
-		count, err := rdb.Get(context.Background(), key).Int()
-		if err == nil && count >= 5 {
+		// Execute Lua script atomically
+		result, err := rdb.Eval(context.Background(), luaScript, []string{key}, 5, 300).Result()
+		if err != nil {
+			logger.Error().Err(err).Msg("Failed to execute rate limit check")
+			// Fail open - allow request if Redis is down
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if result.(int64) == 0 {
 			logger.Warn().Str("ip", ip).Msg("Rate limit exceeded")
 			http.Error(w, RateLimitExceededError, 429)
 			httpDuration.WithLabelValues(r.Method, r.URL.Path, "429").Observe(time.Since(start).Seconds())
 			return
-		}
-
-		// Increment counter
-		pipe := rdb.TxPipeline()
-		pipe.Incr(context.Background(), key)
-		pipe.Expire(context.Background(), key, 5*time.Minute)
-		_, err = pipe.Exec(context.Background())
-		if err != nil {
-			logger.Error().Err(err).Msg("Failed to increment rate limit counter")
 		}
 
 		next.ServeHTTP(w, r)
@@ -607,7 +977,8 @@ func HealthCheck(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
 	// Check database
-	if err := db.Exec("SELECT 1").Error; err != nil {
+	var result struct{}
+	if err := db.Raw("SELECT 1").Scan(&result).Error; err != nil {
 		logger.Error().Err(err).Msg("Database health check failed")
 		http.Error(w, "database unhealthy", 503)
 		httpDuration.WithLabelValues("GET", "/health", "503").Observe(time.Since(start).Seconds())
@@ -691,4 +1062,182 @@ func loadTLSCredentials() (credentials.TransportCredentials, error) {
 	}
 
 	return credentials.NewTLS(tlsConfig), nil
+}
+
+// === Security Management Endpoints ===
+
+// SecurityStatus returns current security status for the user
+func SecurityStatus(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	ip := r.RemoteAddr
+	email := r.URL.Query().Get("email")
+	
+	if email == "" {
+		http.Error(w, "email parameter required", 400)
+		httpDuration.WithLabelValues("GET", "/security/status", "400").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	// Check account lock status
+	locked, remaining := isAccountLocked(email)
+	
+	// Get failed attempts count
+	emailKey := fmt.Sprintf("attempts:email:%s", email)
+	attemptsData, _ := rdb.Get(context.Background(), emailKey).Result()
+	
+	var failedAttempts int
+	var lastAttempt time.Time
+	if attemptsData != "" {
+		var attempt LoginAttempt
+		if json.Unmarshal([]byte(attemptsData), &attempt) == nil {
+			failedAttempts = attempt.FailedAttempts
+			lastAttempt = attempt.LastAttempt
+		}
+	}
+
+	// Check if CAPTCHA is required
+	captchaRequired := failedAttempts >= CaptchaThreshold
+	
+	response := map[string]interface{}{
+		"email":           logSafeEmail(email),
+		"locked":          locked,
+		"remaining_time":  remaining.Seconds(),
+		"failed_attempts": failedAttempts,
+		"last_attempt":    lastAttempt,
+		"captcha_required": captchaRequired,
+		"ip_blocked":      isIPBlocked(ip),
+	}
+
+	logger.Info().Str("email", logSafeEmail(email)).Str("ip", ip).Bool("locked", locked).Int("attempts", failedAttempts).Msg("Security status check")
+	httpDuration.WithLabelValues("GET", "/security/status", "200").Observe(time.Since(start).Seconds())
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// UnlockAccount allows user to unlock their account (with verification)
+func UnlockAccount(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	user := r.Context().Value("user").(User)
+	ip := r.RemoteAddr
+
+	var req struct {
+		Email string `json:"email"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid input", 400)
+		httpDuration.WithLabelValues("POST", "/security/unlock", "400").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	// Verify the email matches the authenticated user
+	if req.Email != user.Email {
+		logger.Warn().Str("user_id", user.ID).Str("email", logSafeEmail(req.Email)).Str("ip", ip).Msg("Unlock attempt with mismatched email")
+		http.Error(w, "unauthorized", 403)
+		httpDuration.WithLabelValues("POST", "/security/unlock", "403").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	// Check if account is actually locked
+	if !isAccountLocked(req.Email) {
+		logger.Info().Str("email", logSafeEmail(req.Email)).Str("ip", ip).Msg("Unlock requested for unlocked account")
+		httpDuration.WithLabelValues("POST", "/security/unlock", "200").Observe(time.Since(start).Seconds())
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "already_unlocked"})
+		return
+	}
+
+	// Reset failed attempts and remove lockout
+	resetFailedAttempts(req.Email)
+	
+	// Log unlock event
+	logSecurityEvent("ACCOUNT_UNLOCKED", req.Email, ip, "Account unlocked by user", "LOW")
+
+	logger.Info().Str("email", logSafeEmail(req.Email)).Str("ip", ip).Msg("Account unlocked successfully")
+	httpDuration.WithLabelValues("POST", "/security/unlock", "200").Observe(time.Since(start).Seconds())
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "unlocked"})
+}
+
+// GetSecurityEvents returns recent security events for the user
+func GetSecurityEvents(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	user := r.Context().Value("user").(User)
+	
+	limit := 50 // Limit to last 50 events
+	events, err := rdb.LRange(context.Background(), "security:events", 0, int64(limit-1)).Result()
+	if err != nil {
+		logger.Error().Err(err).Str("user_id", user.ID).Msg("Failed to get security events")
+		http.Error(w, "failed to get events", 500)
+		httpDuration.WithLabelValues("GET", "/security/events", "500").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	var userEvents []SecurityEvent
+	for _, eventData := range events {
+		var event SecurityEvent
+		if json.Unmarshal([]byte(eventData), &event) == nil {
+			// Filter events for this user
+			if event.Email == user.Email {
+				userEvents = append(userEvents, event)
+			}
+		}
+	}
+
+	logger.Info().Str("user_id", user.ID).Int("events_count", len(userEvents)).Msg("Security events retrieved")
+	httpDuration.WithLabelValues("GET", "/security/events", "200").Observe(time.Since(start).Seconds())
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(userEvents)
+}
+
+// ReportSuspiciousActivity allows users to report suspicious activities
+func ReportSuspiciousActivity(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	user := r.Context().Value("user").(User)
+	ip := r.RemoteAddr
+
+	var req struct {
+		Type        string `json:"type"`
+		Description string `json:"description"`
+		Context     string `json:"context,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid input", 400)
+		httpDuration.WithLabelValues("POST", "/security/report", "400").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	if req.Type == "" || req.Description == "" {
+		http.Error(w, "type and description are required", 400)
+		httpDuration.WithLabelValues("POST", "/security/report", "400").Observe(time.Since(start).Seconds())
+		return
+	}
+
+	// Create security event for the report
+	reportEvent := SecurityEvent{
+		EventType: "USER_REPORT",
+		Email:     user.Email,
+		IPAddress: ip,
+		Reason:    fmt.Sprintf("Type: %s, Description: %s, Context: %s", req.Type, req.Description, req.Context),
+		Timestamp: time.Now(),
+		RiskLevel: "MEDIUM",
+	}
+
+	// Store the report
+	reportData, _ := json.Marshal(reportEvent)
+	rdb.LPush(context.Background(), "security:reports", reportData)
+	rdb.LTrim(context.Background(), "security:reports", 0, 99) // Keep last 100 reports
+	rdb.Expire(context.Background(), "security:reports", 30*24*time.Hour) // Keep for 30 days
+
+	// Log the report
+	logger.Warn().Str("user_id", user.ID).Str("email", logSafeEmail(user.Email)).Str("type", req.Type).Str("ip", ip).Msg("Suspicious activity reported by user")
+	
+	// Also add to general security events
+	eventData, _ := json.Marshal(reportEvent)
+	rdb.LPush(context.Background(), "security:events", eventData)
+
+	httpDuration.WithLabelValues("POST", "/security/report", "200").Observe(time.Since(start).Seconds())
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "reported"})
 }
