@@ -6,9 +6,9 @@ import (
     "os/signal"
     "syscall"
     "time"
-    "github.com/yourorg/head/internal/config"
-    "github.com/yourorg/head/internal/metrics"
-    "github.com/yourorg/head/internal/server"
+    "github.com/MaksimVF/ZB/services/head-go/internal/config"
+    "github.com/MaksimVF/ZB/services/head-go/internal/metrics"
+    "github.com/MaksimVF/ZB/services/head-go/internal/server"
 )
 func main(){
     // Load static configuration
