@@ -1,21 +1,13 @@
-
-
-
-
-
-
-
-
 package middleware
 
 import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
-	"github.com/go-redis/redis/v8"
-	"github.com/gorilla/mux"
+	"github.com/redis/go-redis/v9"
 )
 
 var (
@@ -27,13 +19,6 @@ func init() {
 	redisIsolationClient = redis.NewClient(&redis.Options{
 		Addr: "redis:6379",
 	})
-}
-
-// SecurityConfig represents the security configuration for a client
-type SecurityConfig struct {
-	ContentFilteringEnabled bool `json:"content_filtering_enabled"`
-	AuditLoggingEnabled    bool `json:"audit_logging_enabled"`
-	DataIsolationEnabled   bool `json:"data_isolation_enabled"`
 }
 
 // DataIsolationMiddleware ensures data isolation between clients
@@ -129,10 +114,3 @@ func isDataIsolationEnabled(r *http.Request) bool {
 
 	return config.DataIsolationEnabled
 }
-
-
-
-
-
-
-

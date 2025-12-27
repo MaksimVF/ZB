@@ -379,11 +379,12 @@ class ModelServicer:
             )
 
 def get_server_credentials():
-    with open("/workspace/ZB/certs/model-proxy.pem", "rb") as f:
+    cert_dir = os.path.join(os.path.dirname(__file__), "certs")
+    with open(os.path.join(cert_dir, "model-proxy.pem"), "rb") as f:
         cert_chain = f.read()
-    with open("/workspace/ZB/certs/model-proxy-key.pem", "rb") as f:
+    with open(os.path.join(cert_dir, "model-proxy-key.pem"), "rb") as f:
         private_key = f.read()
-    with open("/workspace/ZB/certs/ca.pem", "rb") as f:
+    with open(os.path.join(cert_dir, "ca.pem"), "rb") as f:
         ca_cert = f.read()
 
     return grpc.ssl_server_credentials(

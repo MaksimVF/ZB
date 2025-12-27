@@ -1,10 +1,3 @@
-
-
-
-
-
-
-
 package middleware
 
 import (
@@ -19,12 +12,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 var (
-	auditLogFile *os.File
-	redisClient  *redis.Client
+	auditLogFile     *os.File
+	auditRedisClient *redis.Client
 )
 
 func init() {
@@ -36,7 +29,7 @@ func init() {
 	}
 
 	// Initialize Redis client for audit logging
-	redisClient = redis.NewClient(&redis.Options{
+	auditRedisClient = redis.NewClient(&redis.Options{
 		Addr: "redis:6379",
 	})
 }
@@ -138,7 +131,7 @@ func logAuditToRedis(r *http.Request) {
 	defer cancel()
 
 	logEntry, _ := json.Marshal(entry)
-	redisClient.Publish(ctx, "audit:logs", logEntry)
+	auditRedisClient.Publish(ctx, "audit:logs", logEntry)
 }
 
 // isAuditLoggingEnabled checks if audit logging is enabled for the client
@@ -153,7 +146,7 @@ func isAuditLoggingEnabled(r *http.Request) bool {
 	ctx := r.Context()
 	configKey := "client:" + clientID.(string) + ":security_config"
 
-	val, err := redisClient.Get(ctx, configKey).Result()
+	val, err := auditRedisClient.Get(ctx, configKey).Result()
 	if err != nil {
 		return true // Default to enabled if config not found
 	}
@@ -170,17 +163,11 @@ func isAuditLoggingEnabled(r *http.Request) bool {
 
 // AuditLogEntry represents an audit log entry
 type AuditLogEntry struct {
-	Timestamp   string            `json:"timestamp"`
-	Method      string            `json:"method"`
-	Path        string            `json:"path"`
-	ClientIP    string            `json:"client_ip"`
-	UserAgent   string            `json:"user_agent"`
+	Timestamp   string              `json:"timestamp"`
+	Method      string              `json:"method"`
+	Path        string              `json:"path"`
+	ClientIP    string              `json:"client_ip"`
+	UserAgent   string              `json:"user_agent"`
 	QueryParams map[string][]string `json:"query_params"`
-	Body        string            `json:"body,omitempty"`
+	Body        string              `json:"body,omitempty"`
 }
-
-
-
-
-
-

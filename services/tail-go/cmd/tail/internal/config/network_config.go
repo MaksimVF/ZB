@@ -1,9 +1,3 @@
-
-
-
-
-
-
 package config
 
 import (
@@ -13,18 +7,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 // NetworkConfig represents the network configuration structure
 type NetworkConfig struct {
-	HeadEndpoint    string            `json:"head_endpoint"`
-	NetworkMode    string            `json:"network_mode"`
-	WGPeerPublic   string            `json:"wg_peer_public,omitempty"`
-	WGAllowedIPs   string            `json:"wg_allowed_ips,omitempty"`
-	SecurityToken  string            `json:"security_token"`
-	RetryPolicy    RetryPolicy       `json:"retry_policy"`
-	RateLimits     RateLimits        `json:"rate_limits"`
+	HeadEndpoint  string              `json:"head_endpoint"`
+	NetworkMode   string              `json:"network_mode"`
+	WGPeerPublic  string              `json:"wg_peer_public,omitempty"`
+	WGAllowedIPs  string              `json:"wg_allowed_ips,omitempty"`
+	SecurityToken string              `json:"security_token"`
+	RetryPolicy   RetryPolicy         `json:"retry_policy"`
+	RateLimits    RateLimits          `json:"rate_limits"`
 	LoadBalancing LoadBalancingConfig `json:"load_balancing"`
 }
 
@@ -35,20 +29,20 @@ type RetryPolicy struct {
 
 type RateLimits struct {
 	MaxRequestsPerUser int `json:"max_requests_per_user"`
-	MaxRequestsPerIP  int `json:"max_requests_per_ip"`
-	WindowSeconds     int `json:"window_seconds"`
+	MaxRequestsPerIP   int `json:"max_requests_per_ip"`
+	WindowSeconds      int `json:"window_seconds"`
 }
 
 type LoadBalancingConfig struct {
-	Mode           string   `json:"mode"`
+	Mode          string   `json:"mode"`
 	HeadEndpoints []string `json:"head_endpoints,omitempty"`
 }
 
 // NetworkConfigManager manages dynamic network configuration
 type NetworkConfigManager struct {
-	redisClient *redis.Client
+	redisClient   *redis.Client
 	currentConfig NetworkConfig
-	mutex        sync.RWMutex
+	mutex         sync.RWMutex
 }
 
 // NewNetworkConfigManager creates a new config manager
@@ -72,8 +66,8 @@ func (m *NetworkConfigManager) LoadConfig() error {
 	if err == redis.Nil {
 		// Default config if not found
 		m.currentConfig = NetworkConfig{
-			HeadEndpoint: "grpc://head:50055",
-			NetworkMode: "direct",
+			HeadEndpoint:  "grpc://head:50055",
+			NetworkMode:   "direct",
 			SecurityToken: "default-token",
 			RetryPolicy: RetryPolicy{
 				Retries:   3,
@@ -122,8 +116,3 @@ func (m *NetworkConfigManager) StartAutoReload(interval time.Duration) {
 		}
 	}()
 }
-
-
-
-
-

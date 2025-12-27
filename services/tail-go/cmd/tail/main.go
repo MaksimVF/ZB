@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 package main
 
 import (
@@ -22,14 +13,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
 	pb "github.com/MaksimVF/ZB/services/secrets-service/pb" // <-- твой proto
-	"llm-gateway-pro/services/gateway/handlers"
-	"llm-gateway-pro/services/tail-go/cmd/tail/middleware"
-	"llm-gateway-pro/services/tail-go/middleware"
+	"github.com/MaksimVF/ZB/services/tail-go/cmd/tail/handlers"
+	"github.com/MaksimVF/ZB/services/tail-go/cmd/tail/internal/config"
+	"github.com/MaksimVF/ZB/services/tail-go/middleware"
 )
 
 // Глобальные клиенты
@@ -39,6 +30,7 @@ var (
 	authClient   pb.AuthServiceClient
 	authConn     *grpc.ClientConnInterface
 	redisClient  *redis.Client
+	headClient   *grpc.HeadClient
 	secretsCache sync.Map // имя → plaintext (кешируем на 30 сек)
 )
 
@@ -196,15 +188,26 @@ func loadClientTLSCredentials() credentials.TransportCredentials {
 	})
 }
 
-// watchSecretsUpdates watches for secret updates
+// watchSecretsUpdates watches for secret updates using Redis pub/sub
 func watchSecretsUpdates() {
-	// Implementation of secret updates watching
+	pubsub := redisClient.Subscribe(context.Background(), "secrets:updates")
+	defer pubsub.Close()
+
+	ch := pubsub.Channel()
+
+	log.Println("Started watching for secret updates...")
+
+	for msg := range ch {
+		log.Printf("Received secret update notification: %s", msg.Payload)
+
+		// Parse the update message (assuming JSON format: {"secret_name": "name"})
+		// Invalidate cache for the updated secret
+		// For simplicity, we'll clear all cache on any update
+		secretsCache.Range(func(key, value interface{}) bool {
+			secretsCache.Delete(key)
+			return true
+		})
+
+		log.Printf("Cleared secrets cache due to update: %s", msg.Payload)
+	}
 }
-
-
-
-
-
-
-
-

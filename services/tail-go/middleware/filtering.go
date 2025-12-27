@@ -1,32 +1,24 @@
-
-
-
-
-
-
 package middleware
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"regexp"
 	"strings"
 
-	"github.com/go-redis/redis/v8"
-	"github.com/gorilla/mux"
+	"github.com/redis/go-redis/v9"
 )
 
 var (
 	// List of bad words and patterns to filter
-	badWords = []string{"malicious", "exploit", "hack", "injection", "xss", "sql", "script"}
+	badWords    = []string{"malicious", "exploit", "hack", "injection", "xss", "sql", "script"}
 	badPatterns = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)<script.*?>.*?</script>`), // HTML script tags
-		regexp.MustCompile(`(?i)SELECT.*FROM.*WHERE`),      // SQL injection patterns
+		regexp.MustCompile(`(?i)SELECT.*FROM.*WHERE`),     // SQL injection patterns
 		regexp.MustCompile(`(?i)UNION.*SELECT`),           // SQL injection patterns
-		regexp.MustCompile(`(?i)javascript:`),              // JavaScript protocols
+		regexp.MustCompile(`(?i)javascript:`),             // JavaScript protocols
 		regexp.MustCompile(`(?i)onerror=`),                // XSS patterns
 	}
 	redisClient = redis.NewClient(&redis.Options{
@@ -37,8 +29,8 @@ var (
 // SecurityConfig represents the security configuration for a client
 type SecurityConfig struct {
 	ContentFilteringEnabled bool `json:"content_filtering_enabled"`
-	AuditLoggingEnabled    bool `json:"audit_logging_enabled"`
-	DataIsolationEnabled   bool `json:"data_isolation_enabled"`
+	AuditLoggingEnabled     bool `json:"audit_logging_enabled"`
+	DataIsolationEnabled    bool `json:"data_isolation_enabled"`
 }
 
 // ContentFilteringMiddleware filters and sanitizes incoming requests
@@ -130,8 +122,3 @@ func isContentFilteringEnabled(r *http.Request) bool {
 
 	return config.ContentFilteringEnabled
 }
-
-
-
-
-

@@ -1,24 +1,15 @@
-
-
-
-
-
-
-
-
 package internal
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/MaksimVF/ZB/services/tail-go/cmd/tail/internal/secrets"
+	"github.com/redis/go-redis/v9"
 )
 
 var (
@@ -44,9 +35,9 @@ var (
 
 	// Provider health status
 	providerHealth = map[string]bool{
-		"openai":     true,
-		"anthropic":  true,
-		"google":     true,
+		"openai":    true,
+		"anthropic": true,
+		"google":    true,
 		"groq":      true,
 	}
 
@@ -167,10 +158,70 @@ func checkProviderHealth() {
 	healthMutex.Lock()
 	defer healthMutex.Unlock()
 
-	for provider := range providerConfig {
-		// Simple health check - could be enhanced with actual API calls
-		providerHealth[provider] = true // In real implementation, this would check actual provider status
+	for provider, config := range providerConfig {
+		// Perform actual health check by making a test API call
+		healthy := performProviderHealthCheck(provider, config.BaseURL)
+		providerHealth[provider] = healthy
+
+		if !healthy {
+			log.Printf("Provider %s is unhealthy", provider)
+		}
 	}
+}
+
+// performProviderHealthCheck performs an actual health check for a provider
+func performProviderHealthCheck(provider, baseURL string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var url string
+	switch provider {
+	case "openai":
+		url = baseURL + "/v1/models"
+	case "anthropic":
+		url = baseURL + "/v1/messages" // Simple endpoint check
+	case "google":
+		url = baseURL + "/v1/models" // Gemini models endpoint
+	case "groq":
+		url = baseURL + "/openai/v1/models"
+	default:
+		return false
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return false
+	}
+
+	// Try to get API key for authentication
+	apiKey, err := getProviderAPIKeyForHealthCheck(provider)
+	if err == nil && apiKey != "" {
+		switch provider {
+		case "openai", "groq":
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		case "anthropic":
+			req.Header.Set("x-api-key", apiKey)
+			req.Header.Set("anthropic-version", "2023-06-01")
+		case "google":
+			req.URL.RawQuery = "key=" + apiKey
+		}
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	// Consider 2xx and 4xx (auth errors) as healthy, 5xx as unhealthy
+	return resp.StatusCode < 500
+}
+
+// getProviderAPIKeyForHealthCheck gets API key for health checks
+func getProviderAPIKeyForHealthCheck(provider string) (string, error) {
+	// Try to get from secrets service
+	return secrets.Get(fmt.Sprintf("llm/%s/api_key", provider))
 }
 
 // GetAllProviders returns the list of all configured providers
@@ -198,10 +249,3 @@ func GetProviderHealth() (map[string]bool, error) {
 	}
 	return result, nil
 }
-
-
-
-
-
-
-

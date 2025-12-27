@@ -1,19 +1,10 @@
-
-
-
-
-
-
-
-
-
 package handlers
 
 import (
 	"encoding/json"
 	"net/http"
 
-	"llm-gateway-pro/services/tail-go/cmd/tail/internal"
+	"github.com/MaksimVF/ZB/services/tail-go/cmd/tail/internal"
 )
 
 // GetProviders returns the list of all configured providers
@@ -104,11 +95,3 @@ func UpdateProviderAPIKey(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "API key updated"})
 }
-
-
-
-
-
-
-
-
