@@ -24,9 +24,9 @@ import (
     "google.golang.org/grpc/status"
     "google.golang.org/grpc/test/bufconn"
 
-    gen "github.com/yourorg/head/gen"
-    "github.com/yourorg/head/internal/config"
-    "github.com/yourorg/head/internal/server"
+    gen "github.com/MaksimVF/ZB/services/head-go/gen"
+    "github.com/MaksimVF/ZB/services/head-go/internal/config"
+    "github.com/MaksimVF/ZB/services/head-go/internal/server"
 )
 
 // TestSuite is the base test suite
