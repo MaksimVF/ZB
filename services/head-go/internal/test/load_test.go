@@ -20,7 +20,7 @@ import (
     "google.golang.org/grpc/codes"
     "google.golang.org/grpc/status"
 
-    gen "github.com/yourorg/head/gen"
+    gen "github.com/MaksimVF/ZB/services/head-go/gen"
 )
 
 // LoadTestConfig holds load test configuration

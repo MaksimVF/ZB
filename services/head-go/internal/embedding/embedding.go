@@ -19,12 +19,12 @@ import (
     "google.golang.org/grpc/codes"
     "google.golang.org/grpc/status"
 
-    gen "github.com/yourorg/head/gen"
-    model "github.com/yourorg/head/gen_model"
-    "github.com/yourorg/head/internal/config"
-    "github.com/yourorg/head/internal/metrics"
-    "github.com/yourorg/head/internal/models"
-    "github.com/yourorg/head/internal/webhook"
+    gen "github.com/MaksimVF/ZB/services/head-go/gen"
+    model "github.com/MaksimVF/ZB/services/head-go/gen_model"
+    "github.com/MaksimVF/ZB/services/head-go/internal/config"
+    "github.com/MaksimVF/ZB/services/head-go/internal/metrics"
+    "github.com/MaksimVF/ZB/services/head-go/internal/models"
+    "github.com/MaksimVF/ZB/services/head-go/internal/webhook"
 )
 
 // EmbeddingService handles embedding requests

@@ -11,8 +11,6 @@ import (
 
     "github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
     "google.golang.org/grpc"
-    "google.golang.org/protobuf/reflect/protoreflect"
-    "google.golang.org/protobuf/reflect/protoregistry"
 )
 
 // API documentation constants
@@ -123,7 +121,9 @@ func DocumentationHandler() http.Handler {
 
 // RegisterDocumentation registers the documentation service
 func RegisterDocumentation(ctx context.Context, mux *runtime.ServeMux, endpoint string, opts []grpc.DialOption) error {
-    return mux.HandlePath("GET", "/docs", DocumentationHandler())
+    return mux.HandlePath("GET", "/docs", func(w http.ResponseWriter, r *http.Request, pathParams map[string]string) {
+        DocumentationHandler().ServeHTTP(w, r)
+    })
 }
 
 // GetProtoFiles returns the proto file descriptions

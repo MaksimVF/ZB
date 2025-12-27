@@ -17,13 +17,14 @@ import (
     "github.com/prometheus/client_golang/prometheus/promauto"
     "go.opentelemetry.io/otel"
     "go.opentelemetry.io/otel/attribute"
-    "go.opentelemetry.io/otel/codes"
     "go.opentelemetry.io/otel/trace"
     "google.golang.org/grpc"
+    "google.golang.org/grpc/connectivity"
     "google.golang.org/grpc/credentials"
     "google.golang.org/grpc/keepalive"
 
-    model "github.com/yourorg/head/gen_model" // сюда попадают model.proto
+    "github.com/MaksimVF/ZB/services/head-go/internal/config"
+    model "github.com/MaksimVF/ZB/services/head-go/gen_model" // сюда попадают model.proto
 )
 
 var (
@@ -207,7 +208,7 @@ func (m *ModelClient) BatchGenerate(
     defer span.End()
 
     span.SetAttributes(
-        trace.StringAttribute("requests_count", fmt.Sprintf("%d", len(requests))),
+        attribute.String("requests_count", fmt.Sprintf("%d", len(requests))),
     )
 
     // Increment active request count
@@ -233,7 +234,7 @@ func (m *ModelClient) BatchGenerate(
         connInterface := m.connectionPool.Get()
         if connInterface != nil {
             conn = connInterface.(*grpc.ClientConn)
-            if conn.GetState() != grpc.ConnectivityReady {
+            if conn.GetState() != connectivity.Ready {
                 // Connection not ready, create new one
                 conn.Close()
                 conn = nil
@@ -301,9 +302,9 @@ func (m *ModelClient) Generate(
     defer span.End()
 
     span.SetAttributes(
-        trace.StringAttribute("model", modelName),
-        trace.IntAttribute("max_tokens", int(maxTokens)),
-        trace.Float64Attribute("temperature", float64(temperature)),
+        attribute.String("model", modelName),
+        attribute.Int("max_tokens", int(maxTokens)),
+        attribute.Float64("temperature", float64(temperature)),
     )
 
     // Increment active request count
@@ -333,7 +334,7 @@ func (m *ModelClient) Generate(
         connInterface := m.connectionPool.Get()
         if connInterface != nil {
             conn = connInterface.(*grpc.ClientConn)
-            if conn.GetState() != grpc.ConnectivityReady {
+            if conn.GetState() != connectivity.Ready {
                 // Connection not ready, create new one
                 conn.Close()
                 conn = nil
@@ -383,9 +384,9 @@ func (m *ModelClient) GenerateStream(
     defer span.End()
 
     span.SetAttributes(
-        trace.StringAttribute("model", modelName),
-        trace.IntAttribute("max_tokens", int(maxTokens)),
-        trace.Float64Attribute("temperature", float64(temperature)),
+        attribute.String("model", modelName),
+        attribute.Int("max_tokens", int(maxTokens)),
+        attribute.Float64("temperature", float64(temperature)),
     )
 
     streamCh := make(chan *model.GenResponse, 10)
@@ -420,7 +421,7 @@ func (m *ModelClient) GenerateStream(
             connInterface := m.connectionPool.Get()
             if connInterface != nil {
                 conn = connInterface.(*grpc.ClientConn)
-                if conn.GetState() != grpc.ConnectivityReady {
+                if conn.GetState() != connectivity.Ready {
                     // Connection not ready, create new one
                     conn.Close()
                     conn = nil
