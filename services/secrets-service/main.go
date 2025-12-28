@@ -1,8 +1,3 @@
-
-
-
-
-
 package main
 
 import (
@@ -22,11 +17,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
-	"go.opentelemetry.io/otel/sdk/resource"
-	"go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -148,20 +138,23 @@ func handleGRPCError(ctx context.Context, err error, operation string) error {
 
 // Helper functions for Vault KV v2 operations
 func getSecretFromVault(path string) (*api.Secret, error) {
-	return vaultClient.KVv2("secret").Get(context.Background(), path)
+	return vaultClient.Logical().Read("secret/data/" + path)
 }
 
 func putSecretInVault(path string, data map[string]interface{}) error {
-	_, err := vaultClient.KVv2("secret").Put(context.Background(), path, data)
+	_, err := vaultClient.Logical().Write("secret/data/"+path, map[string]interface{}{
+		"data": data,
+	})
 	return err
 }
 
 func deleteSecretFromVault(path string) error {
-	return vaultClient.KVv2("secret").Delete(context.Background(), path)
+	_, err := vaultClient.Logical().Delete("secret/data/" + path)
+	return err
 }
 
 func listSecretsFromVault(prefix string) (*api.Secret, error) {
-	return vaultClient.KVv2("secret").List(context.Background(), prefix)
+	return vaultClient.Logical().List("secret/metadata/" + prefix)
 }
 
 // Helper function to get client IP address
@@ -212,9 +205,6 @@ func init() {
 	// Register Prometheus metrics
 	prometheus.MustRegister(secretCounter, httpDuration)
 
-	// Initialize OpenTelemetry (non-critical, skip if fails)
-	initOpenTelemetry()
-
 	// Initialize Vault client with proper error handling
 	vaultAddr := os.Getenv("VAULT_ADDR")
 	if vaultAddr == "" {
@@ -248,36 +238,6 @@ func init() {
 	logger.Info().Str("vault_addr", vaultAddr).Msg("Vault client initialized successfully")
 }
 
-func initOpenTelemetry() {
-	// Only initialize OpenTelemetry if the required packages are available
-	defer func() {
-		if r := recover(); r != nil {
-			logger.Warn().Msg("OpenTelemetry initialization skipped (packages not available)")
-		}
-	}()
-
-	// Create a new stdout exporter
-	exporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
-	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to create stdout exporter, skipping OpenTelemetry")
-		return
-	}
-
-	// Create a new tracer provider with a batch span processor and the stdout exporter
-	tp := trace.NewTracerProvider(
-		trace.WithBatcher(exporter),
-		trace.WithResource(resource.NewWithAttributes(
-			semconv.SchemaURL,
-			semconv.ServiceNameKey.String("secret-service"),
-		)),
-	)
-
-	// Set the global tracer provider
-	otel.SetTracerProvider(tp)
-
-	logger.Info().Msg("OpenTelemetry initialized successfully")
-}
-
 // Custom error types
 type SecretError struct {
 	Code    codes.Code
@@ -302,15 +262,6 @@ type server struct {
 
 // ===================== gRPC =====================
 func (s *server) GetSecret(ctx context.Context, req *pb.GetSecretRequest) (*pb.GetSecretResponse, error) {
-	// Start a new span for the GetSecret operation
-	tracer := otel.Tracer("secret-service")
-	ctx, span := tracer.Start(ctx, "GetSecret")
-	defer span.End()
-
-	logger.Info().
-		Str("method", "GetSecret").
-		Str("secret_name", req.Name).
-		Msg("Received GetSecret request")
 
 	// Validate input
 	if req.Name == "" {
@@ -340,32 +291,13 @@ func (s *server) GetSecret(ctx context.Context, req *pb.GetSecretRequest) (*pb.G
 		return nil, handleGRPCError(ctx, err, "get_secret")
 	}
 
-	// Add metadata to the response
-	metadata := map[string]string{
-		"source": "vault",
-		"path":   "secret/data/" + req.Name,
-	}
-
-	// Try to extract version and creation time if available
-	if metadataRaw, ok := secret.Data["metadata"].(map[string]interface{}); ok {
-		if version, ok := metadataRaw["version"].(float64); ok {
-			metadata["version"] = fmt.Sprintf("%d", int(version))
-		}
-		if createdTime, ok := metadataRaw["created_time"].(string); ok {
-			metadata["created_at"] = createdTime
-		}
-		if updatedTime, ok := metadataRaw["updated_time"].(string); ok {
-			metadata["last_updated"] = updatedTime
-		}
-	}
-
 	logger.Info().
 		Str("method", "GetSecret").
 		Str("secret_name", req.Name).
 		Msg("Secret retrieved successfully")
 
 	secretCounter.WithLabelValues("get_secret", "success").Inc()
-	return &pb.GetSecretResponse{Value: value, Metadata: metadata}, nil
+	return &pb.GetSecretResponse{Value: value}, nil
 }
 
 func (s *server) GetUserSecret(ctx context.Context, req *pb.GetUserSecretRequest) (*pb.GetUserSecretResponse, error) {
@@ -469,12 +401,6 @@ func (s *server) SetUserSecret(ctx context.Context, req *pb.SetUserSecretRequest
 func adminHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
-	// Start a new span for the admin handler
-	tracer := otel.Tracer("secret-service")
-	ctx, span := tracer.Start(r.Context(), "adminHandler")
-	defer span.End()
-	r = r.WithContext(ctx)
-
 	logger.Info().
 		Str("method", "adminHandler").
 		Str("http_method", r.Method).
@@ -537,13 +463,13 @@ func adminHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		handleGetSecrets(w, r, start)
+		handleGetSecrets(w, r)
 
 	case http.MethodPost:
-		handlePostSecret(w, r, start)
+		handlePostSecret(w, r)
 
 	case http.MethodDelete:
-		handleDeleteSecret(w, r, start)
+		handleDeleteSecret(w, r)
 
 	default:
 		logger.Warn().Str("method", "adminHandler").Str("http_method", r.Method).Msg("Invalid HTTP method")
@@ -552,7 +478,7 @@ func adminHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleGetSecrets(w http.ResponseWriter, r *http.Request, start time.Time) {
+func handleGetSecrets(w http.ResponseWriter, r *http.Request) {
 	clientIP := getClientIP(r)
 	logger.Info().Str("method", "handleGetSecrets").Str("client_ip", clientIP).Msg("Listing secrets")
 
@@ -631,7 +557,6 @@ func handlePostSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger.Info().Str("path", input.Path).Msg("Secret saved successfully")
-	httpDuration.WithLabelValues(r.Method, r.URL.Path, "200").Observe(time.Since(start).Seconds())
 }
 
 func handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
@@ -669,7 +594,6 @@ func handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger.Info().Str("client_ip", clientIP).Str("secret_name", name).Msg("Secret deleted successfully")
-	httpDuration.WithLabelValues(r.Method, r.URL.Path, "200").Observe(time.Since(start).Seconds())
 }
 
 // Health check handler
@@ -779,7 +703,3 @@ func main() {
 		logger.Fatal().Err(err).Msg("HTTP server failed")
 	}
 }
-
-
-
-

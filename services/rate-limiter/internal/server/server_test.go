@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	pb "github.com/MaksimVF/ZB/services/rate-limiter/pb"
+	"github.com/go-redis/redis/v8"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,8 +19,28 @@ func TestNewRateLimiterServer(t *testing.T) {
 	assert.NotNil(t, server.metrics)
 }
 
+// Helper function to create a test server with isolated metrics registry
+func NewTestRateLimiterServer() *RateLimiterServer {
+	// Create a new registry for testing to avoid conflicts
+	registry := prometheus.NewRegistry()
+
+	// Initialize Redis client
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:     "redis:6379",
+		Password: "",
+		DB:       0,
+	})
+
+	return &RateLimiterServer{
+		limits:  make(map[string]map[string]int),
+		usage:   make(map[string]map[string]int),
+		redis:   redisClient,
+		metrics: NewMetricsWithRegistry(registry),
+	}
+}
+
 func TestRateLimiterServer_Check(t *testing.T) {
-	server := NewRateLimiterServer()
+	server := NewTestRateLimiterServer()
 
 	// Test case: first request should be allowed
 	req := &pb.CheckRequest{
@@ -34,7 +55,7 @@ func TestRateLimiterServer_Check(t *testing.T) {
 }
 
 func TestRateLimiterServer_Check_ExceedsLimit(t *testing.T) {
-	server := NewRateLimiterServer()
+	server := NewTestRateLimiterServer()
 
 	// Set very low limit for testing
 	server.limits["/test"] = map[string]int{
@@ -56,7 +77,7 @@ func TestRateLimiterServer_Check_ExceedsLimit(t *testing.T) {
 }
 
 func TestRateLimiterServer_SetLimit(t *testing.T) {
-	server := NewRateLimiterServer()
+	server := NewTestRateLimiterServer()
 
 	req := &pb.SetLimitRequest{
 		Path:     "/test",
@@ -74,7 +95,7 @@ func TestRateLimiterServer_SetLimit(t *testing.T) {
 }
 
 func TestRateLimiterServer_SetLimit_InvalidAuthType(t *testing.T) {
-	server := NewRateLimiterServer()
+	server := NewTestRateLimiterServer()
 
 	req := &pb.SetLimitRequest{
 		Path:     "/test",
@@ -89,7 +110,7 @@ func TestRateLimiterServer_SetLimit_InvalidAuthType(t *testing.T) {
 }
 
 func TestRateLimiterServer_SetLimit_InvalidLimit(t *testing.T) {
-	server := NewRateLimiterServer()
+	server := NewTestRateLimiterServer()
 
 	// Test limit = 0
 	req := &pb.SetLimitRequest{
@@ -112,7 +133,7 @@ func TestRateLimiterServer_SetLimit_InvalidLimit(t *testing.T) {
 }
 
 func TestRateLimiterServer_GetLimits(t *testing.T) {
-	server := NewRateLimiterServer()
+	server := NewTestRateLimiterServer()
 
 	// Set up some limits
 	server.limits["/test"] = map[string]int{
@@ -134,7 +155,7 @@ func TestRateLimiterServer_GetLimits(t *testing.T) {
 }
 
 func TestRateLimiterServer_initializeDefaultLimits(t *testing.T) {
-	server := NewRateLimiterServer()
+	server := NewTestRateLimiterServer()
 
 	// Test chat completions
 	server.initializeDefaultLimits("/v1/chat/completions")
@@ -162,7 +183,7 @@ func TestRateLimiterServer_initializeDefaultLimits(t *testing.T) {
 }
 
 func TestRateLimiterServer_AuthPrefixDetection(t *testing.T) {
-	server := NewRateLimiterServer()
+	server := NewTestRateLimiterServer()
 
 	testCases := []struct {
 		auth     string
@@ -189,7 +210,9 @@ func TestRateLimiterServer_AuthPrefixDetection(t *testing.T) {
 }
 
 func TestMetrics(t *testing.T) {
-	metrics := NewMetrics()
+	// Create a separate registry for this test to avoid conflicts
+	registry := prometheus.NewRegistry()
+	metrics := NewMetricsWithRegistry(registry)
 	assert.NotNil(t, metrics)
 
 	// Test metric collection
@@ -210,21 +233,21 @@ func TestMetrics(t *testing.T) {
 }
 
 // Helper function to get counter value for testing
-func prometheusTestCounterValue(counter prometheus.Counter) float64 {
+func prometheusTestCounterValue(_ prometheus.Counter) float64 {
 	// In a real test environment, you would use prometheus_testing package
 	// For this example, we'll just return a dummy value
 	return 1
 }
 
 // Helper function to get gauge value for testing
-func prometheusTestGaugeValue(gauge prometheus.Gauge) float64 {
+func prometheusTestGaugeValue(_ prometheus.Gauge) float64 {
 	// In a real test environment, you would use prometheus_testing package
 	// For this example, we'll just return a dummy value
 	return 1
 }
 
 func BenchmarkRateLimiterServer_Check(b *testing.B) {
-	server := NewRateLimiterServer()
+	server := NewTestRateLimiterServer()
 	req := &pb.CheckRequest{
 		Authorization: "Bearer test-token",
 		Path:          "/v1/chat/completions",
@@ -240,7 +263,7 @@ func BenchmarkRateLimiterServer_Check(b *testing.B) {
 }
 
 func BenchmarkRateLimiterServer_SetLimit(b *testing.B) {
-	server := NewRateLimiterServer()
+	server := NewTestRateLimiterServer()
 	req := &pb.SetLimitRequest{
 		Path:     "/test",
 		AuthType: "jwt",

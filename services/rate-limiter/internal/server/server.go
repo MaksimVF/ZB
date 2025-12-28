@@ -37,7 +37,7 @@ type Metrics struct {
 	activeRequests   prometheus.Gauge
 }
 
-func NewMetrics() *Metrics {
+func NewMetricsWithRegistry(registry *prometheus.Registry) *Metrics {
 	m := &Metrics{
 		checkRequests: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "rate_limiter",
@@ -71,16 +71,33 @@ func NewMetrics() *Metrics {
 		}),
 	}
 
-	prometheus.MustRegister(
-		m.checkRequests,
-		m.checkAllowed,
-		m.checkDenied,
-		m.setLimitRequests,
-		m.getLimitRequests,
-		m.activeRequests,
-	)
+	// Register metrics in the provided registry
+	if registry != nil {
+		registry.MustRegister(
+			m.checkRequests,
+			m.checkAllowed,
+			m.checkDenied,
+			m.setLimitRequests,
+			m.getLimitRequests,
+			m.activeRequests,
+		)
+	} else {
+		// Register metrics in the global registry
+		prometheus.MustRegister(
+			m.checkRequests,
+			m.checkAllowed,
+			m.checkDenied,
+			m.setLimitRequests,
+			m.getLimitRequests,
+			m.activeRequests,
+		)
+	}
 
 	return m
+}
+
+func NewMetrics() *Metrics {
+	return NewMetricsWithRegistry(nil)
 }
 
 func NewRateLimiterServer() *RateLimiterServer {
@@ -123,18 +140,18 @@ func (s *RateLimiterServer) Run() error {
 
 	// Try to load TLS credentials, fallback to insecure if not available
 	var grpcOpts []grpc.ServerOption
-	creds, err := credentials.NewServerTLSFromFile("/certs/rate-limiter.pem", "/certs/rate-limiter-key.pem")
+	var creds credentials.TransportCredentials
+	creds, err = credentials.NewServerTLSFromFile("/certs/rate-limiter.pem", "/certs/rate-limiter-key.pem")
 	if err != nil {
 		log.Printf("Failed to load TLS credentials: %v. Running without TLS.", err)
-		grpcOpts = append(grpcOpts, grpc.Creds(insecure.NewCredentials()))
-	} else {
-		grpcOpts = append(grpcOpts, grpc.Creds(creds))
+		creds = insecure.NewCredentials()
 	}
+	grpcOpts = append(grpcOpts, grpc.Creds(creds))
 
 	grpcServer := grpc.NewServer(grpcOpts...)
 	pb.RegisterRateLimiterServer(grpcServer, s)
 
-	if creds != nil {
+	if creds != insecure.NewCredentials() {
 		log.Println("Rate limiter service running on :50051 (TLS enabled)")
 	} else {
 		log.Println("Rate limiter service running on :50051 (no TLS)")
