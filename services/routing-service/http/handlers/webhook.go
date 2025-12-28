@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	routing "github.com/MaksimVF/ZB/services/routing-service/routing"
+	"github.com/MaksimVF/ZB/services/routing-service/routing"
 )
 
 // WebhookHandlers handles webhook endpoints
@@ -23,95 +23,63 @@ func NewWebhookHandlers(engine *routing.RoutingEngine, registry routing.HeadRegi
 
 // HeadStatusWebhook handles POST /webhook/head-status
 func (h *WebhookHandlers) HeadStatusWebhook(w http.ResponseWriter, r *http.Request) {
-	var webhookData struct {
-		HeadID     string `json:"head_id"`
-		Status     string `json:"status"`
+	var payload struct {
+		HeadID      string `json:"head_id"`
+		Status      string `json:"status"`
 		CurrentLoad int32  `json:"current_load"`
-		Timestamp  int64  `json:"timestamp"`
+		Timestamp   int64  `json:"timestamp"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&webhookData); err != nil {
-		http.Error(w, "Invalid webhook payload", http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid payload", http.StatusBadRequest)
 		return
 	}
 
-	// Validate required fields
-	if webhookData.HeadID == "" || webhookData.Status == "" {
-		http.Error(w, "Missing required fields: head_id and status", http.StatusBadRequest)
-		return
-	}
-
-	// Update head status
-	err := h.registry.UpdateStatus(webhookData.HeadID, webhookData.Status, webhookData.CurrentLoad, webhookData.Timestamp)
-	if err != nil {
+	if err := h.registry.UpdateStatus(payload.HeadID, payload.Status, payload.CurrentLoad, payload.Timestamp); err != nil {
 		http.Error(w, "Failed to update head status", http.StatusInternalServerError)
 		return
 	}
 
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Webhook processed successfully"))
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 // RoutingDecisionWebhook handles POST /webhook/routing-decision
 func (h *WebhookHandlers) RoutingDecisionWebhook(w http.ResponseWriter, r *http.Request) {
-	var webhookData struct {
-		ModelType       string            `json:"model_type"`
+	var payload struct {
+		ModelType        string            `json:"model_type"`
 		RegionPreference string            `json:"region_preference"`
 		RoutingStrategy  string            `json:"routing_strategy"`
-		Metadata        map[string]string `json:"metadata"`
+		Metadata         map[string]string `json:"metadata"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&webhookData); err != nil {
-		http.Error(w, "Invalid webhook payload", http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid payload", http.StatusBadRequest)
 		return
 	}
 
-	// Validate required fields
-	if webhookData.ModelType == "" {
-		http.Error(w, "Missing required field: model_type", http.StatusBadRequest)
-		return
-	}
-
-	// Make routing decision
 	req := &routing.RoutingRequest{
-		ModelType:        webhookData.ModelType,
-		RegionPreference: webhookData.RegionPreference,
-		RoutingStrategy:  webhookData.RoutingStrategy,
-		Metadata:         webhookData.Metadata,
+		ClientID:         "",
+		ModelType:        payload.ModelType,
+		RegionPreference: payload.RegionPreference,
+		RoutingStrategy:  payload.RoutingStrategy,
+		Metadata:         payload.Metadata,
 	}
 
-	decision, err := h.routingEngine.GetDecision(req)
+	resp, err := h.routingEngine.GetDecision(req)
 	if err != nil {
-		http.Error(w, "Failed to make routing decision", http.StatusInternalServerError)
+		http.Error(w, "Failed to get routing decision", http.StatusInternalServerError)
 		return
+	}
+
+	response := map[string]interface{}{
+		"head_id":       resp.HeadID,
+		"endpoint":      resp.Endpoint,
+		"strategy_used": resp.StrategyUsed,
+		"reason":        resp.Reason,
+		"metadata":      resp.Metadata,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(decision)
-}
-
-// ValidateWebhookRequest validates webhook request
-func (h *WebhookHandlers) ValidateWebhookRequest(r *http.Request) error {
-	// Check content type
-	contentType := r.Header.Get("Content-Type")
-	if contentType != "application/json" {
-		return http.ErrContentType
-	}
-
-	// Check content length (prevent large payloads)
-	if r.ContentLength > 1024*1024 { // 1MB limit
-		return http.ErrBodyTooLarge
-	}
-
-	return nil
-}
-
-// LogWebhookEvent logs webhook events (in production, use structured logging)
-func (h *WebhookHandlers) LogWebhookEvent(eventType, headID, status string) {
-	// In production, this would log to a structured logger
-	// For now, just a placeholder
-	_ = eventType
-	_ = headID
-	_ = status
+	json.NewEncoder(w).Encode(response)
 }

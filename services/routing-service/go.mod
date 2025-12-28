@@ -5,7 +5,6 @@ go 1.25
 require (
 	github.com/MaksimVF/ZB v0.0.0-20251216195735-f6bb087fbec6
 	github.com/go-chi/chi/v5 v5.2.3
-	github.com/go-redis/redis/v8 v8.11.5
 	github.com/gorilla/mux v1.8.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/graph-gophers/graphql-go v1.8.0

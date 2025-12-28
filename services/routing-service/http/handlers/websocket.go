@@ -7,9 +7,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	
+
 	routing "github.com/MaksimVF/ZB/services/routing-service/routing"
-	"github.com/MaksimVF/ZB/services/routing-service/http/middleware"
 )
 
 // WebSocketUpgrader config
@@ -29,11 +28,11 @@ var upgrader = websocket.Upgrader{
 
 // WebSocketHandlers manages WebSocket connections
 type WebSocketHandlers struct {
-	routingEngine    *routing.RoutingEngine
-	registry         routing.HeadRegistry
-	headClients      map[*websocket.Conn]bool
-	decisionClients  map[*websocket.Conn]bool
-	clientsMutex     sync.Mutex
+	routingEngine   *routing.RoutingEngine
+	registry        routing.HeadRegistry
+	headClients     map[*websocket.Conn]bool
+	decisionClients map[*websocket.Conn]bool
+	clientsMutex    sync.Mutex
 }
 
 // NewWebSocketHandlers creates new WebSocket handlers
@@ -265,7 +264,7 @@ func (h *WebSocketHandlers) handleWebSocketStatusUpdate(conn *websocket.Conn, pa
 // handleWebSocketGetHeads handles get heads request via WebSocket
 func (h *WebSocketHandlers) handleWebSocketGetHeads(conn *websocket.Conn) {
 	heads := h.registry.GetAll()
-	
+
 	response := map[string]interface{}{
 		"type":  "get_heads_response",
 		"heads": heads,
@@ -318,26 +317,24 @@ func (h *WebSocketHandlers) handleWebSocketRoutingDecision(conn *websocket.Conn,
 
 	// Send success response
 	response := map[string]interface{}{
-		"type":           "routing_decision_response",
-		"head_id":        decision.HeadID,
-		"endpoint":       decision.Endpoint,
-		"strategy_used":  decision.StrategyUsed,
-		"reason":         decision.Reason,
-		"metadata":       decision.Metadata,
+		"type":          "routing_decision_response",
+		"head_id":       decision.HeadID,
+		"endpoint":      decision.Endpoint,
+		"strategy_used": decision.StrategyUsed,
+		"reason":        decision.Reason,
+		"metadata":      decision.Metadata,
 	}
 	conn.WriteJSON(response)
 }
 
 // handleWebSocketGetRoutingStrategies handles get routing strategies request
 func (h *WebSocketHandlers) handleWebSocketGetRoutingStrategies(conn *websocket.Conn) {
-	policy := h.registry.GetAll() // This would be replaced with actual policy retrieval
-	
 	response := map[string]interface{}{
 		"type":             "get_routing_strategies_response",
 		"default_strategy": "adaptive",
 		"available_strategies": []string{
 			"round_robin",
-			"least_loaded", 
+			"least_loaded",
 			"geo_preferred",
 			"model_specific",
 			"predictive",
@@ -368,9 +365,9 @@ func (h *WebSocketHandlers) BroadcastHeadUpdate(headID, status string) {
 	defer h.clientsMutex.Unlock()
 
 	message := map[string]interface{}{
-		"type":     "head_update",
-		"head_id":  headID,
-		"status":   status,
+		"type":      "head_update",
+		"head_id":   headID,
+		"status":    status,
 		"timestamp": time.Now().Unix(),
 	}
 
@@ -385,12 +382,12 @@ func (h *WebSocketHandlers) BroadcastRoutingDecision(decision *routing.RoutingRe
 	defer h.clientsMutex.Unlock()
 
 	message := map[string]interface{}{
-		"type":           "routing_decision",
-		"head_id":        decision.HeadID,
-		"endpoint":       decision.Endpoint,
-		"strategy_used":  decision.StrategyUsed,
-		"reason":         decision.Reason,
-		"timestamp":      time.Now().Unix(),
+		"type":          "routing_decision",
+		"head_id":       decision.HeadID,
+		"endpoint":      decision.Endpoint,
+		"strategy_used": decision.StrategyUsed,
+		"reason":        decision.Reason,
+		"timestamp":     time.Now().Unix(),
 	}
 
 	for client := range h.decisionClients {

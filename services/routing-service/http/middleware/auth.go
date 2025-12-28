@@ -2,10 +2,8 @@ package middleware
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/MaksimVF/ZB/services/routing-service/config"
 )
@@ -34,9 +32,6 @@ func JWTAuthMiddleware(cfg *config.Config) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-
-			// Start timer for request duration
-			start := time.Now()
 
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {

@@ -1,59 +1,30 @@
 package storage
 
 import (
-	"context"
 	"sync"
 	"time"
-
-	"github.com/go-redis/redis/v9"
-	
-	routing "github.com/MaksimVF/ZB/services/routing-service/routing"
 )
-
-// RedisClient interface for Redis operations
-type RedisClient interface {
-	Ping(ctx context.Context) *redis.StatusCmd
-	HSet(ctx context.Context, key string, values ...interface{}) *redis.IntCmd
-	HGet(ctx context.Context, key, field string) *redis.StringCmd
-	SAdd(ctx context.Context, key string, members ...interface{}) *redis.IntCmd
-	SMembers(ctx context.Context, key string) *redis.StringSliceCmd
-	Del(ctx context.Context, keys ...string) *redis.IntCmd
-	Exists(ctx context.Context, keys ...string) *redis.IntCmd
-	Expire(ctx context.Context, key string, expiration time.Duration) *redis.BoolCmd
-}
-
-// RedisStorage implements storage interface using Redis
-type RedisStorage struct {
-	client RedisClient
-}
-
-// NewRedisStorage creates a new Redis storage instance
-func NewRedisStorage(client RedisClient) *RedisStorage {
-	return &RedisStorage{
-		client: client,
-	}
-}
 
 // Cache interface for caching routing decisions
 type Cache interface {
-	Get(key string) (*routing.RoutingResponse, bool)
-	Set(key string, response *routing.RoutingResponse)
+	Get(key string) (interface{}, bool)
+	Set(key string, value interface{}, ttl time.Duration)
 	Delete(key string)
 	Clear()
 }
 
 // LRUCache implements a simple LRU cache
 type LRUCache struct {
-	data   map[string]*CacheEntry
-	order  []string
+	data    map[string]*CacheEntry
+	order   []string
 	maxSize int
-	ttl    time.Duration
-mutex   sync.RWMutex
+	ttl     time.Duration
+	mutex   sync.RWMutex
 }
 
 // CacheEntry represents a cache entry
 type CacheEntry struct {
-	Value       *routing.RoutingResponse
+	Value       interface{}
 	CreatedAt   time.Time
 	AccessCount int
 }
@@ -61,15 +32,15 @@ type CacheEntry struct {
 // NewLRUCache creates a new LRU cache
 func NewLRUCache(maxSize int, ttl time.Duration) *LRUCache {
 	return &LRUCache{
-		data:   make(map[string]*CacheEntry),
-		order:  make([]string, 0),
+		data:    make(map[string]*CacheEntry),
+		order:   make([]string, 0),
 		maxSize: maxSize,
-		ttl:    ttl,
+		ttl:     ttl,
 	}
 }
 
 // Get retrieves a value from the cache
-func (c *LRUCache) Get(key string) (*routing.RoutingResponse, bool) {
+func (c *LRUCache) Get(key string) (interface{}, bool) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 
@@ -93,7 +64,7 @@ func (c *LRUCache) Get(key string) (*routing.RoutingResponse, bool) {
 }
 
 // Set stores a value in the cache
-func (c *LRUCache) Set(key string, response *routing.RoutingResponse) {
+func (c *LRUCache) Set(key string, value interface{}, ttl time.Duration) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -109,7 +80,7 @@ func (c *LRUCache) Set(key string, response *routing.RoutingResponse) {
 
 	// Add new entry
 	c.data[key] = &CacheEntry{
-		Value:       response,
+		Value:       value,
 		CreatedAt:   time.Now(),
 		AccessCount: 1,
 	}

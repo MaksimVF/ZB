@@ -1,40 +1,41 @@
 package monitoring
 
 import (
+	"net/http"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"net/http"
 )
 
 // Metrics holds all Prometheus metrics
 type Metrics struct {
 	// Routing metrics
-	routingDecisions prometheus.CounterVec
+	routingDecisions  *prometheus.CounterVec
 	headRegistrations prometheus.Counter
 	headStatusUpdates prometheus.Counter
-	activeHeads prometheus.Gauge
+	activeHeads       prometheus.Gauge
 
 	// HTTP metrics
-	httpRequests prometheus.CounterVec
-	httpRequestDuration prometheus.HistogramVec
+	httpRequests        *prometheus.CounterVec
+	httpRequestDuration *prometheus.HistogramVec
 
 	// Cache metrics
-	cacheHits prometheus.Counter
+	cacheHits   prometheus.Counter
 	cacheMisses prometheus.Counter
 
 	// External service metrics
-	externalServiceCalls prometheus.CounterVec
+	externalServiceCalls *prometheus.CounterVec
 
 	// Message queue metrics
-	messageQueueMessages prometheus.CounterVec
+	messageQueueMessages *prometheus.CounterVec
 
 	// Real-time connection metrics
-	sseConnections prometheus.Gauge
+	sseConnections       prometheus.Gauge
 	websocketConnections prometheus.Gauge
 
 	// Circuit breaker metrics
-	circuitBreakerFailures prometheus.CounterVec
-	circuitBreakerSuccesses prometheus.CounterVec
+	circuitBreakerFailures  *prometheus.CounterVec
+	circuitBreakerSuccesses *prometheus.CounterVec
 }
 
 // NewMetrics creates new metrics collector

@@ -10,6 +10,7 @@ import (
 
 // GRPCHandlers implements gRPC service handlers
 type GRPCHandlers struct {
+	pb.UnimplementedRoutingServiceServer
 	routingEngine *routing.RoutingEngine
 	registry      routing.HeadRegistry
 	policyMgr     routing.PolicyManager
@@ -69,6 +70,7 @@ func (h *GRPCHandlers) UpdateHeadStatus(ctx context.Context, req *pb.UpdateHeadS
 // GetRoutingDecision implements the GetRoutingDecision RPC method
 func (h *GRPCHandlers) GetRoutingDecision(ctx context.Context, req *pb.GetRoutingDecisionRequest) (*pb.GetRoutingDecisionResponse, error) {
 	decision, err := h.routingEngine.GetDecision(&routing.RoutingRequest{
+		ClientID:         req.ClientId,
 		ModelType:        req.ModelType,
 		RegionPreference: req.RegionPreference,
 		RoutingStrategy:  req.RoutingStrategy,
@@ -96,7 +98,7 @@ func (h *GRPCHandlers) GetRoutingDecision(ctx context.Context, req *pb.GetRoutin
 // GetAllHeads implements the GetAllHeads RPC method
 func (h *GRPCHandlers) GetAllHeads(ctx context.Context, req *pb.GetAllHeadsRequest) (*pb.GetAllHeadsResponse, error) {
 	heads := h.registry.GetAll()
-	
+
 	var pbHeads []*pb.HeadService
 	for _, head := range heads {
 		pbHeads = append(pbHeads, &pb.HeadService{
@@ -120,14 +122,14 @@ func (h *GRPCHandlers) GetAllHeads(ctx context.Context, req *pb.GetAllHeadsReque
 // UpdateRoutingPolicy implements the UpdateRoutingPolicy RPC method
 func (h *GRPCHandlers) UpdateRoutingPolicy(ctx context.Context, req *pb.UpdateRoutingPolicyRequest) (*pb.UpdateRoutingPolicyResponse, error) {
 	policy := &routing.RoutingPolicy{
-		DefaultStrategy:       req.DefaultStrategy,
-		EnableGeoRouting:      req.EnableGeoRouting,
-		EnableLoadBalancing:   req.EnableLoadBalancing,
-		EnableModelSpecific:   req.EnableModelSpecific,
-		StrategyConfig:        req.StrategyConfig,
-		PredictionWindow:      int(req.PredictionWindow),
-		LoadGrowthFactor:      req.LoadGrowthFactor,
-		CapacityThreshold:     req.CapacityThreshold,
+		DefaultStrategy:     req.Policy.DefaultStrategy,
+		EnableGeoRouting:    req.Policy.EnableGeoRouting,
+		EnableLoadBalancing: req.Policy.EnableLoadBalancing,
+		EnableModelSpecific: req.Policy.EnableModelSpecific,
+		StrategyConfig:      req.Policy.StrategyConfig,
+		PredictionWindow:    0, // Default value since not in proto
+		LoadGrowthFactor:    0,
+		CapacityThreshold:   0,
 	}
 
 	if err := h.policyMgr.Update(policy); err != nil {
@@ -148,13 +150,12 @@ func (h *GRPCHandlers) GetRoutingPolicy(ctx context.Context, req *pb.GetRoutingP
 	policy := h.policyMgr.Get()
 
 	return &pb.GetRoutingPolicyResponse{
-		DefaultStrategy:      policy.DefaultStrategy,
-		EnableGeoRouting:     policy.EnableGeoRouting,
-		EnableLoadBalancing:  policy.EnableLoadBalancing,
-		EnableModelSpecific:  policy.EnableModelSpecific,
-		StrategyConfig:       policy.StrategyConfig,
-		PredictionWindow:     int32(policy.PredictionWindow),
-		LoadGrowthFactor:     policy.LoadGrowthFactor,
-		CapacityThreshold:    policy.CapacityThreshold,
+		Policy: &pb.RoutingPolicy{
+			DefaultStrategy:     policy.DefaultStrategy,
+			EnableGeoRouting:    policy.EnableGeoRouting,
+			EnableLoadBalancing: policy.EnableLoadBalancing,
+			EnableModelSpecific: policy.EnableModelSpecific,
+			StrategyConfig:      policy.StrategyConfig,
+		},
 	}, nil
 }
