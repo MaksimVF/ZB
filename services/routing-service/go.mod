@@ -3,11 +3,8 @@ module github.com/MaksimVF/ZB/services/routing-service
 go 1.25
 
 require (
-	github.com/MaksimVF/ZB v0.0.0-20251216195735-f6bb087fbec6
 	github.com/go-chi/chi/v5 v5.2.3
-	github.com/gorilla/mux v1.8.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/graph-gophers/graphql-go v1.8.0
 	github.com/nats-io/nats.go v1.47.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/redis/go-redis/v9 v9.17.2

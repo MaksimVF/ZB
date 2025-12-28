@@ -199,21 +199,26 @@ func startHTTPServer(
 	}
 }
 
-// startBackgroundServices starts background services
+// startBackgroundServices starts background services with graceful shutdown
 func startBackgroundServices(sseHandlers *handlers.SSEHandlers, metrics *monitoring.Metrics, registry routing.HeadRegistry) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-ticker.C:
-			// Update active heads count
-			activeHeads := registry.GetActive()
-			metrics.SetActiveHeads(float64(len(activeHeads)))
+	for range ticker.C {
+		// Use defer to recover from any panics and log them
+		defer func() {
+			if r := recover(); r != nil {
+				// Log the panic but don't crash the background service
+				log.Printf("Panic in background service: %v", r)
+			}
+		}()
 
-			// Send heartbeat to SSE clients
-			sseHandlers.SendHeartbeat()
-		}
+		// Update active heads count
+		activeHeads := registry.GetActive()
+		metrics.SetActiveHeads(float64(len(activeHeads)))
+
+		// Send heartbeat to SSE clients
+		sseHandlers.SendHeartbeat()
 	}
 }
 

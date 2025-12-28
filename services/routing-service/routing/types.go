@@ -6,6 +6,8 @@ type HeadService struct {
 	Endpoint      string
 	Status        string
 	CurrentLoad   int32
+	Capacity      int32
+	LoadHistory   []int32
 	Region        string
 	ModelType     string
 	Version       string

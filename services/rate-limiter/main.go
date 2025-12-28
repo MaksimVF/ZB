@@ -1,14 +1,9 @@
-
-
-
-
-
-
 package main
 
 import (
 	"log"
-	"llm-gateway-pro/services/rate-limiter/internal/server"
+
+	"github.com/MaksimVF/ZB/services/rate-limiter/internal/server"
 )
 
 func main() {
@@ -17,8 +12,3 @@ func main() {
 		log.Fatalf("Failed to run rate limiter: %v", err)
 	}
 }
-
-
-
-
-

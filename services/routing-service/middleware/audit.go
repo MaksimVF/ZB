@@ -1,6 +1,3 @@
-
-
-
 package middleware
 
 import (
@@ -14,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
@@ -214,13 +211,11 @@ func validateAuditLogEntry(entry AuditLogEntry) error {
 
 // AuditLogEntry represents an audit log entry
 type AuditLogEntry struct {
-	Timestamp   string            `json:"timestamp"`
-	Method      string            `json:"method"`
-	Path        string            `json:"path"`
-	ClientIP    string            `json:"client_ip"`
-	UserAgent   string            `json:"user_agent"`
+	Timestamp   string              `json:"timestamp"`
+	Method      string              `json:"method"`
+	Path        string              `json:"path"`
+	ClientIP    string              `json:"client_ip"`
+	UserAgent   string              `json:"user_agent"`
 	QueryParams map[string][]string `json:"query_params"`
-	Body        string            `json:"body,omitempty"`
+	Body        string              `json:"body,omitempty"`
 }
-
-

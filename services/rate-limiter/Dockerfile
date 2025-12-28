@@ -1,49 +1,47 @@
+# Multi-stage build for optimal image size
+FROM golang:1.25-alpine AS builder
 
+# Install dependencies
+RUN apk add --no-cache protoc git
 
-
-
-
-
-FROM golang:1.21-alpine AS builder
-
+# Set working directory
 WORKDIR /app
 
-# Copy proto files
-COPY services/rate-limiter/rate_limiter.proto .
+# Copy go mod files
+COPY go.mod go.sum ./
 
-# Install protoc and Go plugins
-RUN apk add --no-cache protoc protoc-gen-go protoc-gen-go-grpc && \
-    go install google.golang.org/protobuf/cmd/protoc-gen-go@latest && \
-    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-
-# Generate Go code from proto
-RUN protoc --go_out=. --go-grpc_out=. rate_limiter.proto
+# Download dependencies
+RUN go mod download
 
 # Copy source code
-COPY services/rate-limiter/ ./
+COPY . .
+
+# Generate protobuf Go code
+RUN protoc --go_out=. --go-grpc_out=. rate_limiter.proto
 
 # Build the application
-RUN go mod init llm-gateway-pro/services/rate-limiter && \
-    go mod tidy && \
-    go build -o /rate-limiter ./main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o rate-limiter .
 
+# Final stage
 FROM alpine:latest
 
-WORKDIR /app
+# Install ca-certificates for HTTPS calls
+RUN apk --no-cache add ca-certificates
+
+WORKDIR /app/
 
 # Create certs directory
 RUN mkdir -p /certs
 
-# Copy certificates (these should be mounted in production)
-COPY certs/* /certs/ || true
+# Copy the binary from builder stage
+COPY --from=builder /app/rate-limiter .
 
-COPY --from=builder /rate-limiter .
+# Expose ports
+EXPOSE 50051 8086
 
-EXPOSE 50051
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:8086/metrics || exit 1
 
+# Run the application
 ENTRYPOINT ["./rate-limiter"]
-
-
-
-
-
