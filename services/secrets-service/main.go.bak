@@ -1,3 +1,7 @@
+// DEPRECATED: Этот файл содержит устаревшую монолитную реализацию
+// Используйте main_new.go с новой модульной архитектурой
+// См. NEW_ARCHITECTURE.md для деталей
+
 package main
 
 import (
@@ -195,7 +199,7 @@ func handleHTTPError(w http.ResponseWriter, r *http.Request, statusCode int, err
 	httpDuration.WithLabelValues(r.Method, r.URL.Path, fmt.Sprintf("%d", statusCode)).Observe(time.Since(start).Seconds())
 }
 
-func init() {
+func initializeService() {
 	// Initialize structured logger
 	logger = zerolog.New(os.Stdout).With().
 		Timestamp().
@@ -285,7 +289,14 @@ func (s *server) GetSecret(ctx context.Context, req *pb.GetSecretRequest) (*pb.G
 		return nil, handleGRPCError(ctx, err, "get_secret")
 	}
 
-	value, ok := secret.Data["value"].(string)
+	// Access Vault KV v2 data structure correctly
+	data, ok := secret.Data["data"].(map[string]interface{})
+	if !ok {
+		err := fmt.Errorf("invalid data format in vault response")
+		return nil, handleGRPCError(ctx, err, "get_secret")
+	}
+
+	value, ok := data["value"].(string)
 	if !ok {
 		err := fmt.Errorf("invalid value format in vault response")
 		return nil, handleGRPCError(ctx, err, "get_secret")
@@ -335,7 +346,14 @@ func (s *server) GetUserSecret(ctx context.Context, req *pb.GetUserSecretRequest
 		return nil, handleGRPCError(ctx, err, "get_user_secret")
 	}
 
-	value, ok := secret.Data["value"].(string)
+	// Access Vault KV v2 data structure correctly
+	data, ok := secret.Data["data"].(map[string]interface{})
+	if !ok {
+		err := fmt.Errorf("invalid data format in vault response")
+		return nil, handleGRPCError(ctx, err, "get_user_secret")
+	}
+
+	value, ok := data["value"].(string)
 	if !ok {
 		err := fmt.Errorf("invalid value format in vault response")
 		return nil, handleGRPCError(ctx, err, "get_user_secret")
@@ -479,6 +497,7 @@ func adminHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGetSecrets(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	clientIP := getClientIP(r)
 	logger.Info().Str("method", "handleGetSecrets").Str("client_ip", clientIP).Msg("Listing secrets")
 
@@ -629,7 +648,7 @@ func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	init()
+	initializeService()
 
 	// gRPC (mTLS)
 	lis, err := net.Listen("tcp", ":50053")

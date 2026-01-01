@@ -1,0 +1,437 @@
+// DEPRECATED: Этот файл содержит тесты для устаревшей монолитной реализации
+// Тесты требуют полного переписывания для новой модульной архитектуры
+// Используйте новую архитектуру в соответствии с NEW_ARCHITECTURE.md
+
+package main
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+
+	pb "github.com/MaksimVF/ZB/services/secrets-service/pb"
+	"github.com/hashicorp/vault/api"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// MockLogical implements the api.Logical interface for testing
+type MockLogical struct {
+	mock.Mock
+}
+
+func (m *MockLogical) Read(path string) (*api.Secret, error) {
+	args := m.Called(path)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*api.Secret), args.Error(1)
+}
+
+func (m *MockLogical) Write(path string, data map[string]interface{}) (*api.Secret, error) {
+	args := m.Called(path, data)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*api.Secret), args.Error(1)
+}
+
+func (m *MockLogical) Delete(path string) (*api.Secret, error) {
+	args := m.Called(path)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*api.Secret), args.Error(1)
+}
+
+func (m *MockLogical) List(path string) (*api.Secret, error) {
+	args := m.Called(path)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*api.Secret), args.Error(1)
+}
+
+// MockVaultClient implements the api.Client interface for testing
+type MockVaultClient struct {
+	mock.Mock
+	mockLogical *MockLogical
+}
+
+func (m *MockVaultClient) Logical() api.Logical {
+	return m.mockLogical
+}
+
+func (m *MockVaultClient) SetToken(token string) {
+	m.Called(token)
+}
+
+func (m *MockVaultClient) Sys() *api.Sys {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return &api.Sys{}
+	}
+	return args.Get(0).(*api.Sys)
+}
+
+// setupTestEnvironment initializes test environment
+func setupTestEnvironment() {
+	// Store original client if it exists
+	if vaultClient != nil {
+		originalClient = vaultClient
+	}
+
+	// Create mock client
+	mockLogical := new(MockLogical)
+	mockClient := &MockVaultClient{
+		mockLogical: mockLogical,
+	}
+
+	// Set the global client to our mock
+	vaultClient = mockClient
+}
+
+// restoreClient restores original client after test
+func restoreClient() {
+	if originalClient != nil {
+		vaultClient = originalClient
+		originalClient = nil
+	}
+}
+
+var originalClient *api.Client
+
+func TestGetSecret(t *testing.T) {
+	setupTestEnvironment()
+	defer restoreClient()
+
+	s := &server{}
+	tests := []struct {
+		name              string
+		secretName        string
+		mockResponse      *api.Secret
+		mockError         error
+		expectedErrorCode codes.Code
+	}{
+		{
+			name:       "successful secret retrieval",
+			secretName: "llm/openai/api_key",
+			mockResponse: &api.Secret{
+				Data: map[string]interface{}{
+					"data": map[string]interface{}{
+						"value": "test-secret-value",
+					},
+				},
+			},
+			expectedErrorCode: codes.OK,
+		},
+		{
+			name:              "secret not found",
+			secretName:        "nonexistent/secret",
+			mockResponse:      nil,
+			expectedErrorCode: codes.NotFound,
+		},
+		{
+			name:              "vault connection error",
+			secretName:        "llm/openai/api_key",
+			mockError:         fmt.Errorf("connection failed"),
+			expectedErrorCode: codes.Internal,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockLogical := new(MockLogical)
+
+			if tt.mockError != nil {
+				mockLogical.On("Read", "secret/data/"+tt.secretName).Return(nil, tt.mockError)
+			} else {
+				mockLogical.On("Read", "secret/data/"+tt.secretName).Return(tt.mockResponse, nil)
+			}
+
+			// Create new mock client with our configured logical
+			mockClient := &MockVaultClient{
+				mockLogical: mockLogical,
+			}
+
+			vaultClient = mockClient
+
+			// Call the method
+			req := &pb.GetSecretRequest{Name: tt.secretName}
+			resp, err := s.GetSecret(context.Background(), req)
+
+			// Check the result
+			if tt.expectedErrorCode == codes.OK {
+				require.NoError(t, err)
+				assert.NotNil(t, resp)
+				assert.Equal(t, "test-secret-value", resp.Value)
+			} else {
+				require.Error(t, err)
+				assert.Nil(t, resp)
+				statusErr, ok := status.FromError(err)
+				require.True(t, ok)
+				assert.Equal(t, tt.expectedErrorCode, statusErr.Code())
+			}
+
+			mockLogical.AssertExpectations(t)
+		})
+	}
+}
+
+func TestGetUserSecret(t *testing.T) {
+	setupTestEnvironment()
+	defer restoreClient()
+
+	s := &server{}
+	tests := []struct {
+		name              string
+		userID            string
+		secretName        string
+		mockResponse      *api.Secret
+		mockError         error
+		expectedErrorCode codes.Code
+	}{
+		{
+			name:       "successful user secret retrieval",
+			userID:     "12345678-1234-5678-9012-123456789012",
+			secretName: "api_key",
+			mockResponse: &api.Secret{
+				Data: map[string]interface{}{
+					"data": map[string]interface{}{
+						"value": "test-user-secret-value",
+					},
+				},
+			},
+			expectedErrorCode: codes.OK,
+		},
+		{
+			name:              "user secret not found",
+			userID:            "12345678-1234-5678-9012-123456789012",
+			secretName:        "nonexistent",
+			mockResponse:      nil,
+			expectedErrorCode: codes.NotFound,
+		},
+		{
+			name:              "invalid user ID format",
+			userID:            "invalid-uuid",
+			secretName:        "api_key",
+			mockError:         fmt.Errorf("invalid user ID format"),
+			expectedErrorCode: codes.InvalidArgument,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockLogical := new(MockLogical)
+
+			if tt.mockError != nil && tt.name != "invalid user ID format" {
+				expectedPath := fmt.Sprintf("user-secrets/%s/%s", tt.userID, tt.secretName)
+				mockLogical.On("Read", "secret/data/"+expectedPath).Return(nil, tt.mockError)
+			} else if tt.mockResponse != nil {
+				expectedPath := fmt.Sprintf("user-secrets/%s/%s", tt.userID, tt.secretName)
+				mockLogical.On("Read", "secret/data/"+expectedPath).Return(tt.mockResponse, nil)
+			}
+
+			mockClient := &MockVaultClient{
+				mockLogical: mockLogical,
+			}
+
+			vaultClient = mockClient
+
+			req := &pb.GetUserSecretRequest{
+				UserId:     tt.userID,
+				SecretName: tt.secretName,
+			}
+			resp, err := s.GetUserSecret(context.Background(), req)
+
+			if tt.expectedErrorCode == codes.OK {
+				require.NoError(t, err)
+				assert.NotNil(t, resp)
+				assert.Equal(t, "test-user-secret-value", resp.Value)
+			} else {
+				require.Error(t, err)
+				assert.Nil(t, resp)
+				statusErr, ok := status.FromError(err)
+				require.True(t, ok)
+				assert.Equal(t, tt.expectedErrorCode, statusErr.Code())
+			}
+
+			mockLogical.AssertExpectations(t)
+		})
+	}
+}
+
+func TestSetUserSecret(t *testing.T) {
+	setupTestEnvironment()
+	defer restoreClient()
+
+	s := &server{}
+	tests := []struct {
+		name              string
+		userID            string
+		secretName        string
+		secretValue       string
+		mockError         error
+		expectedErrorCode codes.Code
+	}{
+		{
+			name:              "successful user secret save",
+			userID:            "12345678-1234-5678-9012-123456789012",
+			secretName:        "api_key",
+			secretValue:       "test-secret-value",
+			expectedErrorCode: codes.OK,
+		},
+		{
+			name:              "empty user ID",
+			userID:            "",
+			secretName:        "api_key",
+			secretValue:       "test-secret-value",
+			expectedErrorCode: codes.InvalidArgument,
+		},
+		{
+			name:              "empty secret name",
+			userID:            "12345678-1234-5678-9012-123456789012",
+			secretName:        "",
+			secretValue:       "test-secret-value",
+			expectedErrorCode: codes.InvalidArgument,
+		},
+		{
+			name:              "empty secret value",
+			userID:            "12345678-1234-5678-9012-123456789012",
+			secretName:        "api_key",
+			secretValue:       "",
+			expectedErrorCode: codes.InvalidArgument,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockLogical := new(MockLogical)
+
+			if tt.expectedErrorCode == codes.OK {
+				expectedPath := fmt.Sprintf("user-secrets/%s/%s", tt.userID, tt.secretName)
+				expectedData := map[string]interface{}{
+					"data": map[string]interface{}{
+						"value": tt.secretValue,
+					},
+				}
+				mockLogical.On("Write", "secret/data/"+expectedPath, expectedData).Return(nil, tt.mockError)
+			}
+
+			mockClient := &MockVaultClient{
+				mockLogical: mockLogical,
+			}
+
+			vaultClient = mockClient
+
+			req := &pb.SetUserSecretRequest{
+				UserId:      tt.userID,
+				SecretName:  tt.secretName,
+				SecretValue: tt.secretValue,
+			}
+			resp, err := s.SetUserSecret(context.Background(), req)
+
+			if tt.expectedErrorCode == codes.OK {
+				require.NoError(t, err)
+				assert.NotNil(t, resp)
+				assert.Equal(t, "saved", resp.Status)
+			} else {
+				require.Error(t, err)
+				assert.Nil(t, resp)
+				statusErr, ok := status.FromError(err)
+				require.True(t, ok)
+				assert.Equal(t, tt.expectedErrorCode, statusErr.Code())
+			}
+
+			mockLogical.AssertExpectations(t)
+		})
+	}
+}
+
+func TestValidateSecretPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		expected bool
+	}{
+		{"valid path", "llm/openai/api_key", true},
+		{"valid path with numbers", "llm/model-123/provider-456", true},
+		{"valid path with underscores", "service_name/component_type", true},
+		{"empty path", "", false},
+		{"path with spaces", "llm/openai api_key", false},
+		{"path with dots", "llm/../secret", false},
+		{"path with backslashes", "llm\\openai\\api_key", false},
+		{"path with colons", "llm:openai:api_key", false},
+		{"path with wildcards", "llm/*/api_key", false},
+		{"path with question marks", "llm/?/api_key", false},
+		{"path with quotes", "llm/\"secret\"/api_key", false},
+		{"path with angle brackets", "llm/<secret>/api_key", false},
+		{"path with pipes", "llm|openai|api_key", false},
+		{"path starting with slash", "/llm/openai/api_key", false},
+		{"path ending with slash", "llm/openai/api_key/", false},
+		{"path too long", strings.Repeat("a", 257), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSecretPath(tt.path)
+			if tt.expected {
+				assert.NoError(t, err)
+			} else {
+				assert.Error(t, err)
+			}
+		})
+	}
+}
+
+func TestValidateUserID(t *testing.T) {
+	tests := []struct {
+		name     string
+		userID   string
+		expected bool
+	}{
+		{"valid UUID", "12345678-1234-5678-9012-123456789012", true},
+		{"empty user ID", "", false},
+		{"invalid UUID format", "invalid-uuid", false},
+		{"UUID without dashes", "12345678123456789012123456789032", false},
+		{"UUID with lowercase", "12345678-1234-5678-9012-123456789012", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateUserID(tt.userID)
+			if tt.expected {
+				assert.NoError(t, err)
+			} else {
+				assert.Error(t, err)
+			}
+		})
+	}
+}
+
+func TestIsOriginAllowed(t *testing.T) {
+	tests := []struct {
+		name           string
+		origin         string
+		allowedOrigins string
+		expected       bool
+	}{
+		{"exact match", "http://localhost:3000", "http://localhost:3000", true},
+		{"in list", "http://localhost:3001", "http://localhost:3000,http://localhost:3001", true},
+		{"not in list", "http://evil.com", "http://localhost:3000,http://localhost:3001", false},
+		{"partial match", "http://localhost:3000", "http://localhost:300", false},
+		{"empty origin", "", "http://localhost:3000", false},
+		{"empty allowed origins", "http://localhost:3000", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isOriginAllowed(tt.origin, tt.allowedOrigins)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}

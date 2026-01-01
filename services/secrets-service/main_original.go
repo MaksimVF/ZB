@@ -1,5 +1,5 @@
-// This file is no longer used - moved to main_original.go.bak for reference
-package main
+// DEPRECATED: Этот файл больше не используется
+// Функциональность перенесена в main_new.go с новой модульной архитектурой
+// См. NEW_ARCHITECTURE.md для деталей
 
-// Legacy file - kept for reference only
-// All functionality moved to main.go
+package main

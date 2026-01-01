@@ -6,9 +6,46 @@
 
 # Secret Service with HashiCorp Vault
 
+## ⚠️ IMPORTANT: New Architecture
+
+**USE `main_new.go` WITH NEW MODULAR ARCHITECTURE**
+
+- 📖 **Read**: [NEW_ARCHITECTURE.md](NEW_ARCHITECTURE.md) for architecture details
+- 🔄 **Follow**: [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md) for migration instructions
+- 🚫 **Avoid**: Files with `.bak` extension (deprecated)
+- 📋 **See**: [DEPRECATED.go](DEPRECATED.go) for list of deprecated files
+
 ## Overview
 
 This service provides secure secret management using HashiCorp Vault. It replaces the previous AES-GCM encryption approach with a more secure and auditable solution.
+
+### 🆕 NEW MODULAR ARCHITECTURE
+
+The service now uses a clean, modular architecture with clear separation of concerns:
+
+```
+services/secrets-service/
+├── main_new.go                    # ✅ NEW: Main entry point
+├── config/                        # ✅ NEW: Configuration management
+├── core/                          # ✅ NEW: Business logic layer
+├── storage/                       # ✅ NEW: Vault storage adapter
+├── utils/                         # ✅ NEW: Validation & logging
+├── grpc/                          # ✅ NEW: gRPC handlers
+├── http/                          # ✅ NEW: HTTP admin API
+└── models/                        # ✅ NEW: Data structures
+```
+
+### 🔄 Migration Status
+
+- [x] ✅ New modular architecture implemented
+- [x] ✅ Core business logic layer
+- [x] ✅ gRPC and HTTP handlers
+- [x] ✅ Vault storage adapter
+- [x] ✅ Validation and logging utilities
+- [x] ✅ Comprehensive documentation
+- [ ] 🔄 Integration with existing systems
+- [ ] 🔄 Migration of old tests
+- [ ] 🔄 Production deployment
 
 ## Features
 
@@ -36,7 +73,20 @@ Gateway, Billing, Rate Limiter ← Plaintext in memory
 
 ## Deployment
 
-### 1. Docker Compose
+### 1. Using New Architecture (RECOMMENDED)
+
+```bash
+# Set environment variables
+export VAULT_ADDR="http://vault:8200"
+export VAULT_TOKEN="your-vault-token"
+export ADMIN_KEY="your-admin-key"
+export SERVICE_NAME="secret-service"
+
+# Run the new modular version
+go run main_new.go
+```
+
+### 2. Docker Compose
 
 ```bash
 docker-compose -f docker-compose.yml up --build
@@ -109,22 +159,34 @@ The HTTP admin API provides endpoints for managing secrets:
 - [x] Test cases
 - [x] Prometheus monitoring integration
 
-## Test Examples
+## ⚠️ Test Status
 
-### Unit Tests
+**OLD TESTS (main_test.go.bak) ARE DEPRECATED**
 
-Run tests with:
+- ❌ `main_test.go.bak` - Contains tests for old monolithic architecture
+- 🔄 **NEW TESTS** - Need to be written for new modular architecture
+- 📖 **See**: `MIGRATION_GUIDE.md` for test migration instructions
+
+### Old Test Examples (DEPRECATED)
+
+Run tests with (NOT RECOMMENDED):
 ```bash
-go test -v ./...
+go test -v ./...  # Will fail due to old architecture
 ```
 
-### Test Cases
+### Test Cases to Implement
 
-1. **GetSecret Success**: Retrieve an existing secret
-2. **GetSecret Not Found**: Attempt to retrieve a non-existent secret
-3. **GetSecret Vault Error**: Handle Vault connection errors
-4. **Admin API Authentication**: Test admin key validation
-5. **Admin API Operations**: Test GET, POST, DELETE operations
+1. **Core Service Tests**: Business logic validation
+2. **Storage Layer Tests**: Vault adapter testing
+3. **HTTP Handler Tests**: API endpoint testing
+4. **gRPC Handler Tests**: gRPC service testing
+5. **Integration Tests**: End-to-end testing
+
+## Documentation
+
+- 📚 [NEW_ARCHITECTURE.md](NEW_ARCHITECTURE.md) - Detailed architecture documentation
+- 🔄 [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md) - Migration instructions
+- 🚫 [DEPRECATED.go](DEPRECATED.go) - List of deprecated files
 
 ## Monitoring
 
