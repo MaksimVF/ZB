@@ -987,10 +987,12 @@ def admin_pricing():
                 raise ValidationError(f"Invalid pricing for {model_id}")
 
         # Update pricing
-        global PRICING
-        PRICING = new_pricing
+        global PRICING_MANAGER
+        PRICING_MANAGER.pricing = new_pricing
+        PRICING_MANAGER.source = "manual"
+        PRICING_MANAGER.last_updated = time.time()
         try:
-            r.set("pricing:current", json.dumps(PRICING))
+            PRICING_MANAGER.save_to_redis()
         except Exception as e:
             logger.error(f"Failed to save pricing to Redis: {e}")
             raise PricingError("Failed to save pricing")
@@ -998,7 +1000,7 @@ def admin_pricing():
         logger.info(f"Pricing updated by {request.remote_addr}")
         return jsonify({"status": "saved"}), 200
 
-    return jsonify(PRICING)
+    return jsonify(PRICING_MANAGER.get_pricing_info())
 
 @app.route("/admin/pricing/update", methods=["POST"])
 @admin_limiter.limit("2 per minute")
@@ -1484,8 +1486,8 @@ def serve():
     try:
         saved = r.get("pricing:current")
         if saved:
-            global PRICING
-            PRICING = json.loads(saved)
+            global PRICING_MANAGER
+            PRICING_MANAGER = json.loads(saved)
     except Exception as e:
         logger.error(f"Failed to load pricing at startup: {e}")
 

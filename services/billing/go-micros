@@ -1,0 +1,139 @@
+package utils
+
+import (
+	"regexp"
+	"strings"
+	"unicode/utf8"
+)
+
+// Validation functions для валидации входных данных
+
+var (
+	// Регулярные выражения для валидации
+	userIDRegex    = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,100}$`)
+	modelIDRegex   = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,200}$`)
+	uuidRegex      = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+)
+
+// ValidateUserID валидирует ID пользователя
+func ValidateUserID(userID string) bool {
+	if userID == "" {
+		return false
+	}
+	
+	// Проверка длины
+	if utf8.RuneCountInString(userID) > 100 {
+		return false
+	}
+	
+	// Проверка по регулярному выражению
+	return userIDRegex.MatchString(userID)
+}
+
+// ValidateModelID валидирует ID модели
+func ValidateModelID(modelID string) bool {
+	if modelID == "" {
+		return false
+	}
+	
+	// Проверка длины
+	if utf8.RuneCountInString(modelID) > 200 {
+		return false
+	}
+	
+	// Проверка по регулярному выражению
+	return modelIDRegex.MatchString(modelID)
+}
+
+// ValidateUUID валидирует UUID
+func ValidateUUID(uuid string) bool {
+	if uuid == "" {
+		return false
+	}
+	return uuidRegex.MatchString(uuid)
+}
+
+// ValidateAmount валидирует сумму
+func ValidateAmount(amount float64) bool {
+	// Проверяем, что сумма положительная и не слишком большая
+	return amount > 0 && amount < 1e15
+}
+
+// ValidateCurrency валидирует валюту
+func ValidateCurrency(currency string) bool {
+	if currency == "" {
+		return false
+	}
+	
+	// Поддерживаемые валюты
+	validCurrencies := map[string]bool{
+		"USD": true,
+		"EUR": true,
+		"RUB": true,
+		"GBP": true,
+		"JPY": true,
+		"CNY": true,
+	}
+	
+	return validCurrencies[strings.ToUpper(currency)]
+}
+
+// ValidateReason валидирует причину операции
+func ValidateReason(reason string) bool {
+	if reason == "" {
+		return false
+	}
+	
+	// Проверка длины
+	if utf8.RuneCountInString(reason) > 500 {
+		return false
+	}
+	
+	return true
+}
+
+// ValidateEmail валидирует email
+func ValidateEmail(email string) bool {
+	if email == "" {
+		return false
+	}
+	
+	// Простая проверка email
+	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+	
+	// Проверка длины
+	if utf8.RuneCountInString(email) > 254 {
+		return false
+	}
+	
+	return emailRegex.MatchString(email)
+}
+
+// SanitizeString очищает строку от потенциально опасных символов
+func SanitizeString(input string) string {
+	// Удаляем управляющие символы
+	var cleaned strings.Builder
+	for _, r := range input {
+		if r >= 32 && r != 127 { // Печатные символы ASCII
+			cleaned.WriteRune(r)
+		}
+	}
+	return cleaned.String()
+}
+
+// ValidatePaginationParams валидирует параметры пагинации
+func ValidatePaginationParams(limit, offset int) (bool, int, int) {
+	if limit <= 0 {
+		limit = 100 // Значение по умолчанию
+	}
+	
+	if limit > 1000 {
+		limit = 1000 // Максимальное значение
+	}
+	
+	if offset < 0 {
+		offset = 0
+	}
+	
+	return true, limit, offset
+}

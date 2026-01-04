@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package pricingpb;
+
+option go_package = "pricing-service/internal/proto";
+
+service PricingService {
+    rpc GetPricing(GetPricingRequest) returns (GetPricingResponse);
+    rpc UpdatePricing(UpdatePricingRequest) returns (UpdatePricingResponse);
+    rpc ListPricing(ListPricingRequest) returns (ListPricingResponse);
+    rpc CreatePricing(CreatePricingRequest) returns (CreatePricingResponse);
+    rpc DeletePricing(DeletePricingRequest) returns (DeletePricingResponse);
+}
+
+message PricingEntry {
+    string id = 1;
+    string model_id = 2;
+    string provider = 3;
+    string endpoint = 4;
+    double input_price_per_token = 5;
+    double output_price_per_token = 6;
+    string currency = 7;
+    int64 created_at = 8;
+    int64 updated_at = 9;
+    bool active = 10;
+    map<string, string> metadata = 11;
+}
+
+message PricingTier {
+    string name = 1;
+    double min_tokens = 2;
+    double max_tokens = 3;
+    double input_multiplier = 4;
+    double output_multiplier = 5;
+}
+
+message ModelPricing {
+    string model_id = 1;
+    string provider = 2;
+    string endpoint = 3;
+    double base_input_price = 4;
+    double base_output_price = 5;
+    string currency = 6;
+    repeated PricingTier tiers = 7;
+    bool active = 8;
+    map<string, string> metadata = 9;
+}
+
+message GetPricingRequest {
+    string model_id = 1;
+    string provider = 2;
+    string endpoint = 3;
+}
+
+message GetPricingResponse {
+    ModelPricing pricing = 1;
+    bool found = 2;
+    string error = 3;
+}
+
+message UpdatePricingRequest {
+    ModelPricing pricing = 1;
+    string admin_token = 2;
+}
+
+message UpdatePricingResponse {
+    bool success = 1;
+    string error = 2;
+    int64 updated_at = 3;
+}
+
+message ListPricingRequest {
+    string provider = 1;
+    bool active_only = 2;
+    int32 page = 3;
+    int32 limit = 4;
+}
+
+message ListPricingResponse {
+    repeated ModelPricing pricing = 1;
+    int32 total = 2;
+    int32 page = 3;
+    int32 limit = 4;
+}
+
+message CreatePricingRequest {
+    ModelPricing pricing = 1;
+    string admin_token = 2;
+}
+
+message CreatePricingResponse {
+    string id = 1;
+    bool success = 2;
+    string error = 3;
+    int64 created_at = 4;
+}
+
+message DeletePricingRequest {
+    string model_id = 1;
+    string provider = 2;
+    string admin_token = 3;
+}
+
+message DeletePricingResponse {
+    bool success = 1;
+    string error = 2;
+}

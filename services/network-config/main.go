@@ -1,6 +1,3 @@
-
-
-
 package main
 
 import (
@@ -10,285 +7,289 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
+	"strconv"
 	"syscall"
 	"time"
 
-	"github.com/go-redis/redis/v8"
-	"github.com/gorilla/mux"
-	"go.uber.org/zap"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 )
 
-var (
-	redisClient *redis.Client
-	logger       *zap.Logger
-	configMutex  sync.RWMutex
-	currentConfig NetworkConfig
-	tailscaleManager *TailscaleManager
-)
-
-// NetworkConfig represents the network configuration structure
-type NetworkConfig struct {
-	HeadEndpoint    string            `json:"head_endpoint"`
-	NetworkMode    string            `json:"network_mode"`
-	WGPeerPublic   string            `json:"wg_peer_public,omitempty"`
-	WGAllowedIPs   string            `json:"wg_allowed_ips,omitempty"`
-	TailscaleAuthKey string          `json:"tailscale_auth_key,omitempty"`
-	TailscaleHostname string          `json:"tailscale_hostname,omitempty"`
-	TailscaleAdvertiseRoutes string   `json:"tailscale_advertise_routes,omitempty"`
-	SecurityToken  string            `json:"security_token"`
-	RetryPolicy    RetryPolicy       `json:"retry_policy"`
-	RateLimits     RateLimits        `json:"rate_limits"`
-	LoadBalancing LoadBalancingConfig `json:"load_balancing"`
+// Simple configuration structure
+type Config struct {
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Mode         string    `json:"mode"`
+	Version      int       `json:"version"`
+	Status       string    `json:"status"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	HeadEndpoint string    `json:"head_endpoint"`
 }
 
-type RetryPolicy struct {
-	Retries   int `json:"retries"`
-	BackoffMs int `json:"backoff_ms"`
-}
-
-type RateLimits struct {
-	MaxRequestsPerUser int `json:"max_requests_per_user"`
-	MaxRequestsPerIP  int `json:"max_requests_per_ip"`
-	WindowSeconds     int `json:"window_seconds"`
-}
-
-type LoadBalancingConfig struct {
-	Mode           string   `json:"mode"`
-	HeadEndpoints []string `json:"head_endpoints,omitempty"`
-}
-
-func init() {
-	// Initialize logger
-	var err error
-	logger, err = zap.NewProduction()
-	if err != nil {
-		log.Fatalf("Failed to initialize logger: %v", err)
-	}
-
-	// Initialize Redis client
-	redisClient = redis.NewClient(&redis.Options{
-		Addr: "redis:6379",
-	})
-
-	// Initialize Tailscale manager
-	tailscaleManager = NewTailscaleManager(logger)
-
-	// Load initial config
-	loadConfig()
-}
+// In-memory storage (replace with Redis in production)
+var configs = make(map[string]Config)
+var configMutex = make(chan struct{}, 1)
 
 func main() {
-	router := mux.NewRouter()
+	// Initialize basic configuration
+	configMutex <- struct{}{}
+	configs["default"] = Config{
+		ID:           "default",
+		Name:         "Default Configuration",
+		Mode:         "direct",
+		Version:      1,
+		Status:       "active",
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
+		HeadEndpoint: "grpc://localhost:50055",
+	}
+	<-configMutex
 
-	// API endpoints
-	router.HandleFunc("/api/config", getConfig).Methods("GET")
-	router.HandleFunc("/api/config", updateConfig).Methods("PUT")
-	router.HandleFunc("/api/config/history", getConfigHistory).Methods("GET")
+	// Setup router
+	r := chi.NewRouter()
 
-	// Tailscale endpoints
-	router.HandleFunc("/api/tailscale/status", getTailscaleStatus).Methods("GET")
-	router.HandleFunc("/api/tailscale/configure", configureTailscale).Methods("POST")
+	// Global middleware
+	r.Use(middleware.RequestID)
+	r.Use(middleware.RealIP)
+	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
+	r.Use(middleware.Compress(5))
 
 	// Health check
-	router.HandleFunc("/health", healthCheck).Methods("GET")
+	r.Get("/health", healthHandler)
+	r.Get("/", infoHandler)
 
+	// API routes
+	r.Route("/api/v1", func(r chi.Router) {
+		r.Get("/configs", getConfigsHandler)
+		r.Get("/configs/{id}", getConfigHandler)
+		r.Post("/configs", createConfigHandler)
+		r.Put("/configs/{id}", updateConfigHandler)
+		r.Delete("/configs/{id}", deleteConfigHandler)
+	})
+
+	// Start server
+	port := getEnv("PORT", "50060")
 	srv := &http.Server{
-		Addr:    ":50060",
-		Handler: router,
+		Addr:         ":" + port,
+		Handler:      r,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
-	// Start auto-reload goroutine
-	go autoReloadConfig()
-
-	// Start HTTP server
 	go func() {
-		logger.Info("Starting Network Config Service on :50060")
+		log.Printf("Network Config Service v2.0 starting on port %s", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatal("Server failed", zap.Error(err))
+			log.Fatalf("Server failed: %v", err)
 		}
 	}()
 
-	// Graceful shutdown
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
-	<-c
+	// Wait for interrupt signal
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
 
-	logger.Info("Shutting down Network Config Service...")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	log.Println("Shutting down Network Config Service...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_ = srv.Shutdown(ctx)
-	logger.Info("Network Config Service stopped")
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("Server forced to shutdown: %v", err)
+	}
+
+	log.Println("Network Config Service stopped")
 }
 
-// loadConfig loads the current configuration from Redis
-func loadConfig() {
-	configMutex.Lock()
-	defer configMutex.Unlock()
-
-	ctx := context.Background()
-	result, err := redisClient.Get(ctx, "network_config").Result()
-	if err == redis.Nil {
-		// Default config if not found
-		currentConfig = NetworkConfig{
-			HeadEndpoint: "grpc://head:50055",
-			NetworkMode: "direct",
-			SecurityToken: "default-token",
-			RetryPolicy: RetryPolicy{
-				Retries:   3,
-				BackoffMs: 200,
-			},
-			RateLimits: RateLimits{
-				MaxRequestsPerUser: 100,
-				MaxRequestsPerIP:   1000,
-				WindowSeconds:      60,
-			},
-			LoadBalancing: LoadBalancingConfig{
-				Mode: "single",
-			},
-		}
-		return
-	} else if err != nil {
-		logger.Error("Failed to load config from Redis", zap.Error(err))
-		return
-	}
-
-	err = json.Unmarshal([]byte(result), &currentConfig)
-	if err != nil {
-		logger.Error("Failed to parse config", zap.Error(err))
-	}
-
-	// Apply Tailscale configuration if in tailscale mode
-	if currentConfig.NetworkMode == "tailscale" {
-		logger.Info("Applying Tailscale configuration after loading config")
-		err = tailscaleManager.ApplyNetworkConfig(currentConfig)
-		if err != nil {
-			logger.Error("Failed to apply Tailscale configuration", zap.Error(err))
-		}
-	}
-}
-
-// saveConfig saves the configuration to Redis
-func saveConfig(cfg NetworkConfig) error {
-	configMutex.Lock()
-	defer configMutex.Unlock()
-
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		return err
-	}
-
-	ctx := context.Background()
-	return redisClient.Set(ctx, "network_config", data, 0).Err()
-}
-
-// autoReloadConfig periodically checks for config updates
-func autoReloadConfig() {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		loadConfig()
-	}
-}
-
-// getConfig returns the current configuration
-func getConfig(w http.ResponseWriter, r *http.Request) {
-	configMutex.RLock()
-	defer configMutex.RUnlock()
-
+// Handler functions
+func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(currentConfig)
+	w.WriteHeader(http.StatusOK)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "healthy",
+		"timestamp": time.Now().Unix(),
+		"service":   "network-config",
+		"version":   "2.0.0",
+		"mode":      "simple",
+	})
 }
 
-// updateConfig updates the configuration
-func updateConfig(w http.ResponseWriter, r *http.Request) {
-	var newConfig NetworkConfig
-	err := json.NewDecoder(r.Body).Decode(&newConfig)
-	if err != nil {
-		http.Error(w, "Invalid request payload", http.StatusBadRequest)
+func infoHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	info := map[string]interface{}{
+		"name":        "Network Config Service",
+		"version":     "2.0.0",
+		"description": "Centralized network configuration management (Simple Version)",
+		"mode":        "simplified",
+		"endpoints": []string{
+			"GET /health - Health check",
+			"GET /api/v1/configs - List configurations",
+			"GET /api/v1/configs/{id} - Get configuration",
+			"POST /api/v1/configs - Create configuration",
+			"PUT /api/v1/configs/{id} - Update configuration",
+			"DELETE /api/v1/configs/{id} - Delete configuration",
+		},
+		"documentation": "https://github.com/MaksimVF/ZB/services/network-config",
+	}
+
+	json.NewEncoder(w).Encode(info)
+}
+
+func getConfigsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	configMutex <- struct{}{}
+	defer func() { <-configMutex }()
+
+	// Convert map to slice
+	configList := make([]Config, 0, len(configs))
+	for _, config := range configs {
+		configList = append(configList, config)
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"data":    configList,
+		"count":   len(configList),
+	})
+}
+
+func getConfigHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	configID := chi.URLParam(r, "id")
+	if configID == "" {
+		http.Error(w, "Config ID is required", http.StatusBadRequest)
+		return
+	}
+
+	configMutex <- struct{}{}
+	defer func() { <-configMutex }()
+
+	config, exists := configs[configID]
+	if !exists {
+		http.Error(w, "Configuration not found", http.StatusNotFound)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"data":    config,
+	})
+}
+
+func createConfigHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var newConfig Config
+	if err := json.NewDecoder(r.Body).Decode(&newConfig); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
 	// Validate required fields
-	if newConfig.HeadEndpoint == "" || newConfig.NetworkMode == "" || newConfig.SecurityToken == "" {
-		http.Error(w, "Missing required fields", http.StatusBadRequest)
+	if newConfig.Name == "" || newConfig.Mode == "" {
+		http.Error(w, "Name and Mode are required", http.StatusBadRequest)
 		return
 	}
 
-	err = saveConfig(newConfig)
-	if err != nil {
-		http.Error(w, "Failed to save config", http.StatusInternalServerError)
-		return
-	}
+	// Set metadata
+	now := time.Now()
+	newConfig.ID = "config_" + strconv.FormatInt(now.UnixNano(), 36)
+	newConfig.CreatedAt = now
+	newConfig.UpdatedAt = now
+	newConfig.Version = 1
+	newConfig.Status = "active"
 
-	// Apply Tailscale configuration if in tailscale mode
-	if newConfig.NetworkMode == "tailscale" {
-		logger.Info("Applying Tailscale configuration after update")
-		err = tailscaleManager.ApplyNetworkConfig(newConfig)
-		if err != nil {
-			logger.Error("Failed to apply Tailscale configuration", zap.Error(err))
-			http.Error(w, "Failed to apply Tailscale configuration", http.StatusInternalServerError)
-			return
-		}
-	}
+	configMutex <- struct{}{}
+	configs[newConfig.ID] = newConfig
+	<-configMutex
 
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"data":    newConfig,
+		"message": "Configuration created successfully",
+	})
 }
 
-// healthCheck returns the health status
-func healthCheck(w http.ResponseWriter, r *http.Request) {
-	ctx := context.Background()
-	err := redisClient.Ping(ctx).Err()
-	if err != nil {
-		http.Error(w, "Redis unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
-}
-
-// getConfigHistory returns the configuration history (stub for now)
-func getConfigHistory(w http.ResponseWriter, r *http.Request) {
-	// TODO: Implement config history from database
+func updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode([]NetworkConfig{currentConfig})
-}
 
-// getTailscaleStatus returns the current Tailscale status
-func getTailscaleStatus(w http.ResponseWriter, r *http.Request) {
-	status, err := tailscaleManager.GetTailscaleStatus()
-	if err != nil {
-		http.Error(w, "Failed to get Tailscale status: "+err.Error(), http.StatusInternalServerError)
+	configID := chi.URLParam(r, "id")
+	if configID == "" {
+		http.Error(w, "Config ID is required", http.StatusBadRequest)
 		return
 	}
 
+	var updatedConfig Config
+	if err := json.NewDecoder(r.Body).Decode(&updatedConfig); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	configMutex <- struct{}{}
+	defer func() { <-configMutex }()
+
+	existingConfig, exists := configs[configID]
+	if !exists {
+		http.Error(w, "Configuration not found", http.StatusNotFound)
+		return
+	}
+
+	// Update metadata
+	updatedConfig.ID = configID
+	updatedConfig.CreatedAt = existingConfig.CreatedAt
+	updatedConfig.UpdatedAt = time.Now()
+	updatedConfig.Version = existingConfig.Version + 1
+	updatedConfig.Status = "active"
+
+	configs[configID] = updatedConfig
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"data":    updatedConfig,
+		"message": "Configuration updated successfully",
+	})
+}
+
+func deleteConfigHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
-}
 
-// configureTailscale configures Tailscale with the provided parameters
-func configureTailscale(w http.ResponseWriter, r *http.Request) {
-	var config struct {
-		AuthKey          string `json:"auth_key"`
-		Hostname         string `json:"hostname"`
-		AdvertiseRoutes  string `json:"advertise_routes"`
-	}
-
-	err := json.NewDecoder(r.Body).Decode(&config)
-	if err != nil {
-		http.Error(w, "Invalid request payload", http.StatusBadRequest)
+	configID := chi.URLParam(r, "id")
+	if configID == "" {
+		http.Error(w, "Config ID is required", http.StatusBadRequest)
 		return
 	}
 
-	err = tailscaleManager.ConfigureTailscale(config.AuthKey, config.Hostname, config.AdvertiseRoutes)
-	if err != nil {
-		http.Error(w, "Failed to configure Tailscale: "+err.Error(), http.StatusInternalServerError)
+	configMutex <- struct{}{}
+	defer func() { <-configMutex }()
+
+	_, exists := configs[configID]
+	if !exists {
+		http.Error(w, "Configuration not found", http.StatusNotFound)
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Tailscale configured successfully"))
+	// Soft delete - mark as deprecated
+	configs[configID].Status = "deprecated"
+	configs[configID].UpdatedAt = time.Now()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Configuration deprecated successfully",
+	})
 }
 
+// Helper functions
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}

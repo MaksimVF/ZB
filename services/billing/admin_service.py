@@ -272,10 +272,12 @@ def admin_pricing():
                 raise ValidationError(f"Invalid pricing for {model_id}")
 
         # Update pricing
-        global PRICING
-        PRICING = new_pricing
+        global PRICING_MANAGER
+        PRICING_MANAGER.pricing = new_pricing
+        PRICING_MANAGER.source = "manual"
+        PRICING_MANAGER.last_updated = time.time()
         try:
-            r.set("pricing:current", json.dumps(PRICING))
+            PRICING_MANAGER.save_to_redis()
         except Exception as e:
             logger.error(f"Failed to save pricing to Redis: {e}")
             raise PricingError("Failed to save pricing")

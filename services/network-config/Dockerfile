@@ -1,25 +1,50 @@
+# Multi-stage build for Go application
+FROM golang:1.25-alpine AS builder
 
-
-
-FROM golang:1.25-alpine
+# Install git and ca-certificates (needed for private repos and TLS)
+RUN apk add --no-cache git ca-certificates tzdata
 
 WORKDIR /app
 
-# Copy go.mod and go.sum first to cache dependencies
-COPY go.mod ./
-COPY go.sum ./
+# Copy go mod files
+COPY go.mod go.sum ./
 
-# Download and tidy dependencies to ensure go.sum is up to date
-RUN go mod tidy
+# Download dependencies
+RUN go mod download
 
-# Copy the rest of the application code
+# Copy source code
 COPY . .
 
 # Build the application
-RUN go build -o /network-config-service
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main .
 
+# Final stage - minimal image
+FROM alpine:latest
+
+# Install ca-certificates for HTTPS requests
+RUN apk --no-cache add ca-certificates tzdata
+
+WORKDIR /root/
+
+# Copy the binary from builder stage
+COPY --from=builder /app/main .
+
+# Create non-root user
+RUN addgroup -g 1001 -S appgroup && \
+    adduser -u 1001 -S appuser -G appgroup
+
+# Change ownership of the binary
+RUN chown appuser:appgroup main
+
+# Switch to non-root user
+USER appuser
+
+# Expose port
 EXPOSE 50060
 
-CMD ["/network-config-service"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:50060/health || exit 1
 
-
+# Run the application
+CMD ["./main"]

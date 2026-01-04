@@ -1,0 +1,428 @@
+package handlers
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
+	pb "github.com/your-org/billing-services/proto"
+)
+
+// PricingHandler handles pricing-related HTTP requests
+type PricingHandler struct {
+	pricingService *PricingService
+	redisClient    *redis.Client
+}
+
+// NewPricingHandler creates new pricing handler
+func NewPricingHandler(pricingService *PricingService, redisClient *redis.Client) *PricingHandler {
+	return &PricingHandler{
+		pricingService: pricingService,
+		redisClient:    redisClient,
+	}
+}
+
+// GetPricing godoc
+// @Summary Get pricing for a model
+// @Description Retrieve pricing information for a specific model
+// @Tags pricing
+// @Param model_id path string true "Model ID"
+// @Success 200 {object} models.PricingModel
+// @Failure 400 {object} ErrorResponse
+// @Failure 404 {object} ErrorResponse
+// @Router /pricing/{model_id} [get]
+func (h *PricingHandler) GetPricing(c *gin.Context) {
+	modelID := c.Param("model_id")
+	if modelID == "" {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error: "Model ID is required",
+			Code:  "INVALID_MODEL_ID",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	pricingModel, err := h.pricingService.GetPricing(ctx, modelID)
+	if err != nil {
+		if err == ErrPricingNotFound {
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Error: "Pricing not found for model",
+				Code:  "PRICING_NOT_FOUND",
+			})
+			return
+		}
+
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error: "Failed to get pricing",
+			Code:  "INTERNAL_ERROR",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, pricingModel)
+}
+
+// GetAllPricing godoc
+// @Summary Get all pricing models
+// @Description Retrieve all available pricing models
+// @Tags pricing
+// @Success 200 {object} models.PricingInfo
+// @Failure 500 {object} ErrorResponse
+// @Router /pricing [get]
+func (h *PricingHandler) GetAllPricing(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	pricingInfo, err := h.pricingService.GetAllPricing(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error: "Failed to get pricing information",
+			Code:  "INTERNAL_ERROR",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, pricingInfo)
+}
+
+// UpdatePricing godoc
+// @Summary Update pricing for a model
+// @Description Update pricing information for a specific model
+// @Tags pricing
+// @Param model_id path string true "Model ID"
+// @Param request body models.UpdatePricingRequest true "Pricing update request"
+// @Success 200 {object} models.UpdatePricingResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /pricing/{model_id} [put]
+func (h *PricingHandler) UpdatePricing(c *gin.Context) {
+	modelID := c.Param("model_id")
+	if modelID == "" {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error: "Model ID is required",
+			Code:  "INVALID_MODEL_ID",
+		})
+		return
+	}
+
+	var request models.UpdatePricingRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error: "Invalid request body",
+			Code:  "INVALID_JSON",
+		})
+		return
+	}
+
+	// Validate model ID matches
+	if request.ModelID != modelID {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error: "Model ID mismatch",
+			Code:  "MODEL_ID_MISMATCH",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	err := h.pricingService.UpdatePricing(ctx, &request)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error: "Failed to update pricing",
+			Code:  "UPDATE_FAILED",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, models.UpdatePricingResponse{
+		Success:   true,
+		Message:   "Pricing updated successfully",
+		UpdatedAt: time.Now(),
+		ModelID:   modelID,
+	})
+}
+
+// BulkUpdatePricing godoc
+// @Summary Bulk update pricing for multiple models
+// @Description Update pricing for multiple models in a single request
+// @Tags pricing
+// @Param request body models.BulkUpdatePricingRequest true "Bulk pricing update request"
+// @Success 200 {object} models.BulkUpdatePricingResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /pricing/bulk [put]
+func (h *PricingHandler) BulkUpdatePricing(c *gin.Context) {
+	var request models.BulkUpdatePricingRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error: "Invalid request body",
+			Code:  "INVALID_JSON",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+
+	response, err := h.pricingService.BulkUpdatePricing(ctx, &request)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error: "Failed to bulk update pricing",
+			Code:  "BULK_UPDATE_FAILED",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// CalculateCost godoc
+// @Summary Calculate cost for token usage
+// @Description Calculate the cost for given input and output tokens
+// @Tags pricing
+// @Param model_id query string true "Model ID"
+// @Param input_tokens query int true "Number of input tokens"
+// @Param output_tokens query int true "Number of output tokens"
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} ErrorResponse
+// @Failure 404 {object} ErrorResponse
+// @Router /pricing/calculate [get]
+func (h *PricingHandler) CalculateCost(c *gin.Context) {
+	modelID := c.Query("model_id")
+	inputTokens := c.Query("input_tokens")
+	outputTokens := c.Query("output_tokens")
+
+	if modelID == "" {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error: "Model ID is required",
+			Code:  "INVALID_MODEL_ID",
+		})
+		return
+	}
+
+	if inputTokens == "" || outputTokens == "" {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error: "Input and output tokens are required",
+			Code:  "INVALID_TOKENS",
+		})
+		return
+	}
+
+	var inputTokensInt, outputTokensInt int
+	fmt.Sscanf(inputTokens, "%d", &inputTokensInt)
+	fmt.Sscanf(outputTokens, "%d", &outputTokensInt)
+
+	if inputTokensInt < 0 || outputTokensInt < 0 {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error: "Token counts must be non-negative",
+			Code:  "INVALID_TOKEN_COUNT",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	pricingModel, err := h.pricingService.GetPricing(ctx, modelID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, ErrorResponse{
+			Error: "Pricing not found for model",
+			Code:  "PRICING_NOT_FOUND",
+		})
+		return
+	}
+
+	cost := pricingModel.CalculateCost(inputTokensInt, outputTokensInt)
+
+	c.JSON(http.StatusOK, gin.H{
+		"model_id":       modelID,
+		"input_tokens":   inputTokensInt,
+		"output_tokens":  outputTokensInt,
+		"total_cost":     cost,
+		"input_cost":     float64(inputTokensInt) * pricingModel.GetTokenPrice("input"),
+		"output_cost":    float64(outputTokensInt) * pricingModel.GetTokenPrice("output"),
+	})
+}
+
+// GetProviders godoc
+// @Summary Get available providers
+// @Description Get list of available model providers
+// @Tags pricing
+// @Success 200 {object} map[string][]string
+// @Router /pricing/providers [get]
+func (h *PricingHandler) GetProviders(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	providers, err := h.pricingService.GetProviders(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error: "Failed to get providers",
+			Code:  "INTERNAL_ERROR",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"providers": providers,
+	})
+}
+
+// SyncWithExternal godoc
+// @Summary Sync pricing with external source
+// @Description Sync pricing data with external pricing source
+// @Tags pricing
+// @Param request body map[string]interface{} true "Sync request"
+// @Success 200 {object} models.BulkUpdatePricingResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /pricing/sync [post]
+func (h *PricingHandler) SyncWithExternal(c *gin.Context) {
+	var request map[string]interface{}
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error: "Invalid request body",
+			Code:  "INVALID_JSON",
+		})
+		return
+	}
+
+	sourceURL, ok := request["source_url"].(string)
+	if !ok || sourceURL == "" {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error: "Source URL is required",
+			Code:  "INVALID_SOURCE_URL",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	defer cancel()
+
+	response, err := h.pricingService.SyncWithExternal(ctx, sourceURL)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error: "Failed to sync with external source",
+			Code:  "SYNC_FAILED",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// gRPC handlers
+
+// GetPricing implements pb.PricingServiceServer
+func (h *PricingHandler) GetPricing(ctx context.Context, req *pb.GetPricingRequest) (*pb.GetPricingResponse, error) {
+	if req.ModelId == "" {
+		return nil, fmt.Errorf("model ID is required")
+	}
+
+	pricingModel, err := h.pricingService.GetPricing(ctx, req.ModelId)
+	if err != nil {
+		if err == ErrPricingNotFound {
+			return &pb.GetPricingResponse{
+				Success: false,
+				Error:   "Pricing not found",
+			}, nil
+		}
+		return nil, fmt.Errorf("failed to get pricing: %w", err)
+	}
+
+	// Convert internal model to protobuf
+	pbModel := &pb.PricingModel{
+		Id:          pricingModel.ID,
+		Name:        pricingModel.Name,
+		Provider:    pricingModel.Provider,
+		CreatedAt:   pricingModel.CreatedAt.Unix(),
+		UpdatedAt:   pricingModel.UpdatedAt.Unix(),
+		Active:      pricingModel.Active,
+	}
+
+	// Convert pricing map
+	pbModel.Pricing = make(map[string]*pb.PricingType)
+	for tokenType, pricing := range pricingModel.Pricing {
+		pbModel.Pricing[tokenType] = &pb.PricingType{
+			Input:  pricing.Input,
+			Output: pricing.Output,
+			Embed:  pricing.Embed,
+		}
+	}
+
+	return &pb.GetPricingResponse{
+		Success: true,
+		Model:   pbModel,
+	}, nil
+}
+
+// UpdatePricing implements pb.PricingServiceServer
+func (h *PricingHandler) UpdatePricing(ctx context.Context, req *pb.UpdatePricingRequest) (*pb.UpdatePricingResponse, error) {
+	if req.ModelId == "" {
+		return nil, fmt.Errorf("model ID is required")
+	}
+
+	updateRequest := &models.UpdatePricingRequest{
+		ModelID: req.ModelId,
+		Pricing: models.PricingType{
+			Input:  req.Pricing.Input,
+			Output: req.Pricing.Output,
+			Embed:  req.Pricing.Embed,
+		},
+		Source: req.Source,
+	}
+
+	err := h.pricingService.UpdatePricing(ctx, updateRequest)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update pricing: %w", err)
+	}
+
+	return &pb.UpdatePricingResponse{
+		Success:   true,
+		Message:   "Pricing updated successfully",
+		UpdatedAt: time.Now().Unix(),
+		ModelId:   req.ModelId,
+	}, nil
+}
+
+// CalculateCost implements pb.PricingServiceServer
+func (h *PricingHandler) CalculateCost(ctx context.Context, req *pb.CalculateCostRequest) (*pb.CalculateCostResponse, error) {
+	if req.ModelId == "" {
+		return nil, fmt.Errorf("model ID is required")
+	}
+
+	if req.InputTokens < 0 || req.OutputTokens < 0 {
+		return nil, fmt.Errorf("token counts must be non-negative")
+	}
+
+	pricingModel, err := h.pricingService.GetPricing(ctx, req.ModelId)
+	if err != nil {
+		return nil, fmt.Errorf("pricing not found for model: %w", err)
+	}
+
+	totalCost := pricingModel.CalculateCost(int(req.InputTokens), int(req.OutputTokens))
+	inputCost := float64(req.InputTokens) * pricingModel.GetTokenPrice("input")
+	outputCost := float64(req.OutputTokens) * pricingModel.GetTokenPrice("output")
+
+	return &pb.CalculateCostResponse{
+		ModelId:       req.ModelId,
+		InputTokens:   req.InputTokens,
+		OutputTokens:  req.OutputTokens,
+		TotalCost:     totalCost,
+		InputCost:     inputCost,
+		OutputCost:    outputCost,
+		CalculatedAt:  time.Now().Unix(),
+	}, nil
+}
+
+// ErrorResponse represents error response structure
+type ErrorResponse struct {
+	Error string `json:"error"`
+	Code  string `json:"code"`
+}

@@ -1,0 +1,548 @@
+package services
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/go-redis/redis/v8"
+	"github.com/gorilla/mux"
+)
+
+// PricingService handles pricing business logic
+type PricingService struct {
+	redisClient *redis.Client
+	httpClient  *http.Client
+}
+
+// NewPricingService creates new pricing service
+func NewPricingService(redisClient *redis.Client) *PricingService {
+	return &PricingService{
+		redisClient: redisClient,
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+	}
+}
+
+// GetPricing retrieves pricing information for a specific model
+func (s *PricingService) GetPricing(ctx context.Context, modelID string) (*models.PricingModel, error) {
+	key := fmt.Sprintf("pricing:%s", modelID)
+
+	pricingJSON, err := s.redisClient.Get(ctx, key).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return nil, ErrPricingNotFound
+		}
+		return nil, fmt.Errorf("failed to get pricing from Redis: %w", err)
+	}
+
+	var pricingModel models.PricingModel
+	if err := json.Unmarshal([]byte(pricingJSON), &pricingModel); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal pricing data: %w", err)
+	}
+
+	return &pricingModel, nil
+}
+
+// GetAllPricing retrieves all pricing information
+func (s *PricingService) GetAllPricing(ctx context.Context) (*models.PricingInfo, error) {
+	// Get all pricing keys
+	keys, err := s.redisClient.Keys(ctx, "pricing:*").Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pricing keys: %w", err)
+	}
+
+	pricingModels := make(map[string]*models.PricingModel)
+	models := []string{}
+
+	if len(keys) > 0 {
+		pricingJSONs, err := s.redisClient.MGet(ctx, keys...).Result()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get pricing data: %w", err)
+		}
+
+		for i, pricingJSON := range pricingJSONs {
+			if pricingJSON == nil {
+				continue
+			}
+
+			var pricingModel models.PricingModel
+			if err := json.Unmarshal([]byte(pricingJSON.(string)), &pricingModel); err != nil {
+				// Log error but continue processing
+				continue
+			}
+
+			pricingModels[pricingModel.ID] = &pricingModel
+			models = append(models, pricingModel.ID)
+		}
+	}
+
+	return &models.PricingInfo{
+		Models:      models,
+		Pricing:     pricingModels,
+		LastUpdated: time.Now(),
+		Source:      "redis",
+	}, nil
+}
+
+// UpdatePricing updates pricing information for a model
+func (s *PricingService) UpdatePricing(ctx context.Context, request *models.UpdatePricingRequest) error {
+	// Validate model ID
+	if request.ModelID == "" {
+		return fmt.Errorf("model ID is required")
+	}
+
+	// Validate pricing values
+	if err := validatePricing(request.Pricing); err != nil {
+		return fmt.Errorf("invalid pricing values: %w", err)
+	}
+
+	// Get existing pricing or create new
+	pricingModel := &models.PricingModel{
+		ID:        request.ModelID,
+		Name:      request.Name,
+		Provider:  request.Provider,
+		Pricing:   request.Pricing,
+		Active:    request.Active,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		Source:    request.Source,
+	}
+
+	// Save to Redis
+	key := fmt.Sprintf("pricing:%s", request.ModelID)
+	pricingJSON, err := json.Marshal(pricingModel)
+	if err != nil {
+		return fmt.Errorf("failed to marshal pricing data: %w", err)
+	}
+
+	err = s.redisClient.Set(ctx, key, pricingJSON, 0).Err()
+	if err != nil {
+		return fmt.Errorf("failed to save pricing to Redis: %w", err)
+	}
+
+	// Update models list
+	err = s.redisClient.SAdd(ctx, "pricing:models", request.ModelID).Err()
+	if err != nil {
+		return fmt.Errorf("failed to update models list: %w", err)
+	}
+
+	// Store metadata
+	metadata := map[string]interface{}{
+		"last_updated": time.Now().Unix(),
+		"updated_by":   request.UpdatedBy,
+		"source":       request.Source,
+		"active":       request.Active,
+	}
+	metadataJSON, _ := json.Marshal(metadata)
+	err = s.redisClient.HSet(ctx, "pricing:metadata", request.ModelID, string(metadataJSON)).Err()
+	if err != nil {
+		return fmt.Errorf("failed to save pricing metadata: %w", err)
+	}
+
+	return nil
+}
+
+// BulkUpdatePricing updates pricing for multiple models
+func (s *PricingService) BulkUpdatePricing(ctx context.Context, request *models.BulkUpdatePricingRequest) (*models.BulkUpdatePricingResponse, error) {
+	if len(request.Updates) == 0 {
+		return nil, fmt.Errorf("no pricing updates provided")
+	}
+
+	if len(request.Updates) > 100 {
+		return nil, fmt.Errorf("too many pricing updates (max 100)")
+	}
+
+	results := make(map[string]models.BulkUpdateResult)
+	successCount := 0
+	errorCount := 0
+
+	for modelID, pricingUpdate := range request.Updates {
+		err := s.UpdatePricing(ctx, &models.UpdatePricingRequest{
+			ModelID:   modelID,
+			Name:      pricingUpdate.Name,
+			Provider:  pricingUpdate.Provider,
+			Pricing:   pricingUpdate.Pricing,
+			Active:    pricingUpdate.Active,
+			Source:    request.Source,
+			UpdatedBy: request.UpdatedBy,
+		})
+
+		if err != nil {
+			results[modelID] = models.BulkUpdateResult{
+				Success: false,
+				Error:   err.Error(),
+			}
+			errorCount++
+		} else {
+			results[modelID] = models.BulkUpdateResult{
+				Success: true,
+				Message: "Pricing updated successfully",
+			}
+			successCount++
+		}
+	}
+
+	return &models.BulkUpdatePricingResponse{
+		TotalModels:  len(request.Updates),
+		SuccessCount: successCount,
+		ErrorCount:   errorCount,
+		Results:      results,
+		UpdatedAt:    time.Now(),
+		Source:       request.Source,
+	}, nil
+}
+
+// CalculateCost calculates the cost for given token usage
+func (s *PricingService) CalculateCost(ctx context.Context, modelID string, inputTokens, outputTokens int) (float64, error) {
+	if inputTokens < 0 || outputTokens < 0 {
+		return 0, fmt.Errorf("token counts must be non-negative")
+	}
+
+	pricingModel, err := s.GetPricing(ctx, modelID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get pricing: %w", err)
+	}
+
+	cost := pricingModel.CalculateCost(inputTokens, outputTokens)
+	return cost, nil
+}
+
+// GetProviders retrieves available model providers
+func (s *PricingService) GetProviders(ctx context.Context) (map[string][]string, error) {
+	// Get all pricing models
+	keys, err := s.redisClient.Keys(ctx, "pricing:*").Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pricing keys: %w", err)
+	}
+
+	providers := make(map[string][]string)
+
+	if len(keys) > 0 {
+		pricingJSONs, err := s.redisClient.MGet(ctx, keys...).Result()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get pricing data: %w", err)
+		}
+
+		for _, pricingJSON := range pricingJSONs {
+			if pricingJSON == nil {
+				continue
+			}
+
+			var pricingModel models.PricingModel
+			if err := json.Unmarshal([]byte(pricingJSON.(string)), &pricingModel); err != nil {
+				continue
+			}
+
+			if !pricingModel.Active {
+				continue
+			}
+
+			// Add model to provider list
+			provider := pricingModel.Provider
+			providers[provider] = append(providers[provider], pricingModel.ID)
+		}
+	}
+
+	return providers, nil
+}
+
+// SyncWithExternal syncs pricing data with external source
+func (s *PricingService) SyncWithExternal(ctx context.Context, sourceURL string) (*models.BulkUpdatePricingResponse, error) {
+	// Make HTTP request to external source
+	req, err := http.NewRequestWithContext(ctx, "GET", sourceURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch external pricing: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("external source returned status %d", resp.StatusCode)
+	}
+
+	var externalData models.ExternalPricingData
+	if err := json.NewDecoder(resp.Body).Decode(&externalData); err != nil {
+		return nil, fmt.Errorf("failed to decode external data: %w", err)
+	}
+
+	// Process external data
+	if len(externalData.Models) == 0 {
+		return &models.BulkUpdatePricingResponse{
+			TotalModels:  0,
+			SuccessCount: 0,
+			ErrorCount:   0,
+			Results:      make(map[string]models.BulkUpdateResult),
+			UpdatedAt:    time.Now(),
+			Source:       sourceURL,
+		}, nil
+	}
+
+	// Prepare bulk update request
+	updates := make(map[string]models.PricingUpdate)
+	for _, model := range externalData.Models {
+		updates[model.ID] = models.PricingUpdate{
+			Name:     model.Name,
+			Provider: model.Provider,
+			Pricing: models.PricingType{
+				Input:  model.Pricing.Input,
+				Output: model.Pricing.Output,
+				Embed:  model.Pricing.Embed,
+			},
+			Active: model.Active,
+		}
+	}
+
+	bulkRequest := &models.BulkUpdatePricingRequest{
+		Updates:   updates,
+		Source:    "external:" + sourceURL,
+		UpdatedBy: "external_sync",
+	}
+
+	return s.BulkUpdatePricing(ctx, bulkRequest)
+}
+
+// ValidatePricing validates pricing data
+func (s *PricingService) ValidatePricing(ctx context.Context, modelID string) error {
+	pricingModel, err := s.GetPricing(ctx, modelID)
+	if err != nil {
+		return fmt.Errorf("failed to get pricing: %w", err)
+	}
+
+	if err := validatePricing(pricingModel.Pricing); err != nil {
+		return fmt.Errorf("invalid pricing data: %w", err)
+	}
+
+	return nil
+}
+
+// GetPricingHistory retrieves pricing change history
+func (s *PricingService) GetPricingHistory(ctx context.Context, modelID string, limit int) ([]models.PricingHistoryEntry, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	key := fmt.Sprintf("pricing:history:%s", modelID)
+	entries, err := s.redisClient.LRange(ctx, key, 0, int64(limit-1)).Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pricing history: %w", err)
+	}
+
+	history := make([]models.PricingHistoryEntry, 0, len(entries))
+	for _, entryJSON := range entries {
+		var entry models.PricingHistoryEntry
+		if err := json.Unmarshal([]byte(entryJSON), &entry); err != nil {
+			// Skip invalid entries
+			continue
+		}
+		history = append(history, entry)
+	}
+
+	return history, nil
+}
+
+// AddPricingHistory adds entry to pricing change history
+func (s *PricingService) AddPricingHistory(ctx context.Context, modelID string, entry models.PricingHistoryEntry) error {
+	key := fmt.Sprintf("pricing:history:%s", modelID)
+	entryJSON, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("failed to marshal history entry: %w", err)
+	}
+
+	err = s.redisClient.LPush(ctx, key, string(entryJSON)).Err()
+	if err != nil {
+		return fmt.Errorf("failed to add history entry: %w", err)
+	}
+
+	// Keep only last 1000 entries
+	err = s.redisClient.LTrim(ctx, key, 0, 999).Err()
+	if err != nil {
+		return fmt.Errorf("failed to trim history: %w", err)
+	}
+
+	// Set expiry
+	err = s.redisClient.Expire(ctx, key, 30*24*time.Hour).Err() // 30 days
+	if err != nil {
+		return fmt.Errorf("failed to set history expiry: %w", err)
+	}
+
+	return nil
+}
+
+// DeletePricing removes pricing information for a model
+func (s *PricingService) DeletePricing(ctx context.Context, modelID string) error {
+	key := fmt.Sprintf("pricing:%s", modelID)
+	err := s.redisClient.Del(ctx, key).Err()
+	if err != nil {
+		return fmt.Errorf("failed to delete pricing: %w", err)
+	}
+
+	// Remove from models list
+	err = s.redisClient.SRem(ctx, "pricing:models", modelID).Err()
+	if err != nil {
+		return fmt.Errorf("failed to remove from models list: %w", err)
+	}
+
+	// Remove metadata
+	err = s.redisClient.HDel(ctx, "pricing:metadata", modelID).Err()
+	if err != nil {
+		return fmt.Errorf("failed to remove metadata: %w", err)
+	}
+
+	return nil
+}
+
+// validatePricing validates pricing structure
+func validatePricing(pricing models.PricingType) error {
+	if pricing.Input < 0 || pricing.Output < 0 || pricing.Embed < 0 {
+		return fmt.Errorf("pricing values must be non-negative")
+	}
+
+	if pricing.Input > 1000 || pricing.Output > 1000 || pricing.Embed > 1000 {
+		return fmt.Errorf("pricing values seem unrealistic")
+	}
+
+	return nil
+}
+
+// Helper functions for HTTP handlers
+
+// HandleGetPricing HTTP handler for getting pricing
+func (s *PricingService) HandleGetPricing(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	modelID := vars["model_id"]
+
+	if modelID == "" {
+		http.Error(w, "Model ID is required", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	pricingModel, err := s.GetPricing(ctx, modelID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(pricingModel)
+}
+
+// HandleGetAllPricing HTTP handler for getting all pricing
+func (s *PricingService) HandleGetAllPricing(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	pricingInfo, err := s.GetAllPricing(ctx)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(pricingInfo)
+}
+
+// HandleUpdatePricing HTTP handler for updating pricing
+func (s *PricingService) HandleUpdatePricing(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	modelID := vars["model_id"]
+
+	if modelID == "" {
+		http.Error(w, "Model ID is required", http.StatusBadRequest)
+		return
+	}
+
+	var request models.UpdatePricingRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Validate model ID matches
+	if request.ModelID != modelID {
+		http.Error(w, "Model ID mismatch", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	err := s.UpdatePricing(ctx, &request)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":    true,
+		"message":    "Pricing updated successfully",
+		"updated_at": time.Now(),
+		"model_id":   modelID,
+	})
+}
+
+// HandleCalculateCost HTTP handler for calculating cost
+func (s *PricingService) HandleCalculateCost(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	modelID := query.Get("model_id")
+	inputTokensStr := query.Get("input_tokens")
+	outputTokensStr := query.Get("output_tokens")
+
+	if modelID == "" {
+		http.Error(w, "Model ID is required", http.StatusBadRequest)
+		return
+	}
+
+	if inputTokensStr == "" || outputTokensStr == "" {
+		http.Error(w, "Input and output tokens are required", http.StatusBadRequest)
+		return
+	}
+
+	inputTokens, err := strconv.Atoi(inputTokensStr)
+	if err != nil || inputTokens < 0 {
+		http.Error(w, "Invalid input tokens", http.StatusBadRequest)
+		return
+	}
+
+	outputTokens, err := strconv.Atoi(outputTokensStr)
+	if err != nil || outputTokens < 0 {
+		http.Error(w, "Invalid output tokens", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	pricingModel, err := s.GetPricing(ctx, modelID)
+	if err != nil {
+		http.Error(w, "Pricing not found for model", http.StatusNotFound)
+		return
+	}
+
+	cost := pricingModel.CalculateCost(inputTokens, outputTokens)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"model_id":      modelID,
+		"input_tokens":  inputTokens,
+		"output_tokens": outputTokens,
+		"total_cost":    cost,
+		"input_cost":    float64(inputTokens) * pricingModel.GetTokenPrice("input"),
+		"output_cost":   float64(outputTokens) * pricingModel.GetTokenPrice("output"),
+	})
+}
