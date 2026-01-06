@@ -593,6 +593,9 @@ def stripe_webhook():
 def admin_pricing():
     """Админ панель - управление ценами"""
     try:
+        if not pricing_service:
+            return jsonify({"error": "Pricing service not initialized"}), 500
+            
         if request.method == "GET":
             pricing_info = pricing_service.get_pricing_info()
             return jsonify(pricing_info)
@@ -619,6 +622,8 @@ def admin_pricing():
 def admin_update_pricing():
     """Обновление цен из внешнего источника"""
     try:
+        if not pricing_service:
+            return jsonify({"error": "Pricing service not initialized"}), 500
         success = pricing_service.update_from_external_source()
         if success:
             return jsonify({"message": "Pricing updated successfully"})
@@ -679,9 +684,11 @@ def admin_exchange_rates():
         logger.error(f"❌ Exchange rates admin failed: {e}")
         return jsonify({"error": str(e)}), 500
 
-def admin_update_exchange_rates():
+async def admin_update_exchange_rates():
     """Обновление курсов валют"""
     try:
+        if not exchange_service:
+            return jsonify({"error": "Exchange service not initialized"}), 500
         success = await exchange_service.fetch_exchange_rates()
         if success:
             return jsonify({"message": "Exchange rates updated successfully"})
@@ -691,7 +698,7 @@ def admin_update_exchange_rates():
         logger.error(f"❌ Update exchange rates failed: {e}")
         return jsonify({"error": str(e)}), 500
 
-def admin_exchange_rate_sources():
+async def admin_exchange_rate_sources():
     """Управление источниками курсов валют"""
     try:
         # Возвращаем информацию о доступных источниках
@@ -714,9 +721,11 @@ def admin_monitoring():
         logger.error(f"❌ Admin monitoring failed: {e}")
         return jsonify({"error": str(e)}), 500
 
-def admin_alerts():
+async def admin_alerts():
     """Управление алертами"""
     try:
+        if not monitoring_service:
+            return jsonify({"error": "Monitoring service not initialized"}), 500
         # Проверка алертов
         alerts = await monitoring_service.check_alerts()
         return jsonify({"alerts": alerts})
@@ -961,10 +970,19 @@ def serve():
         app.route('/admin/pricing/info', methods=['GET'])(admin_pricing_info)
         app.route('/admin/stats', methods=['GET'])(admin_stats)
         app.route('/admin/exchange-rates', methods=['GET', 'POST'])(admin_exchange_rates)
-        app.route('/admin/exchange-rates/update', methods=['POST'])(admin_update_exchange_rates)
-        app.route('/admin/exchange-rate-sources', methods=['GET'])(admin_exchange_rate_sources)
+        
+        # Async admin routes
+        async def admin_update_exchange_rates_async():
+            return await admin_update_exchange_rates()
+        async def admin_exchange_rate_sources_async():
+            return await admin_exchange_rate_sources()
+        async def admin_alerts_async():
+            return await admin_alerts()
+            
+        app.route('/admin/exchange-rates/update', methods=['POST'])(admin_update_exchange_rates_async)
+        app.route('/admin/exchange-rate-sources', methods=['GET'])(admin_exchange_rate_sources_async)
         app.route('/admin/monitoring', methods=['GET'])(admin_monitoring)
-        app.route('/admin/alerts', methods=['GET'])(admin_alerts)
+        app.route('/admin/alerts', methods=['GET'])(admin_alerts_async)
         app.route('/admin/monitoring/thresholds', methods=['GET', 'POST'])(admin_monitoring_thresholds)
         
         logger.info("✅ HTTP routes configured")

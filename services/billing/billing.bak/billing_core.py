@@ -411,17 +411,27 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
     def calculate_cost(self, model: str, endpoint: str, input_t: int, output_t: int) -> Decimal:
         """Calculate cost using unified pricing system"""
         try:
-            # Get pricing from Pricing Service
-            pricing_response = pricing_stub.GetPricing(billing_pb2.PricingRequest(model=model, endpoint=endpoint))
-            prices = pricing_response.prices
+            # Fallback pricing if external services are not available
+            DEFAULT_PRICING = {
+                "gpt-4o": {"chat_input": 5.00, "chat_output": 15.00, "embed": 0.10},
+                "gpt-4-turbo": {"chat_input": 10.00, "chat_output": 30.00, "embed": 0.13},
+                "claude-3-opus": {"chat_input": 15.00, "chat_output": 75.00},
+                "llama3-70b": {"chat_input": 0.20, "chat_output": 0.60},
+                "text-embedding-3-large": {"embed": 0.130},
+                "voyage-2": {"embed": 0.100},
+                "cohere-embed-v3": {"embed": 0.200},
+            }
+            
+            # Get pricing data (fallback to default)
+            model_pricing = DEFAULT_PRICING.get(model, {"chat_input": 10.00, "chat_output": 30.00, "embed": 0.13})
 
             if endpoint == "chat":
-                input_cost = Decimal(str(prices.chat_input)) / 1_000_000
-                output_cost = Decimal(str(prices.chat_output)) / 1_000_000
+                input_cost = Decimal(str(model_pricing.get("chat_input", 10.00))) / 1_000_000
+                output_cost = Decimal(str(model_pricing.get("chat_output", 30.00))) / 1_000_000
                 total_cost = (Decimal(input_t) * input_cost + Decimal(output_t) * output_cost)
                 return total_cost.quantize(Decimal('0.00001'), ROUND_HALF_UP)
             elif endpoint == "embed":
-                embed_cost = Decimal(str(prices.embed)) / 1_000_000
+                embed_cost = Decimal(str(model_pricing.get("embed", 0.13))) / 1_000_000
                 total_cost = (Decimal(input_t) * embed_cost)
                 return total_cost.quantize(Decimal('0.00001'), ROUND_HALF_UP)
             else:
@@ -441,15 +451,18 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
 
         balance = Decimal(r.get(f"balance:{user_id}") or "0")
 
-        # Get exchange rates from Exchange Rate Service
-        exchange_response = exchange_stub.GetExchangeRates(billing_pb2.ExchangeRequest())
-        rates = exchange_response.rates
+        # Fallback exchange rates if external service is not available
+        EXCHANGE_RATES = {
+            "USD": Decimal("1"),
+            "EUR": Decimal("0.92"),
+            "RUB": Decimal("96.50"),
+        }
 
         try:
             return billing_pb2.GetBalanceResponse(
                 balance_usd=float(balance),
-                balance_rub=float(balance * Decimal(str(rates["RUB"]))),
-                balance_eur=float(balance * Decimal(str(rates["EUR"])))
+                balance_rub=float(balance * EXCHANGE_RATES["RUB"]),
+                balance_eur=float(balance * EXCHANGE_RATES["EUR"])
             )
         except (KeyError, InvalidOperation, ValueError) as e:
             logger.error(f"Exchange rate error: {e}")

@@ -3,8 +3,12 @@
 
 
 import time
+import logging
 from prometheus_client import start_http_server, Summary, Counter, Gauge, Histogram
 from prometheus_client.core import REGISTRY
+
+# Setup logger
+logger = logging.getLogger("metrics")
 
 # Metrics setup
 REQUEST_TIME = Summary('request_processing_seconds', 'Time spent processing request')
@@ -33,8 +37,16 @@ def init_metrics(service_name: str, port: int = 8000):
 def metrics_middleware(f):
     """Decorator for tracking metrics"""
     def wrapper(*args, **kwargs):
-        method = request.method
-        endpoint = request.path
+        # Get request object from args if available
+        request = kwargs.get('request') or (args[0] if args and hasattr(args[0], 'method') else None)
+        
+        if request:
+            method = request.method
+            endpoint = request.path
+        else:
+            method = 'unknown'
+            endpoint = 'unknown'
+            
         start_time = time.time()
 
         # Increment in-progress requests
@@ -42,7 +54,13 @@ def metrics_middleware(f):
 
         try:
             response = f(*args, **kwargs)
-            status = 200 if response.status_code < 400 else response.status_code
+            status = 200
+            
+            # Try to get status code from response
+            if hasattr(response, 'status_code'):
+                status = response.status_code
+            elif isinstance(response, tuple) and len(response) > 1:
+                status = response[1] if isinstance(response[1], int) else 200
 
             # Record metrics
             REQUESTS_TOTAL.labels(method=method, endpoint=endpoint, status=status).inc()

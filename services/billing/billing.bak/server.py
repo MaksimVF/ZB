@@ -560,7 +560,10 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
         r.hincrby(f"usage:daily:{datetime.now():%Y-%m-%d}", model, tokens_used)
 
         # Log transaction for monitoring
-        MONITORING.log_transaction("charge", cost, success=True)
+        try:
+            MONITORING.log_transaction("charge", cost, success=True)
+        except NameError:
+            logger.warning("MONITORING service not initialized, skipping transaction logging")
 
         logger.info(f"Charged {cost:.5f} USD → {user_id} | {model} | {tokens_used} tokens")
         return billing_pb2.BillResponse(
@@ -641,7 +644,10 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
         r.set(balance_key, str(new_balance))
 
         # Log transaction for monitoring
-        MONITORING.log_transaction("reserve", estimated_cost, success=True)
+        try:
+            MONITORING.log_transaction("reserve", estimated_cost, success=True)
+        except NameError:
+            logger.warning("MONITORING service not initialized, skipping transaction logging")
 
         logger.info(f"Reserved {estimated_cost:.5f} USD → {user_id} | {reservation_id}")
         return billing_pb2.ReserveResponse(
@@ -734,7 +740,10 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
         r.hincrby(f"usage:daily:{datetime.now():%Y-%m-%d}", model, input_tokens_actual + output_tokens_actual)
 
         # Log transaction for monitoring
-        MONITORING.log_transaction("commit", actual_cost, success=True)
+        try:
+            MONITORING.log_transaction("commit", actual_cost, success=True)
+        except NameError:
+            logger.warning("MONITORING service not initialized, skipping transaction logging")
 
         logger.info(f"Committed {actual_cost:.5f} USD → {user_id} | {reservation_id}")
         return billing_pb2.CommitResponse(
@@ -814,7 +823,10 @@ class BillingService(billing_pb2_grpc.BillingServiceServicer):
         })
 
         # Log transaction for monitoring
-        MONITORING.log_transaction("adjust", amount_usd, success=True)
+        try:
+            MONITORING.log_transaction("adjust", amount_usd, success=True)
+        except NameError:
+            logger.warning("MONITORING service not initialized, skipping transaction logging")
 
         return billing_pb2.AdjustBalanceResponse(success=True, new_balance_usd=float(new))
 
@@ -1274,7 +1286,11 @@ def admin_monitoring():
 
     try:
         # Get metrics from monitoring system
-        metrics = MONITORING.get_metrics()
+        try:
+            metrics = MONITORING.get_metrics()
+        except NameError:
+            logger.warning("MONITORING service not initialized, using empty metrics")
+            metrics = {"metrics": {}, "thresholds": {}}
 
         # Get recent alerts
         alerts = []
@@ -1295,7 +1311,7 @@ def admin_monitoring():
             "last_exchange_update": EXCHANGE_MANAGER.last_updated,
             "last_pricing_update": PRICING_MANAGER.last_updated,
             "reservation_ttl": RESERVATION_TTL,
-            "reservation_ttl_healthy": RESERVATION_TTL >= MONITORING.alert_thresholds["reservation_ttl"]
+            "reservation_ttl_healthy": RESERVATION_TTL >= (MONITORING.alert_thresholds.get("reservation_ttl", 300) if 'MONITORING' in globals() else 300)
         }
 
         return jsonify({
@@ -1347,7 +1363,10 @@ def admin_monitoring_thresholds():
 
     if request.method == "GET":
         # Get current thresholds
-        return jsonify(MONITORING.alert_thresholds), 200
+        try:
+            return jsonify(MONITORING.alert_thresholds), 200
+        except NameError:
+            return jsonify({"error": "MONITORING service not initialized"}), 500
 
     elif request.method == "POST":
         # Update thresholds
@@ -1359,6 +1378,8 @@ def admin_monitoring_thresholds():
             raise ValidationError("Invalid thresholds format")
 
         try:
+            if 'MONITORING' not in globals():
+                raise ExternalServiceError("MONITORING service not initialized")
             with MONITORING.lock:
                 for key, value in data.items():
                     if key in MONITORING.alert_thresholds:
