@@ -19,10 +19,15 @@ services:
     networks:
       - server_network
   model-proxy:
-    build: ./services/model-proxy
+    build: ./services/model-proxy-bifrost
     ports: ["8100:8100", "50061:50061", "50062:50062"]
+    volumes:
+      - ./certs:/certs:ro
     networks:
       - server_network
+    environment:
+      - BIFROST_URL=http://localhost:8100
+      - LOG_LEVEL=info
   head:
     build: ./services/head-go
     ports: ["50055:50055","9001:9001"]
