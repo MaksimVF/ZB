@@ -1,0 +1,63 @@
+
+{
+  "providers": {
+    "openai": {
+      "api_key": "OPENAI_API_KEY",
+      "models": ["gpt-3.5-turbo", "gpt-4", "gpt-4o-mini"],
+      "default_model": "gpt-3.5-turbo"
+    },
+    "anthropic": {
+      "api_key": "ANTHROPIC_API_KEY",
+      "models": ["claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307"],
+      "default_model": "claude-3-sonnet-20240229"
+    },
+    "mistral": {
+      "api_key": "MISTRAL_API_KEY",
+      "models": ["mistral-tiny", "mistral-small", "mistral-medium"],
+      "default_model": "mistral-small"
+    },
+    "groq": {
+      "api_key": "GROQ_API_KEY",
+      "models": ["llama3-8b-8192", "llama3-70b-8192", "mixtral-8x7b-32768"],
+      "default_model": "llama3-70b-8192"
+    }
+  },
+  "fallbacks": {
+    "openai": ["anthropic", "mistral", "groq"],
+    "anthropic": ["openai", "mistral", "groq"],
+    "mistral": ["openai", "anthropic", "groq"],
+    "groq": ["openai", "anthropic", "mistral"]
+  },
+  "load_balancing": {
+    "strategy": "round_robin",
+    "weights": {
+      "openai": 40,
+      "anthropic": 30,
+      "mistral": 20,
+      "groq": 10
+    }
+  },
+  "plugins": {
+    "semantic_cache": {
+      "enabled": true,
+      "ttl": 3600,
+      "similarity_threshold": 0.9
+    },
+    "logging": {
+      "enabled": true,
+      "level": "info"
+    }
+  },
+  "api": {
+    "port": 8100,
+    "host": "0.0.0.0",
+    "timeout": 30,
+    "max_request_size": "10MB"
+  },
+  "grpc": {
+    "enabled": true,
+    "port": 50061,
+    "host": "0.0.0.0"
+  }
+}
+
